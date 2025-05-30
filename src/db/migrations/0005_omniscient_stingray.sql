@@ -1,0 +1,1 @@
+ALTER TABLE "employees_salary" ALTER COLUMN "rate_divisor" SET DATA TYPE numeric(10, 2);

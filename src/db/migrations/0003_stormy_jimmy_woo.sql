@@ -1,0 +1,1 @@
+ALTER TABLE "employees_general_info" ADD COLUMN "perra_ibig_number" varchar(20);

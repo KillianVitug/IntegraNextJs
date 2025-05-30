@@ -1,0 +1,1 @@
+ALTER TABLE "employees_general_info" ALTER COLUMN "tax_status" SET DATA TYPE tax_status;
