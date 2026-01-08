@@ -1,0 +1,1 @@
+ALTER TABLE "employees_files" ALTER COLUMN "group_id" DROP DEFAULT;

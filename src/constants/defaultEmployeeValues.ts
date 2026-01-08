@@ -62,6 +62,7 @@ export const defaultEmployeeValues: InsertEmployeeSchemaType = {
     firstName: "",
     lastName: "",
     middleName: "",
+    middleInitial: "",
     suffix: "",
     generalInfo: defaultGeneralInfo,
     salary: defaultSalary,

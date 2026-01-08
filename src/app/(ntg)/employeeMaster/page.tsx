@@ -1,7 +1,7 @@
 import EmployeeSearch from "@/app/(ntg)/employeeMaster/EmployeeSearch";
 import { getEmployeeSearchResults } from "@/lib/queries/getEmployeeSearchResults";
 import EmployeeTable from "@/app/(ntg)/employeeMaster/EmployeeTable";
-import { getOpenEmployees } from "@/lib/queries/getOpenEmployees";
+import { getOpenEmployees } from "@/lib/queries/getEmployee";
 
 export const metadata = {
     title: "Employee Master",
@@ -25,8 +25,6 @@ export default async function EmployeeMaster({
     }
 
     const results = await getEmployeeSearchResults(searchText)
-
-
     return (
         <>
             <EmployeeSearch />

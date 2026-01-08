@@ -48,35 +48,78 @@ export default function EmployeeForm({
   const router = useRouter();
   const generatedId = uuidv4();
 
-  const searchParams = useSearchParams()
-  const hasEmployeeId = searchParams.has("employeeId")
+  const searchParams = useSearchParams();
+  const hasEmployeeId = searchParams.has("employeeId");
 
-  const emptyValues :InsertEmployeeSchemaType = {
+  const emptyValues: InsertEmployeeSchemaType = {
     id: generatedId,
     employeeNo: defaultEmployeeValues.employeeNo,
-    firstName:defaultEmployeeValues.firstName,
+    firstName: defaultEmployeeValues.firstName,
     lastName: defaultEmployeeValues.lastName,
     middleName: defaultEmployeeValues.middleName,
+    middleInitial: defaultEmployeeValues.middleInitial,
     suffix: defaultEmployeeValues.suffix,
     generalInfo: defaultGeneralInfo,
-    salary:  defaultSalary,
+    salary: defaultSalary,
     otherReferences: defaultOtherReferences,
-    timekeeping:  defaultTimekeeping,
-    recurringEntries: []
+    timekeeping: defaultTimekeeping,
+    recurringEntries: [],
   };
-  
-  const defaultValues: InsertEmployeeSchemaType = hasEmployeeId ? {
-    id: employee?.id || generatedId,
-    employeeNo: employee?.employeeNo ?? defaultEmployeeValues.employeeNo,
-    firstName: employee?.firstName ?? defaultEmployeeValues.firstName,
-    lastName: employee?.lastName ?? defaultEmployeeValues.lastName,
-    middleName: employee?.middleName ?? defaultEmployeeValues.middleName,
-    suffix: employee?.suffix ?? defaultEmployeeValues.suffix,
-    generalInfo: employee?.generalInfo ?? { ...defaultGeneralInfo, employeeId: employee?.id || generatedId },
-    salary: employee?.salary ?? { ...defaultSalary, employeeId: employee?.id || generatedId },
-    otherReferences: employee?.otherReferences ?? { ...defaultOtherReferences, employeeId: employee?.id || generatedId },
-    timekeeping: employee?.timekeeping ?? { ...defaultTimekeeping, employeeId: employee?.id || generatedId },
-  } : emptyValues;
+
+  const defaultValues: InsertEmployeeSchemaType = hasEmployeeId
+    ? {
+        id: employee?.id || generatedId,
+        employeeNo: employee?.employeeNo ?? defaultEmployeeValues.employeeNo,
+        firstName: employee?.firstName ?? defaultEmployeeValues.firstName,
+        lastName: employee?.lastName ?? defaultEmployeeValues.lastName,
+        middleName: employee?.middleName ?? defaultEmployeeValues.middleName,
+        middleInitial:
+          employee?.middleInitial ?? defaultEmployeeValues.middleInitial,
+        suffix: employee?.suffix ?? defaultEmployeeValues.suffix,
+        generalInfo: employee?.generalInfo
+          ? {
+              ...employee.generalInfo,
+              departmentId: employee.generalInfo.departmentId
+                ? String(employee.generalInfo.departmentId)
+                : "",
+            }
+          : {
+              ...defaultGeneralInfo,
+              employeeId: employee?.id || generatedId,
+              departmentId: "",
+            },
+        salary: employee?.salary
+          ? {
+              ...employee.salary,
+              slvlGroupId:
+                employee?.salary?.slvlGroupId != null
+                  ? String(employee.salary.slvlGroupId)
+                  : "",
+            }
+          : {
+              ...defaultSalary,
+              employeeId: employee?.id || generatedId,
+              slvlGroupId: "",
+            },
+        otherReferences: employee?.otherReferences
+          ? {
+              ...employee.otherReferences,
+              positionId:
+                employee?.otherReferences?.positionId != null
+                  ? String(employee.otherReferences.positionId)
+                  : "",
+            }
+          : {
+              ...defaultOtherReferences,
+              employeeId: employee?.id || generatedId,
+              positionId: "",
+            },
+        timekeeping: employee?.timekeeping ?? {
+          ...defaultTimekeeping,
+          employeeId: employee?.id || generatedId,
+        },
+      }
+    : emptyValues;
 
   const form = useForm<InsertEmployeeSchemaType>({
     mode: "onBlur",
@@ -85,9 +128,8 @@ export default function EmployeeForm({
   });
 
   useEffect(() => {
-    form.reset(hasEmployeeId ? defaultValues : emptyValues)
-  }, [searchParams.get("employeeId")])  // eslint-disable-line react-hooks/exhaustive-deps
-
+    form.reset(hasEmployeeId ? defaultValues : emptyValues);
+  }, [searchParams.get("employeeId")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const {
     execute: executeSave,
@@ -102,10 +144,7 @@ export default function EmployeeForm({
       router.refresh(); // Seamlessly reloads the current route without a full refresh
     }
   }
-
   const { register, control } = form;
-
-  
   return (
     <FormProvider {...form}>
       <div className="flex flex-col gap-1 sm:px-8">
@@ -121,7 +160,7 @@ export default function EmployeeForm({
           onSubmit={form.handleSubmit(submitForm, (errors) =>
             console.log("Form validation errors:", errors)
           )}
-          className="flex flex-col md:flex-row gap-4 md:gap-8"
+          className="flex flex-col md:flex-row gap-4 md:gap-8 mb-6"
         >
           <div className="flex flex-col gap-4 w-full max-w-xs">
             <InputWithLabel<InsertEmployeeSchemaType>
@@ -147,6 +186,11 @@ export default function EmployeeForm({
             <InputWithLabel<InsertEmployeeSchemaType>
               fieldTitle="Middle Name"
               nameInSchema="middleName"
+              register={register}
+            />
+            <InputWithLabel<InsertEmployeeSchemaType>
+              fieldTitle="Middle Initial"
+              nameInSchema="middleInitial"
               register={register}
             />
 
@@ -185,7 +229,7 @@ export default function EmployeeForm({
             >
               Reset
             </Button>
-            
+
             <Button
               type="button"
               variant="outline"
@@ -195,17 +239,16 @@ export default function EmployeeForm({
               Back
             </Button>
           </div>
-          </form>
-          <div className="flex-grow overflow-auto">
-            <TabsSection
-              employee={employee}
-              departments={departments}
-              positions={positions}
-              slvlGroups={slvlGroups}
-              form={form}
-            />
-          </div>
-       
+        </form>
+        <div className="flex-grow overflow-auto">
+          <TabsSection
+            employee={employee}
+            departments={departments}
+            positions={positions}
+            slvlGroups={slvlGroups}
+            form={form}
+          />
+        </div>
       </div>
     </FormProvider>
   );

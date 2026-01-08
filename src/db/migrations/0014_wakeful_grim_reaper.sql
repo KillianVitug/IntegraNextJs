@@ -1,0 +1,1 @@
+ALTER TABLE "employees_leave_records" ADD COLUMN "leave_status" "leave_status" NOT NULL DEFAULT 'Pending';

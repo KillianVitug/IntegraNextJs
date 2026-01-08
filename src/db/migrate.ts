@@ -4,6 +4,8 @@ import { neon } from "@neondatabase/serverless";
 import * as schema from "./schema"; // Adjust path as needed
 import { config } from "dotenv";
 
+
+
 config({ path: ".env.local" });
 
 // Use HTTP client instead of pool

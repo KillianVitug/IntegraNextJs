@@ -1,8 +1,7 @@
 "use client";
-
-import { differenceInMonths, differenceInYears } from "date-fns";
 import SickandLeaveFilter from "./SickandLeaveFilter";
-import type { SickAndLeaveResultsType } from "@/lib/queries/getSickAndLeave";
+import type { SickAndLeaveSearchResultsType } from "@/lib/queries/getSickAndLeaveSearchResults"
+import { getLeaveRecordsByYear } from "@/app/actions/leaveAction";
 
 import {
   createColumnHelper,
@@ -27,7 +26,6 @@ import {
 } from "@/components/ui/table";
 
 import { CircleCheckIcon, CircleXIcon, ArrowUpDown, ArrowDown, ArrowUp } from "lucide-react";
-
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useMemo, useEffect } from "react";
 import { usePolling } from "@/hooks/usePolling";
@@ -35,13 +33,17 @@ import { Button } from "@/components/ui/button";
 import Filter from "@/components/react-table/Filter";
 
 type Props = {
-  data: SickAndLeaveResultsType;
+  data: SickAndLeaveSearchResultsType;
 };
 
-type RowType = SickAndLeaveResultsType[0] & {
+type RowType = SickAndLeaveSearchResultsType                                                                                              [0] & {
   yearsOfService: number;
   monthsOfService: number;
+  usedSickLeave?: number;
+  usedVacationLeave?: number;
 };
+
+// const PDFLink = dynamic(() => import("@/components/PDFLink"), { ssr: false });
 
 export default function SickandLeaveTable({ data }: Props) {
   const router = useRouter();
@@ -49,14 +51,40 @@ export default function SickandLeaveTable({ data }: Props) {
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
   const [sorting, setSorting] = useState<SortingState>([
     {
-        id: "employeeNo",
-        desc: false //false for ascending
+      id: "employeeNo",
+      desc: false //false for ascending
     }
   ])
   usePolling(searchParams.get("searchText"), 300000)
   const [asOfDate, setAsOfDate] = useState(new Date());
   const [filterYear, setFilterYear] = useState(String(new Date().getFullYear()));
   const [filteredData, setFilteredData] = useState<RowType[]>([]);
+
+  const [leaveUsageMap, setLeaveUsageMap] = useState<Record<string, { usedSL: number; usedVL: number }>>({});
+
+  // Fetch approved leave records for the selected year
+  useEffect(() => {
+    async function fetchLeaveUsage() {
+      const result = await getLeaveRecordsByYear(Number(filterYear));
+      if (!result.data) {
+        setLeaveUsageMap({});
+        return;
+      }
+      // Only "Approved" leaves
+      const approved = result.data.filter((lr: any) => lr.leaveStatus === "Approved");
+      // Aggregate by employeeId and leaveType
+      const usage: Record<string, { usedSL: number; usedVL: number }> = {};
+      approved.forEach((lr: any) => {
+        if (!usage[lr.employeeId]) {
+          usage[lr.employeeId] = { usedSL: 0, usedVL: 0 };
+        }
+        if (lr.leaveType === "SL") usage[lr.employeeId].usedSL += Number(lr.noOfDays);
+        if (lr.leaveType === "VL") usage[lr.employeeId].usedVL += Number(lr.noOfDays);
+      });
+      setLeaveUsageMap(usage);
+    }
+    fetchLeaveUsage();
+  }, [filterYear]);
 
   // Compute service years/months based on `asOfDate`
   useEffect(() => {
@@ -70,19 +98,17 @@ export default function SickandLeaveTable({ data }: Props) {
       const yearsOfService = totalMonths / 12;
       const monthsOfService = totalMonths;    // total months
 
-
       return {
         ...item,
         yearsOfService,
         monthsOfService,
       };
     });
-
     const filteredByYear = computed.filter((item) => {
-    if (!item.dateHired) return false;
-    const hiredDate = new Date(item.dateHired);
-    return hiredDate.getFullYear() <= parseInt(filterYear);
-  });
+      if (!item.dateHired) return false;
+      const hiredDate = new Date(item.dateHired);
+      return hiredDate.getFullYear() <= parseInt(filterYear);
+    });
 
     setFilteredData(filteredByYear);
   }, [data, asOfDate, filterYear]);
@@ -98,16 +124,18 @@ export default function SickandLeaveTable({ data }: Props) {
     return page ? parseInt(page) - 1 : 0;
   }, [searchParams]);
 
-  const columnHeaderArray: Array<keyof RowType | "fullName"> = [
-  "employeeNo",
-  "fullName",
-  "dateHired",
-  "yearsOfService",
-  "monthsOfService",
-  "department",
-  "sickLeave",
-  "vacationLeave",
-];
+  const columnHeaderArray: Array<keyof RowType | "fullName"| "usedSickLeave" | "usedVacationLeave"> = [
+    "employeeNo",
+    "fullName",
+    "dateHired",
+    "yearsOfService",
+    "monthsOfService",
+    "department",
+    "sickLeave",
+    "vacationLeave",
+    "usedSickLeave",       
+    "usedVacationLeave",   
+  ];
 
   const columnHelper = createColumnHelper<RowType>();
 
@@ -117,33 +145,44 @@ export default function SickandLeaveTable({ data }: Props) {
       id: columnName,
       header: ({ column }) => {
         return (
-            <Button
-                variant="ghost"
-                className="pl-1 w-full flex justify-between"
-                onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-            >
-                {columnName[0].toUpperCase() + columnName.slice(1)}
+          <Button
+            variant="ghost"
+            className="pl-1 w-full flex justify-between"
+            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+          >
+            {columnName[0].toUpperCase() + columnName.slice(1)}
 
-                {column.getIsSorted() === "asc" && (
-                    <ArrowUp className="ml-2 h-4 w-4" />
-                )}
+            {column.getIsSorted() === "asc" && (
+              <ArrowUp className="ml-2 h-4 w-4" />
+            )}
 
-                {column.getIsSorted() === "desc" && (
-                    <ArrowDown className="ml-2 h-4 w-4" />
-                )}
+            {column.getIsSorted() === "desc" && (
+              <ArrowDown className="ml-2 h-4 w-4" />
+            )}
 
-                {column.getIsSorted() !== "desc" && column.getIsSorted() !== "asc" && (
-                    <ArrowUpDown className="ml-2 h-4 w-4" />
-                )}
-            </Button>
-            )
-        },
-        cell: ({ getValue }) => {
-        const value = getValue();
-        return typeof value === "number" ? value.toFixed(2) : value;
-        }
-    });
+            {column.getIsSorted() !== "desc" && column.getIsSorted() !== "asc" && (
+              <ArrowUpDown className="ml-2 h-4 w-4" />
+            )}
+          </Button>
+        )
+      },
+      cell: ({ getValue }) => {
+      const value = getValue();
+      // List all columns you want to show as integer
+      if (
+        columnName === "sickLeave" ||
+        columnName === "vacationLeave" ||
+        columnName === "usedSickLeave" ||
+        columnName === "usedVacationLeave"
+      ) {
+        // If value is not null/undefined, round and display as integer
+        return value != null ? Math.round(Number(value)) : 0;
+      }
+      // Default rendering
+      return typeof value === "number" ? value.toFixed(2) : value;
+    }
   });
+});
 
   const table = useReactTable({
     data: filteredData,
@@ -169,10 +208,10 @@ export default function SickandLeaveTable({ data }: Props) {
     const currentPageIndex = table.getState().pagination.pageIndex
     const pageCount = table.getPageCount()
 
-    if(pageCount <= currentPageIndex && currentPageIndex > 0) {
+    if (pageCount <= currentPageIndex && currentPageIndex > 0) {
       const params = new URLSearchParams(searchParams.toString())
-      params.set('page','1')
-      router.replace(`?${params.toString()}`, {scroll: false})
+      params.set('page', '1')
+      router.replace(`?${params.toString()}`, { scroll: false })
     }
   }, [table.getState().columnFilters]) // eslint-disable-line react/hooks/exhaustive-deps
 
@@ -193,20 +232,20 @@ export default function SickandLeaveTable({ data }: Props) {
                         {header.isPlaceholder
                           ? null
                           : flexRender(
-                              header.column.columnDef.header,
-                              header.getContext()
-                            )}
+                            header.column.columnDef.header,
+                            header.getContext()
+                          )}
                       </div>
                       {header.column.getCanFilter() ? (
                         <div className="grid place-content-center">
-                            <Filter
-                              column={header.column}
-                              filteredRows={table.
-                              getFilteredRowModel().rows.map(row=> row.getValue(header.column.id))
-                              }
-                            />
+                          <Filter
+                            column={header.column}
+                            filteredRows={table.
+                              getFilteredRowModel().rows.map(row => row.getValue(header.column.id))
+                            }
+                          />
                         </div>
-                      ): null }
+                      ) : null}
                     </TableHead>
                   );
                 })}
@@ -237,66 +276,67 @@ export default function SickandLeaveTable({ data }: Props) {
       <div className="flex justify-between items-center gap-1 flex-wrap">
         <div>
           <p className="whitespace-nowrap font-bold">
-            {`Page ${
-              table.getState().pagination.pageIndex + 1
-            } of ${Math.max(1, table.getPageCount())}`}
+            {`Page ${table.getState().pagination.pageIndex + 1
+              } of ${Math.max(1, table.getPageCount())}`}
             &nbsp;&nbsp;
-            {`[${table.getFilteredRowModel().rows.length} ${
-              table.getFilteredRowModel().rows.length !== 1
+            {`[${table.getFilteredRowModel().rows.length} ${table.getFilteredRowModel().rows.length !== 1
                 ? "total results"
                 : "result"
-            }]`}
+              }]`}
           </p>
         </div>
         <div className="flex flex-row gap-1">
-        <div className="flex flex-row gap-1">
-          <Button
-            variant="outline"
-            onClick={() => router.refresh()}
-          >
-            Refresh Data
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => table.resetSorting()}
-          >
-            Reset Sorting
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => table.resetColumnFilters()}
-          >
-            Reset Filters
-          </Button>
+          <div className="flex flex-row gap-1">
+
+            {/* <PDFLink data={filteredData} asOfDate={asOfDate} filterYear={filterYear} /> */}
+
+            <Button
+              variant="outline"
+              onClick={() => router.refresh()}
+            >
+              Refresh Data
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => table.resetSorting()}
+            >
+              Reset Sorting
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => table.resetColumnFilters()}
+            >
+              Reset Filters
+            </Button>
           </div>
           <div className="flex flex-row gap-1">
-          <Button
-            variant="outline"
-            onClick={() => {
-              const newIndex = table.getState().pagination.pageIndex - 1
-              table.setPageIndex(newIndex)
-              const params = new URLSearchParams(searchParams.toString())
-              params.set("page", (newIndex + 1).toString())
-              router.replace(`?${params.toString()}`, { scroll: false })
-          }}
-            disabled={!table.getCanPreviousPage()}
-          >
-            Previous
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => {
-              const newIndex = table.getState().pagination.pageIndex + 1
-              table.setPageIndex(newIndex)
-              const params = new URLSearchParams(searchParams.toString())
-              params.set("page", (newIndex + 1).toString())
-              router.replace(`?${params.toString()}`, { scroll: false })
-          }}
-            disabled={!table.getCanNextPage()}
-          >
-            Next
-          </Button>
-        </div>
+            <Button
+              variant="outline"
+              onClick={() => {
+                const newIndex = table.getState().pagination.pageIndex - 1
+                table.setPageIndex(newIndex)
+                const params = new URLSearchParams(searchParams.toString())
+                params.set("page", (newIndex + 1).toString())
+                router.replace(`?${params.toString()}`, { scroll: false })
+              }}
+              disabled={!table.getCanPreviousPage()}
+            >
+              Previous
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                const newIndex = table.getState().pagination.pageIndex + 1
+                table.setPageIndex(newIndex)
+                const params = new URLSearchParams(searchParams.toString())
+                params.set("page", (newIndex + 1).toString())
+                router.replace(`?${params.toString()}`, { scroll: false })
+              }}
+              disabled={!table.getCanNextPage()}
+            >
+              Next
+            </Button>
+          </div>
         </div>
       </div>
     </div>

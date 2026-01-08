@@ -2,7 +2,6 @@
 
 import { getEmployee } from "@/lib/queries/getEmployee";
 import { BackButton } from "@/components/BackButton";
-import TabsSection from "@/app/(ntg)/employeeMaster/form/TabSection";
 import EmployeeForm from "@/app/(ntg)/employeeMaster/form/EmployeeForm";
 import { fetchDepartments, fetchSlVl, fetchPositions } from "@/lib/queries/fetchLookupData";
 

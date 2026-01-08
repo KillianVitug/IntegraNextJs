@@ -34,8 +34,53 @@ export function Header() {
                         ]}
                     />
 
-                    <NavButton href="/leaves" label="Leaves" icon={File} />
+                    <NavButtonMenu
+                        icon={File}
+                        label="Leave Menu"
+                        aria-label='Leave Menu'
+                        choices={[
+                            { title: "Used Leaves and Services", href: "/leaves" },
+                            { title: "Create Leave Request", href: "/leaves/form" }
+                        ]}
+                    />
 
+                    <NavButton href="/salaryAdjustment" label="Salary Adjustment" icon={File} />
+
+                    <NavButtonMenu
+                        icon={File}
+                        label="Loan Menu"
+                        aria-label='Loan Menu'
+                        choices={[
+                            { title: "Employee Loan Table", href: "/loans" },
+                            { title: "Create Employee Loan", href: "/loans/form" }
+                        ]}
+                    />
+
+                    <NavButtonMenu
+                        icon={File}
+                        label="Settings"
+                        aria-label='Loan Menu'
+                        choices={[
+                            { title: "Account Codes", href: "/constants/accountCode/form" },
+                            { title: "Holiday Codes", href: "/constants/holidayCode/form" },
+                            { title: "LeaveType Codes", href: "/constants/leaveTypeCode/form" },
+                            { title: "SL/VL Group Codes", href: "/constants/slvlGroupCode/form" },
+                            { title: "Departments", href: "/constants/departmentCode/form" },
+                            { title: "Positions", href: "/constants/positionCode/form" },
+                            { title: "Payroll Codes", href: "/constants/payrollCode" },
+                        ]}
+                    />
+
+
+                    <NavButtonMenu
+                        icon={File}
+                        label="File Menu"
+                        aria-label='File Menu'
+                        choices={[
+                            { title: "Employee File Table", href: "/employeeFiles" },
+                            { title: "Upload Employee File", href: "/employeeFiles/form" }
+                        ]}
+                    />
                     <ModeToggle />
 
                     <Button

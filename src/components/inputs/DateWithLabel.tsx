@@ -13,6 +13,7 @@ type Props = {
   nameInSchema: string;
   control?: Control<any>;
   value?: string;
+  
   onChange?: (val: string) => void;
 };
 
@@ -44,17 +45,20 @@ export function DateWithLabel({ fieldTitle, nameInSchema, control, value, onChan
                   <CalendarIcon className="ml-auto h-4 w-4 text-gray-500" />
                 </Button>
               </PopoverTrigger>
-              <PopoverContent align="start" className="p-0">
-                <Calendar
-                  className="!w-auto"
-                  mode="single"
-                  selected={field.value ? new Date(field.value) : undefined}
-                  onSelect={(date) => {
-                    field.onChange(date ? format(date, "yyyy-MM-dd") : "");
-                    setOpen(false);
-                  }}
-                  initialFocus
-                />
+              <PopoverContent className="w-auto overflow-hidden p-0" align="start">
+              <Calendar
+                className="rounded-md border shadow-sm"
+                mode="single"
+                captionLayout="dropdown"   // 👈 Enable month/year dropdowns
+                fromYear={1950}            // 👈 Start year
+                toYear={2050}              // 👈 End year
+                selected={field.value ? new Date(field.value) : undefined}
+                onSelect={(date) => {
+                  field.onChange(date ? format(date, "yyyy-MM-dd") : "");
+                  setOpen(false);
+                }}
+                initialFocus
+              />
               </PopoverContent>
             </Popover>
           )}

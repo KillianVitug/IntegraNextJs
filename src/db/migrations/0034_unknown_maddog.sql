@@ -1,0 +1,1 @@
+ALTER TABLE "employees_loans" ALTER COLUMN "loan_payment_date" DROP NOT NULL;

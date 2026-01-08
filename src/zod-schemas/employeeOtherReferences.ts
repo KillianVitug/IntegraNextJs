@@ -6,6 +6,7 @@ export const insertEmployeeOtherReferencesSchema = createInsertSchema(employeesO
     id: z.number().optional(),
     employeeId: z.string().uuid().optional(),
     age: z.coerce.number().nullable().optional(),
+    positionId: z.string().nullable().optional(),
 });
 export const selectEmployeeOtherReferencesSchema = createSelectSchema(employeesOtherReferences);
 

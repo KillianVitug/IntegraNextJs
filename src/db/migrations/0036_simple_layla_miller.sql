@@ -1,0 +1,1 @@
+ALTER TABLE "employees_other_references" ADD COLUMN "email" varchar(50);

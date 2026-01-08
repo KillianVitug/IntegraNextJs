@@ -1,7 +1,7 @@
 "use client";
 
-import React from "react";
-import { useFormContext } from "react-hook-form";
+import React, { useEffect } from "react";
+import { useFormContext, useWatch } from "react-hook-form";
 import { enumToSelectOptions } from "@/utils/enumHelpers";
 import { civilStatusEnum, genderEnum } from "@/db/schema";
 
@@ -16,7 +16,28 @@ type Props = {
 };
 
 export default function ReferencesTab({ positions }: Props) {
-  const { register, control } = useFormContext<InsertEmployeeSchemaType>();
+  const { register, control, setValue } = useFormContext<InsertEmployeeSchemaType>();
+
+  // Watch the birthday field
+  const birthday = useWatch({
+    control,
+    name: "otherReferences.birthday",
+  });
+
+  useEffect(() => {
+    if (birthday) {
+      const birthDate = new Date(birthday);
+      const today = new Date();
+      let age = today.getFullYear() - birthDate.getFullYear();
+      const m = today.getMonth() - birthDate.getMonth();
+      if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+        age--;
+      }
+      setValue("otherReferences.age", isNaN(age) ? undefined : age);
+    } else {
+      setValue("otherReferences.age", undefined);
+    }
+  }, [birthday, setValue]);
 
   return (
     <div className="p-4">
@@ -49,6 +70,12 @@ export default function ReferencesTab({ positions }: Props) {
           placeholder="Enter Address"
         />
         <InputWithLabel
+          fieldTitle="Email"
+          nameInSchema="otherReferences.email"
+          register={register}
+          placeholder="Enter Email"
+        />
+        <InputWithLabel
           fieldTitle="Telephone No."
           nameInSchema="otherReferences.telephoneNo"
           register={register}
@@ -64,8 +91,9 @@ export default function ReferencesTab({ positions }: Props) {
           nameInSchema="otherReferences.age"
           register={register}
           placeholder=""
-          type="number" // Ensure input is numeric
-          {...register("otherReferences.age", { valueAsNumber: true })}
+          type="number"
+          disabled
+          
         />
         <SelectWithLabel
           fieldTitle="Civil Status"

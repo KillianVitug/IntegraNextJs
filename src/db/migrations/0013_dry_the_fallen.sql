@@ -1,0 +1,1 @@
+ALTER TABLE "employees_leave_records" DROP COLUMN "leave_status";

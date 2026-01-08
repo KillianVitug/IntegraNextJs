@@ -69,7 +69,7 @@ export default function EmployeeTable({ data }: Props) {
     "Position",
     "Address",
     "Telephone",
-    "RestDay",
+    "Email",
   ];
 
   const columnHelper = createColumnHelper<RowType>();

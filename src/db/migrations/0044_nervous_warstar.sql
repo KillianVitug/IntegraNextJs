@@ -1,0 +1,1 @@
+ALTER TABLE "position" ALTER COLUMN "id" SET DATA TYPE integer;

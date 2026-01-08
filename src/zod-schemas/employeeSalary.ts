@@ -27,9 +27,22 @@ export const insertEmployeeSalarySchema = createInsertSchema(employeesSalary, {
     cola: numericString,
     rateDivisor: numericString,
     billingRate: numericString,
-    slvlGroupId: z.coerce.number().nullable(),
+    slvlGroupId: z.string().nullable().optional(),
 });
+
+// New schema for salary updates (excludes cola and slvlGroupId)
+export const updateEmployeeSalarySchema = z.object({
+  dailyRate: numericString,
+  monthlyRate: numericString,
+  monthlyAllowance: numericString,
+  dailyAllowance: numericString,
+  rateDivisor: numericString,
+  billingRate: numericString,
+  slvlGroupId: z.string().nullable().optional(),
+});
+
 export const selectEmployeeSalarySchema = createSelectSchema(employeesSalary);
 
 export type InsertEmployeeSalarySchemaType = z.infer<typeof insertEmployeeSalarySchema>;
+export type UpdateEmployeeSalarySchemaType = z.infer<typeof updateEmployeeSalarySchema>;
 export type SelectEmployeeSalarySchemaType = z.infer<typeof selectEmployeeSalarySchema>;

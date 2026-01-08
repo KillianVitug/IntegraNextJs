@@ -1,0 +1,1 @@
+ALTER TABLE "employees_files" ALTER COLUMN "file_extension" SET DATA TYPE varchar(100);

@@ -26,7 +26,7 @@ export default function GeneralTab({ departments }: Props) {
   const { register, control } = useFormContext<InsertEmployeeSchemaType>();
   return (
     <div className="p-4">
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-3 gap-3 mb-6">
         <DateWithLabel
           fieldTitle="Date Hired"
           nameInSchema="generalInfo.dateHired"
@@ -60,7 +60,7 @@ export default function GeneralTab({ departments }: Props) {
           nameInSchema="generalInfo.departmentId"
           control={control}
           data={departments.map((dept) => ({
-            id: dept.id.toString(),
+            id: String(dept.id),
             name: dept.name,
           }))}
         />
@@ -82,41 +82,53 @@ export default function GeneralTab({ departments }: Props) {
           nameInSchema="generalInfo.clearanceDate"
           control={control}
         />
-        <InputWithLabel
-          fieldTitle="SSS No."
-          nameInSchema="generalInfo.sssNumber"
-          placeholder="XX-XXXXXXX-X"
-          register={register}
-        />
-        <InputWithLabel
-          fieldTitle="Tax ID No."
-          nameInSchema="generalInfo.taxIdNumber"
-          placeholder="XXX-XXX-XXX"
-          register={register}
-        />
-        <InputWithLabel
-          fieldTitle="Pag-Ibig No."
-          nameInSchema="generalInfo.pagIbigNumber"
-          placeholder="XXXX-XXXX-XXXX"
-          register={register}
-        />
-        <SelectWithLabel
-          fieldTitle="Tax Status"
-          nameInSchema="generalInfo.taxStatus"
-          control={control}
-          data={enumToSelectOptions(taxStatusEnum.enumValues)}
-        />
-        <InputWithLabel
-          fieldTitle="Phil-Health No."
-          nameInSchema="generalInfo.philhealthNumber"
-          placeholder="XX-XXXXXXX-XX"
-          register={register}
-        />
-        <InputWithLabel
-          fieldTitle="PERRA ID No."
-          nameInSchema="generalInfo.perraIdNumber"
-          register={register}
-        />
+      </div>
+      <hr className="p-2"></hr>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {/* Block 1: The first group of inputs */}
+        {/* We keep this as its own grid to manage internal column layout */}
+        <div className="grid grid-cols-1 gap-3">
+          <InputWithLabel
+            fieldTitle="SSS No."
+            nameInSchema="generalInfo.sssNumber"
+            placeholder="XX-XXXXXXX-X"
+            register={register}
+          />
+          <InputWithLabel
+            fieldTitle="Tax ID No."
+            nameInSchema="generalInfo.taxIdNumber"
+            placeholder="XXX-XXX-XXX"
+            register={register}
+          />
+          <InputWithLabel
+            fieldTitle="Pag-Ibig No."
+            nameInSchema="generalInfo.pagIbigNumber"
+            placeholder="XXXX-XXXX-XXXX"
+            register={register}
+          />
+        </div>
+
+        {/* Block 2: The second group of inputs/selects */}
+        {/* We keep this as its own grid to manage internal column layout */}
+        <div className="grid grid-cols-1 gap-3">
+          <SelectWithLabel
+            fieldTitle="Tax Status"
+            nameInSchema="generalInfo.taxStatus"
+            control={control}
+            data={enumToSelectOptions(taxStatusEnum.enumValues)}
+          />
+          <InputWithLabel
+            fieldTitle="Phil-Health No."
+            nameInSchema="generalInfo.philhealthNumber"
+            placeholder="XX-XXXXXXX-XX"
+            register={register}
+          />
+          <InputWithLabel
+            fieldTitle="PERRA ID No."
+            nameInSchema="generalInfo.perraIdNumber"
+            register={register}
+          />
+        </div>
       </div>
     </div>
   );

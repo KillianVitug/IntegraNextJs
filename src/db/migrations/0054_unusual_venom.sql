@@ -1,0 +1,2 @@
+ALTER TABLE "employee_contribution_groups" ADD COLUMN "payroll_code" integer NOT NULL;--> statement-breakpoint
+ALTER TABLE "employee_contribution_groups" ADD CONSTRAINT "employee_contribution_groups_payroll_code_custom_payroll_definitions_id_fk" FOREIGN KEY ("payroll_code") REFERENCES "public"."custom_payroll_definitions"("id") ON DELETE cascade ON UPDATE no action;

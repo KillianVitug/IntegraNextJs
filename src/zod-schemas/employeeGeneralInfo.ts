@@ -4,7 +4,8 @@ import { z } from "zod";
 
 export const insertEmployeeGeneralInfoSchema = createInsertSchema(employeesGeneralInfo, {
     id: z.number().optional(),
-    employeeId: z.string().uuid().optional()
+    employeeId: z.string().uuid().optional(),
+    departmentId: z.string().nullable().optional(),
 });
 export const selectEmployeeGeneralInfoSchema = createSelectSchema(employeesGeneralInfo);
 
