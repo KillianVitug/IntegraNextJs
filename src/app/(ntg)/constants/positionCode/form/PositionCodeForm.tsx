@@ -87,7 +87,7 @@ export default function PositionCodeForm({
         name: "",
       });
     }
-  }, [selectedPosition]);
+  }, [selectedPosition]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle form submit
   const submitForm = (data: InsertPositionSchemaType) => {

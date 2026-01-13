@@ -20,16 +20,16 @@ export const defaultGeneralInfo = {
 
 export const defaultSalary = {
     employeeId: undefined,
-    dailyRate: null, 
-    monthlyRate: null, 
-    monthlyAllowance: null, 
-    dailyAllowance: null, 
-    cola: null, 
-    rateDivisor: null,
-    billingRate: null, 
+    dailyRate: "0", 
+    monthlyRate: "0", 
+    monthlyAllowance: "0", 
+    dailyAllowance: "0", 
+    cola: "0", 
+    rateDivisor: "0",
+    billingRate: "0", 
     customPayrollCode: "",
     customPayrollDescription: "",
-    slvlGroupId: null,
+    slvlGroupId: "",
   };
   
 
@@ -39,12 +39,15 @@ export const defaultOtherReferences = {
     bankCode: "",
     bankAccountNo: "",
     address: "",
+    email:"",
     telephoneNo: "",
     birthday: null,
-    age: null,
+    age: 0,
     civilStatus: null,
     gender: null,
 };
+
+
 
 export const defaultTimekeeping = {
     employeeId: undefined,
@@ -53,8 +56,8 @@ export const defaultTimekeeping = {
     checkInTime: null,
     checkOutTime: null,
     restDay: null,
-    hoursWorked: "",
-    minutesWorked: "",
+    hoursWorked: 0,
+    minutesWorked: 0,
 };
 
 export const defaultEmployeeValues: InsertEmployeeSchemaType = {

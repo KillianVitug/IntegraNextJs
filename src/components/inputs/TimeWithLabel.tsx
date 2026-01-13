@@ -1,18 +1,25 @@
 "use client";
 
-import { Controller } from "react-hook-form";
-import { FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { Control, FieldValues, Path, Controller } from "react-hook-form";
+import { FormControl,  FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 
-type Props = {
+
+type Props<T extends FieldValues> = {
   fieldTitle: string;
-  nameInSchema: string;
+  nameInSchema: Path<T>;
   className?: string;
   disabled?: boolean;
-  control?: any; // Accepting control as a prop
+  control: Control<T>;
 };
 
-export function TimeWithLabel({ fieldTitle, nameInSchema, className, disabled, control }: Props) {
+export function TimeWithLabel<T extends FieldValues>({
+  fieldTitle,
+  nameInSchema,
+  className,
+  disabled,
+  control,
+}: Props<T>) {
   return (
     <Controller
       name={nameInSchema}

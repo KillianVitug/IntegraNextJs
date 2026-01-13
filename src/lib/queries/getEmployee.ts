@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { accountCode, department, employeesSalary, employeesOtherReferences, employees, employeesGeneralInfo, employeesLoans, employeesTimekeeping, position } from "@/db/schema";
+import { department, employeesSalary, employeesOtherReferences, employees, employeesGeneralInfo, employeesTimekeeping, position } from "@/db/schema";
 import { asc, eq, isNull } from "drizzle-orm";
 
 export async function getEmployee(id: string) {

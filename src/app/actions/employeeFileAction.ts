@@ -2,11 +2,11 @@
 
 import { db } from "@/db";
 import { employeeFiles, employeeFolders } from "@/db/schema";
-import { asc, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { insertEmployeeFileSchema } from "@/zod-schemas/employeeFile";
 import { insertEmployeeFolderSchema } from "@/zod-schemas/employeeFolder";
 import { actionClient } from "@/lib/safe-action";
-import { flattenValidationErrors } from "next-safe-action";
+// import { flattenValidationErrors } from "next-safe-action";
 import fs from "fs";
 import path from "path";
 import { z } from "zod";
@@ -15,7 +15,7 @@ export const saveEmployeeFolderAction = actionClient
   .metadata({ actionName: "saveEmployeeFolderAction" })
   .schema(insertEmployeeFolderSchema)
   .action(async ({ parsedInput }) => {
-    const { id, employeeId, folderName, description, remarks, folderType } =
+    const { id, /*employeeId,*/ folderName, description, remarks, folderType } =
       parsedInput;
 
     // Check if folder exists

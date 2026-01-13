@@ -1,5 +1,5 @@
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
-import { employeeFiles, employeeFolders } from "@/db/schema";
+import { employeeFolders } from "@/db/schema";
 import { z } from "zod";
 
 const fileMetaSchema = z.object({

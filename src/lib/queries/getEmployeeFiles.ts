@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { employees, employeeFiles, employeeFolders } from "@/db/schema";
-import { ilike, or, eq, sql, isNull, asc } from "drizzle-orm";
+import { eq, sql, isNull, asc } from "drizzle-orm";
 
 export async function getEmployeeFiles() {
     const results = await db.select({

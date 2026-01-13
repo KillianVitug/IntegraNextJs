@@ -39,7 +39,7 @@ export default function AccountCodeTable({
   const pageIndex = useMemo(() => {
     const page = searchParams.get("page");
     return page ? parseInt(page) - 1 : 0;
-  }, [searchParams]);
+  }, [searchParams.get("page")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const columnHelper = createColumnHelper<AccountCode>();
 
@@ -146,7 +146,7 @@ export default function AccountCodeTable({
       params.set("page", "1");
       router.replace(`?${params.toString()}`, { scroll: false });
     }
-  }, [safeAccountCode]); // ✅ use safeAccountCode instead of Account Codes
+  }, [safeAccountCode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!safeAccountCode.length) {
     return <p className="text-center text-muted-foreground mt-4">No Account Codes found.</p>;

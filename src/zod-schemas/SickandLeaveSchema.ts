@@ -1,13 +1,35 @@
-// import { createInsertSchema, createSelectSchema } from "drizzle-zod";
-// import { employeesLeaveBalances } from "@/db/schema";
-// import { z } from "zod";
+import { createInsertSchema, createSelectSchema } from "drizzle-zod";
+import { employeesLeaveRecords } from "@/db/schema";
+import { z } from "zod";
 
-// export const insertEmployeeTimekeepingSchema = createInsertSchema(employeesLeaveBalances, {
-//     // id: z.number().optional(),
-//     // employeeId: z.string().uuid().optional(),
+/* ---------- DB Schemas ---------- */
 
-// });
-// export const selectEmployeeTimekeepingSchema = createSelectSchema(employeesLeaveBalances);
+export const insertEmployeeLeaveSchema = createInsertSchema(employeesLeaveRecords, {
+  employeeId: z.string().uuid(),
+  dateFiled: z.string(),
+  leaveType: z.enum(employeesLeaveRecords.leaveType.enumValues),
+  noOfDays: z.coerce.number().min(1),
+  reason: z.string().min(1),
+  leaveStatus: z.enum(employeesLeaveRecords.leaveStatus.enumValues),
+});
 
-// export type InsertEmployeeTimekeepingSchemaType = z.infer<typeof insertEmployeeTimekeepingSchema>;
-// export type SelectEmployeeTimekeepingSchemaType = z.infer<typeof selectEmployeeTimekeepingSchema>;
+export const selectEmployeeLeaveSchema = createSelectSchema(employeesLeaveRecords);
+
+/* ---------- FORM DTO ---------- */
+
+export const leaveFormSchema = insertEmployeeLeaveSchema.pick({
+  employeeId: true,
+  dateFiled: true,
+  leaveType: true,
+  noOfDays: true,
+  reason: true,
+  leaveStatus: true,
+});
+
+export type LeaveFormSchemaType = z.infer<typeof leaveFormSchema>;
+export type InsertEmployeeLeaveSchemaType = z.infer<typeof insertEmployeeLeaveSchema>;
+export type SelectEmployeeLeaveSchemaType = z.infer<typeof selectEmployeeLeaveSchema>;
+
+/* ---------- EDIT DTO ---------- */
+
+export type LeaveEditPayload = LeaveFormSchemaType & { id: number };

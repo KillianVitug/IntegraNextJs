@@ -1,8 +1,8 @@
 "use client";
 
 import { UseFormReturn } from "react-hook-form";
-import { InsertEmployeeSchemaType } from "@/zod-schemas/employee";
-import { useForm, FormProvider } from "react-hook-form";
+import { InsertEmployeeSchemaType, SelectEmployeeWithRelationsSchemaType } from "@/zod-schemas/employee";
+// import { useForm, FormProvider } from "react-hook-form";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import GeneralTab from "./tabs/GeneralTab";
 import SalaryTab from "./tabs/SalaryTab";
@@ -17,8 +17,8 @@ export default function TabsSection({
   positions,
   slvlGroups,
 }: {
-  form: UseFormReturn<InsertEmployeeSchemaType>; // Accept the form instance
-  employee?: any;
+  form: UseFormReturn<InsertEmployeeSchemaType>;
+  employee?: SelectEmployeeWithRelationsSchemaType; // ✅ optional now
   departments: { id: number; name: string }[];
   positions: { id: number; name: string }[];
   slvlGroups: { id: number; name: string }[];
@@ -49,11 +49,12 @@ export default function TabsSection({
         <TimekeepingTab />
       </TabsContent>
 
-      <TabsContent value="recurring">
-        <RecurringEntriesTab
-          employee={employee}
-          />
-      </TabsContent>
+      {employee && (
+        <TabsContent value="recurring">
+          <RecurringEntriesTab employee={employee} />
+        </TabsContent>
+      )}
     </Tabs>
   );
 }
+

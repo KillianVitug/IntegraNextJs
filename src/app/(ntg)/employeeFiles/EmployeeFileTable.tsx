@@ -25,8 +25,8 @@ import {
 } from "@/components/ui/table";
 
 import {
-  CircleCheckIcon,
-  CircleXIcon,
+  // CircleCheckIcon,
+  // CircleXIcon,
   ArrowUpDown,
   ArrowDown,
   ArrowUp,
@@ -73,7 +73,7 @@ export default function EmployeeTable({ data }: Props) {
   const pageIndex = useMemo(() => {
     const page = searchParams.get("page");
     return page ? parseInt(page) - 1 : 0;
-  }, [searchParams.get("page")]);
+  }, [searchParams.get("page")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const columnHeaderArray: Array<keyof RowType> = [
     "employeeNo",
@@ -150,7 +150,7 @@ export default function EmployeeTable({ data }: Props) {
       params.set("page", "1");
       router.replace(`?${params.toString()}`, { scroll: false });
     }
-  }, [table.getState().columnFilters]); // eslint-disable-line react/hooks/exhaustive-deps
+  }, [table.getState().columnFilters]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="mt-6 flex flex-col gap-4">

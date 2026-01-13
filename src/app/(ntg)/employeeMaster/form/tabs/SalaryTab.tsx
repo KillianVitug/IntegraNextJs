@@ -22,7 +22,7 @@ export default function SalaryTab({ slvlGroups }: Props) {
           nameInSchema="salary.dailyRate"
           placeholder="0.00"
           register={register}
-          type="number" // Change to "number" type
+          format="money" // Change to "number" type
           step="any" // Allow decimal inputs
         />
         <InputWithLabel
@@ -30,7 +30,7 @@ export default function SalaryTab({ slvlGroups }: Props) {
           nameInSchema="salary.monthlyRate"
           placeholder="0.00"
           register={register}
-          type="number" // Change to "number" type
+          format="money" // Change to "number" type
           step="any" // Allow decimal inputs
         />
         <InputWithLabel
@@ -38,7 +38,7 @@ export default function SalaryTab({ slvlGroups }: Props) {
           nameInSchema="salary.rateDivisor"
           placeholder="Enter divisor"
           register={register}
-          type="number"
+          format="money"
           step="any"
         />
         </div>
@@ -49,7 +49,7 @@ export default function SalaryTab({ slvlGroups }: Props) {
             nameInSchema="salary.dailyAllowance"
             placeholder="0.00"
             register={register}
-            type="number" // Change to "number" type
+            format="money" // Change to "number" type
             step="any"
           />
         <InputWithLabel
@@ -57,7 +57,7 @@ export default function SalaryTab({ slvlGroups }: Props) {
           nameInSchema="salary.monthlyAllowance"
           placeholder="0.00"
           register={register}
-          type="number" // Change to "number" type
+          format="money" // Change to "number" type
           step="any"
         />
         <InputWithLabel
@@ -65,7 +65,7 @@ export default function SalaryTab({ slvlGroups }: Props) {
           nameInSchema="salary.billingRate"
           placeholder="0.00"
           register={register}
-          type="number" // Change to "number" type
+          format="money" // Change to "number" type
           step="any"
         />
 
@@ -74,7 +74,7 @@ export default function SalaryTab({ slvlGroups }: Props) {
           nameInSchema="salary.cola"
           placeholder="0.00"
           register={register}
-          type="number" // Change to "number" type
+          format="money" // Change to "number" type
           step="any"
         />
 

@@ -39,7 +39,7 @@ export default function DepartmentTable({
   const pageIndex = useMemo(() => {
     const page = searchParams.get("page");
     return page ? parseInt(page) - 1 : 0;
-  }, [searchParams]);
+  }, [searchParams.get("page")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const columnHelper = createColumnHelper<Department>();
 
@@ -101,7 +101,7 @@ export default function DepartmentTable({
       params.set("page", "1");
       router.replace(`?${params.toString()}`, { scroll: false });
     }
-  }, [safeDepartments]); // ✅ use safeDepartments instead of departments
+  }, [safeDepartments]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!safeDepartments.length) {
     return <p className="text-center text-muted-foreground mt-4">No departments found.</p>;

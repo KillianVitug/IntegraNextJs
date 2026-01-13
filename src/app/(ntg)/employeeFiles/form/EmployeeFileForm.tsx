@@ -13,23 +13,24 @@ import {
   type InsertEmployeeFolderSchemaType,
   type SelectEmployeeFolderSchemaType,
 } from "@/zod-schemas/employeeFolder";
-import { getActiveEmployees } from "@/app/actions/employeeAction";
+// import { getActiveEmployees } from "@/app/actions/employeeAction";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
-  downloadFiles,
-  downloadZip,
-  downloadFolderAsZip,
+  // downloadFiles,
+  // downloadZip,
+  // downloadFolderAsZip,
 } from "@/utils/downloadFiles";
-import { employees, employeeFileTypeEnum } from "@/db/schema";
+import { employeeFileTypeEnum } from "@/db/schema";
 import { enumToSelectOptions } from "@/utils/enumHelpers";
 import {
-  deleteEmployeeFileAction,
+  // deleteEmployeeFileAction,
   saveEmployeeFileAction,
   deleteEmployeeFolderAction,
   saveEmployeeFolderAction,
 } from "@/app/actions/employeeFileAction";
 import { useAction } from "next-safe-action/hooks";
+import Image from "next/image";
 
 type Props = {
   employeeFolder?: SelectEmployeeFolderSchemaType;
@@ -91,7 +92,7 @@ export default function FileForm({ employeeFolder, employees }: Props) {
     },
   });
 
-  const { execute, status, result } = useAction(saveEmployeeFileAction, {
+  const { execute, status, /*result*/ } = useAction(saveEmployeeFileAction, {
     onSuccess: (res) => {
       if (res?.data?.message) {
         alert(res.data.message);
@@ -119,7 +120,7 @@ export default function FileForm({ employeeFolder, employees }: Props) {
     }
   );
 
-  const { fields, append, update, remove } = useFieldArray({
+  const { fields, append, /*update,*/ remove } = useFieldArray({
     control: form.control,
     name: "files",
   });
@@ -341,13 +342,13 @@ export default function FileForm({ employeeFolder, employees }: Props) {
             </div>
             {/* {form.getValues("filePath") && ( */}
             <div className="flex gap-2 mt-2">
-              <Button
+              {/* <Button
                 type="button"
                 variant="secondary"
-                onClick={() => downloadFolderAsZip(employeeFolder?.id!)}
+                onClick={() => downloadFolderAsZip(employeeFolder?.id!)} // Error: Optional chain expressions can return undefined by design - using a non-null assertion is unsafe and wrong.  @typescript-eslint/no-non-null-asserted-optional-chain
               >
                 Download As Zip
-              </Button>
+              </Button> */}
 
               {employeeFolder?.id && (
                 <Button
@@ -439,8 +440,9 @@ export default function FileForm({ employeeFolder, employees }: Props) {
             {previewFile.endsWith(".pdf") ? (
               <iframe src={previewFile} className="w-[80vw] h-[80vh]" />
             ) : (
-              <img
+              <Image
                 src={previewFile}
+                alt="PreviewImage"
                 className="max-w-[80vw] max-h-[80vh] object-contain"
               />
             )}

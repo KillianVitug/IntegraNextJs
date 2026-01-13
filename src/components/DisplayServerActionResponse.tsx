@@ -4,33 +4,29 @@ type Props = {
       message?: string;
       serverError?: string;
       validationErrors?: Record<string, string[] | undefined>;
-     };
+    };
   };
 };
-  
-// type Props = {
-//     result: {
-//       data?: { message?: string };
-//       serverError?: string;
-//       validationErrors?: Record<string, string[] | undefined>;
-//     };
-//   };
 
-  const MessageBox = ({
-    type,
-    content,
+const MessageBox = ({
+  type,
+  content,
 }: {
-    type: 'success' | 'error',
-    content: React.ReactNode,
+  type: "success" | "error";
+  content: React.ReactNode;
 }) => (
-    <div className={`bg-accent px-4 py-2 my-2 rounded-lg ${type === 'error' ? 'text-red-500' : ''}`}>
-        {type === 'success' ? '🎉' : '🚨'} {content}
-    </div>
-)
-  
+  <div
+    className={`bg-accent px-4 py-2 my-2 rounded-lg ${
+      type === "error" ? "text-red-500" : ""
+    }`}
+  >
+    {type === "success" ? "🎉" : "🚨"} {content}
+  </div>
+);
+
 export function DisplayServerActionResponse({ result }: Props) {
-  const { data } = result
-  const validationErrors= result
+  const { data } = result;
+
   return (
     <div>
       {data?.message && (
@@ -38,18 +34,17 @@ export function DisplayServerActionResponse({ result }: Props) {
       )}
 
       {data?.serverError && (
-        <MessageBox type="error" content={`Error: ${data?.serverError}`} />
+        <MessageBox type="error" content={`Error: ${data.serverError}`} />
       )}
 
-      {data?.validationErrors && (
-         <MessageBox
-         type="error"
-         content={Object.keys(data?.validationErrors).map(key => (
-             <p key={key}>{`${key}: ${validationErrors[key as keyof typeof validationErrors]}`}</p>
-         ))}
-      />
-      )}
+      {data?.validationErrors &&
+        Object.entries(data.validationErrors).map(([field, messages]) => (
+          <MessageBox
+            key={field}
+            type="error"
+            content={messages?.map((m, idx) => <p key={idx}>{`${field}: ${m}`}</p>)}
+          />
+        ))}
     </div>
   );
 }
-

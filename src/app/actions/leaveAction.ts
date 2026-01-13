@@ -4,6 +4,20 @@ import { db } from "@/db";
 import { employees, employeesLeaveRecords } from "@/db/schema";
 import { eq, and, gte, lte } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
+// import { SelectEmployeeLeaveSchemaType } from "@/zod-schemas/SickandLeaveSchema";
+
+export type LeaveRecordWithEmployeeInfo = {
+    id: number;
+    employeeId: string;
+    dateFiled: string;
+    leaveType: "SL" | "VL";
+    noOfDays: string;
+    reason: string | null;
+    leaveStatus: "Pending" | "Approved" | "Denied";
+    employeeNo: string | null;
+    firstName: string | null;
+    lastName: string | null;
+};
 
 export async function createLeaveRecord(data: {
     employeeId: string;
@@ -36,8 +50,8 @@ export async function createLeaveRecord(data: {
 
 export async function getLeaveRecordsByYear(year: number) {
     try {
-        const startDate = `${year}-01-01`; // January 1st of the year
-        const endDate = `${year}-12-31`; // December 31st of the year
+        const startDate = `${year}-01-01`;
+        const endDate = `${year}-12-31`;
 
         const records = await db
             .select({
@@ -48,22 +62,20 @@ export async function getLeaveRecordsByYear(year: number) {
                 noOfDays: employeesLeaveRecords.noOfDays,
                 reason: employeesLeaveRecords.reason,
                 leaveStatus: employeesLeaveRecords.leaveStatus,
-                // Add employee information
                 employeeNo: employees.employeeNo,
                 firstName: employees.firstName,
                 lastName: employees.lastName,
             })
             .from(employeesLeaveRecords)
             .leftJoin(employees, eq(employeesLeaveRecords.employeeId, employees.id))
-            .where(
-                and(
-                    gte(employeesLeaveRecords.dateFiled, startDate),
-                    lte(employeesLeaveRecords.dateFiled, endDate)
-                )
-            )
+            .where(and(
+                gte(employeesLeaveRecords.dateFiled, startDate),
+                lte(employeesLeaveRecords.dateFiled, endDate)
+            ))
             .orderBy(employeesLeaveRecords.dateFiled);
 
-        return { data: records, error: null };
+        return { data: records as LeaveRecordWithEmployeeInfo[], error: null };
+
     } catch (error) {
         console.error("Error fetching leave records:", error);
         return { data: null, error: "Failed to fetch leave records" };

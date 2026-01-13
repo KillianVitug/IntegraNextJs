@@ -112,7 +112,7 @@ const defaultContribution = {
     useEffect(() => {
     if (!id) return;
     getCustomPayrollForEdit(+id).then((data) => form.reset(data));
-    }, [id]);
+    }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <FormProvider {...form}>

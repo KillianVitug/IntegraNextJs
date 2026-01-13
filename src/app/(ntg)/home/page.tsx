@@ -1,4 +1,3 @@
-import Loading from "@/app/loading"
 
 export const metadata = {
     title: "Home",

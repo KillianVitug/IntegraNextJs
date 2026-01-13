@@ -24,12 +24,16 @@ import {
 import {
   updateEmployeeSalarySchema,
   type UpdateEmployeeSalarySchemaType,
+  EmployeeSalaryRead,
+  // SelectEmployeeSalarySchemaType,
+  EmployeeSalaryUIView,
+  employeeSalaryUIViewSchema
 } from "@/zod-schemas/employeeSalary";
 
 type Props = {
   selectedEmployeeId: string;
   payrollCode: string;
-  onUpdateComplete: (updatedEmployee: any) => void;
+  onUpdateComplete: (updated: EmployeeSalaryRead) => void;
   onCancel: () => void; // <-- Add this
 };
 
@@ -40,7 +44,7 @@ export default function EmployeeSalaryEditor({
   onCancel,
 }: Props) {
   const [currentSalary, setCurrentSalary] =
-    useState<UpdateEmployeeSalarySchemaType | null>(null);
+  useState<EmployeeSalaryUIView | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   const form = useForm<UpdateEmployeeSalarySchemaType>({
@@ -57,24 +61,22 @@ export default function EmployeeSalaryEditor({
 
   // Fetch salary info when employee is selected
   useEffect(() => {
-    if (selectedEmployeeId) {
-      getEmployeeSalaryById(selectedEmployeeId).then((info) => {
-        if (info) {
-          const salaryData = {
-            dailyRate: info.dailyRate ?? "",
-            monthlyRate: info.monthlyRate ?? "",
-            monthlyAllowance: info.monthlyAllowance ?? "",
-            dailyAllowance: info.dailyAllowance ?? "",
-            rateDivisor: info.rateDivisor ?? "",
-            billingRate: info.billingRate ?? "",
-          };
-          setCurrentSalary(salaryData);
-          // Don't reset the form with current values - keep it empty for new input
-        } else {
-          setCurrentSalary(null);
-        }
+    if (!selectedEmployeeId) return;
+  
+    getEmployeeSalaryById(selectedEmployeeId).then((info) => {
+      if (!info) return setCurrentSalary(null);
+  
+      const uiModel = employeeSalaryUIViewSchema.parse({
+        dailyRate: info.dailyRate,
+        monthlyRate: info.monthlyRate,
+        monthlyAllowance: info.monthlyAllowance,
+        dailyAllowance: info.dailyAllowance,
+        rateDivisor: info.rateDivisor,
+        billingRate: info.billingRate,
       });
-    }
+  
+      setCurrentSalary(uiModel);
+    });
   }, [selectedEmployeeId]);
 
   const onSubmit = async (data: UpdateEmployeeSalarySchemaType) => {
@@ -82,10 +84,8 @@ export default function EmployeeSalaryEditor({
       setIsLoading(true);
 
       // Pass payroll code to the update function
-      await updateEmployeeSalary(selectedEmployeeId, data, payrollCode);
-
-      // Call the callback to refresh the table
-      onUpdateComplete({});
+      const updated = await updateEmployeeSalary(selectedEmployeeId, data, payrollCode);
+      onUpdateComplete(updated);
 
       // Reset form
       form.reset({
@@ -118,7 +118,15 @@ export default function EmployeeSalaryEditor({
     try {
       setIsLoading(true);
       await deleteSalaryAdjustmentAndRestore(selectedEmployeeId, payrollCode);
-      onUpdateComplete({});
+      onUpdateComplete({
+        dailyRate: "0",
+        monthlyRate: "0",
+        monthlyAllowance: "0",
+        dailyAllowance: "0",
+        rateDivisor: "0",
+        billingRate: "0",
+        customPayrollCode: payrollCode,
+      });
       onCancel();
     } catch (error) {
       console.error("Error deleting salary adjustment:", error);

@@ -35,11 +35,11 @@ export default function PositionTable({
   const [sorting, setSorting] = useState<SortingState>([
     { id: "name", desc: false },
   ]);
-
+  
   const pageIndex = useMemo(() => {
     const page = searchParams.get("page");
     return page ? parseInt(page) - 1 : 0;
-  }, [searchParams]);
+  }, [searchParams.get("page")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const columnHelper = createColumnHelper<Position>();
 
@@ -87,7 +87,7 @@ export default function PositionTable({
       params.set("page", "1");
       router.replace(`?${params.toString()}`, { scroll: false });
     }
-  }, [safePositions]);
+  }, [safePositions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!safePositions.length) {
     return <p className="text-center text-muted-foreground mt-4">No Positions found.</p>;

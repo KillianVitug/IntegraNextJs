@@ -1,8 +1,8 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { useRouter, useSearchParams } from "next/navigation"
-import { Button } from "@/components/ui/button"
+// import { useRouter, useSearchParams } from "next/navigation"
+// import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select"
 
@@ -11,15 +11,15 @@ type Props = {
 };
 
 export default function SickandLeaveFilter({ onFilterChange }: Props) {
-  const router = useRouter();
-  const searchParams = useSearchParams();
+  // const router = useRouter();
+  // const searchParams = useSearchParams();
   const currentYear = new Date().getFullYear();
   const [year, setYear] = useState(String(currentYear));
   const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
 
   useEffect(() => {
     onFilterChange(new Date(asOf), year);
-  }, [asOf, year]);
+  }, [asOf, year]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="flex flex-wrap gap-4 items-end mb-4">

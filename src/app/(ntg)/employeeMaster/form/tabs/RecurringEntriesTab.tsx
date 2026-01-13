@@ -3,8 +3,6 @@
 import React, { useEffect, useState } from "react";
 import {
   useFormContext,
-  useWatch,
-  UseFormReturn,
   useForm,
   useFieldArray,
 } from "react-hook-form";
@@ -32,7 +30,6 @@ import {
   insertEmployeeRecurringEntriesSchema,
   SelectEmployeeRecurringEntriesSchemaType,
   type InsertEmployeeRecurringEntriesSchemaType,
-  type selectEmployeeRecurringEntriesSchema,
 } from "@/zod-schemas/employeeRecurringEntries";
 import { zodResolver } from "@hookform/resolvers/zod";
 
@@ -45,11 +42,11 @@ type Props = {
 export default function RecurringEntriesTab({
   employee,
   entry,
-  isEditable = true,
+  // isEditable = true,
 }: Props) {
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [isEditing, setIsEditing] = useState(false);
-  const { control, register } = useFormContext<InsertEmployeeSchemaType>();
+  const { control } = useFormContext<InsertEmployeeSchemaType>();
 
   const form = useForm<InsertEmployeeRecurringEntriesSchemaType>({
     mode: "onBlur",
@@ -78,7 +75,7 @@ export default function RecurringEntriesTab({
 
   useEffect(() => {
     fetchRecurringEntries();
-  }, [employee]);
+  }, [employee]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchRecurringEntries = async () => {
     if (!employee) return;

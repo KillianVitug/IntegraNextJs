@@ -40,8 +40,8 @@ export const saveDepartmentAction = actionClient
         return {
           message: `✅ Department ID #${result[0].insertedId} created successfully`,
         };
-      } catch (error: any) {
-        if (error.message?.includes("duplicate key value")) {
+      } catch (error: unknown) {
+        if (error instanceof Error && error.message.includes("duplicate key value")) {
           return { error: "❌ Department name or code already exists." };
         }
         console.error(error);
@@ -75,8 +75,8 @@ export const updateDepartmentAction = actionClient
         return {
           message: `✅ Department ID #${result[0].updatedId} updated successfully`,
         };
-      } catch (error: any) {
-        if (error.message?.includes("duplicate key value")) {
+      } catch (error: unknown) {
+        if (error instanceof Error && error.message.includes("duplicate key value")) {
           return { error: "❌ Department name or code already exists." };
         }
         console.error(error);
@@ -136,13 +136,13 @@ export const saveAccountCodeAction = actionClient
         return {
           message: `✅ Account Code ID #${result[0].insertedId} created successfully`,
         };
-      } catch (error: any) {
-        if (error.message?.includes("duplicate key value")) {
+      } catch (error: unknown) {
+        if (error instanceof Error && error.message.includes("duplicate key value")) {
           return { error: "❌ Account Code ID already exists." };
         }
         console.error(error);
         return { error: "❌ Unexpected error while saving Account Code." };
-      }
+      }      
     }
   );
 
@@ -185,10 +185,10 @@ export const updateAccountCodeAction = actionClient
         return {
           message: `✅ Account Code ID #${result[0].updatedId} updated successfully`,
         };
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error(error);
         return { error: "❌ Unexpected error while updating Account Code." };
-      }
+      }      
     }
   );
 
@@ -224,13 +224,13 @@ export const savePositionAction = actionClient
       return {
         message: `✅ Position ID #${result[0].insertedId} created successfully`,
       };
-    } catch (error: any) {
-      if (error.message?.includes("duplicate key value")) {
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message.includes("duplicate key value")) {
         return { error: "❌ Position name or code already exists." };
       }
       console.error(error);
       return { error: "❌ Unexpected error while saving position." };
-    }
+    }    
   }
 );
 // 🔹 Update Position
@@ -258,13 +258,13 @@ export const updatePositionAction = actionClient
       return {
         message: `✅ Position ID #${result[0].updatedId} updated successfully`,
       };
-    } catch (error: any) {
-      if (error.message?.includes("duplicate key value")) {
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message.includes("duplicate key value")) {
         return { error: "❌ Position name or code already exists." };
       }
       console.error(error);
       return { error: "❌ Unexpected error while updating position." };
-    }
+    }    
   }
 );
 

@@ -3,7 +3,7 @@
 import { db } from "@/db";
 import { employeesRecurringEntries } from "@/db/schema";
 import { actionClient } from "@/lib/safe-action";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import {
   insertEmployeeRecurringEntriesSchema,
   type InsertEmployeeRecurringEntriesSchemaType,

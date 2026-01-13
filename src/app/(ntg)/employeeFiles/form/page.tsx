@@ -1,4 +1,4 @@
-import { getEmployeeFile, getEmployeeFolder } from "@/lib/queries/getEmployeeFiles";
+import { getEmployeeFolder } from "@/lib/queries/getEmployeeFiles";
 import { BackButton } from "@/components/BackButton";
 import FileForm from "@/app/(ntg)/employeeFiles/form/EmployeeFileForm";
 import EmployeeFileFormTable from "./EmployeeFileFormTable";

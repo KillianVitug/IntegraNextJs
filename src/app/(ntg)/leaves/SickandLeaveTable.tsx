@@ -1,7 +1,8 @@
 "use client";
 import SickandLeaveFilter from "./SickandLeaveFilter";
-import type { SickAndLeaveSearchResultsType } from "@/lib/queries/getSickAndLeaveSearchResults"
-import { getLeaveRecordsByYear } from "@/app/actions/leaveAction";
+import type { SickAndLeaveSearchResultsType } from "@/lib/queries/getEmployeeSearchResults"
+import { getLeaveRecordsByYear, LeaveRecordWithEmployeeInfo } from "@/app/actions/leaveAction";
+// import type { SelectEmployeeLeaveSchemaType } from "@/zod-schemas/SickandLeaveSchema";
 
 import {
   createColumnHelper,
@@ -25,7 +26,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-import { CircleCheckIcon, CircleXIcon, ArrowUpDown, ArrowDown, ArrowUp } from "lucide-react";
+import { ArrowUpDown, ArrowDown, ArrowUp } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useMemo, useEffect } from "react";
 import { usePolling } from "@/hooks/usePolling";
@@ -36,7 +37,7 @@ type Props = {
   data: SickAndLeaveSearchResultsType;
 };
 
-type RowType = SickAndLeaveSearchResultsType                                                                                              [0] & {
+type RowType = SickAndLeaveSearchResultsType[0] & {
   yearsOfService: number;
   monthsOfService: number;
   usedSickLeave?: number;
@@ -71,10 +72,10 @@ export default function SickandLeaveTable({ data }: Props) {
         return;
       }
       // Only "Approved" leaves
-      const approved = result.data.filter((lr: any) => lr.leaveStatus === "Approved");
+      const approved = result.data.filter((lr: LeaveRecordWithEmployeeInfo) => lr.leaveStatus === "Approved");
       // Aggregate by employeeId and leaveType
       const usage: Record<string, { usedSL: number; usedVL: number }> = {};
-      approved.forEach((lr: any) => {
+      approved.forEach((lr: LeaveRecordWithEmployeeInfo) => {
         if (!usage[lr.employeeId]) {
           usage[lr.employeeId] = { usedSL: 0, usedVL: 0 };
         }
@@ -213,7 +214,7 @@ export default function SickandLeaveTable({ data }: Props) {
       params.set('page', '1')
       router.replace(`?${params.toString()}`, { scroll: false })
     }
-  }, [table.getState().columnFilters]) // eslint-disable-line react/hooks/exhaustive-deps
+  }, [table.getState().columnFilters]) // eslint-disable-line react-hooks/exhaustive-deps
 
 
   return (

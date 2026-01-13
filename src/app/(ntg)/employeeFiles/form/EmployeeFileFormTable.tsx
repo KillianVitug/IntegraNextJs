@@ -30,7 +30,7 @@ export default function EmployeeFileFormTable({ groupId }: Props) {
     description: "",
     remarks: "",
   });
-  const [showViewer, setShowViewer] = useState(false);
+  // const [showViewer, setShowViewer] = useState(false);
 
   const deleteFile = useAction(deleteSingleEmployeeFileAction, {
     onSuccess: (res) => {
@@ -66,7 +66,7 @@ export default function EmployeeFileFormTable({ groupId }: Props) {
 
   useEffect(() => {
     loadFile();
-  }, [groupId]);
+  }, [groupId]); // eslint-disable-line react-hooks/exhaustive-deps
 
 
     // Update state on slide change

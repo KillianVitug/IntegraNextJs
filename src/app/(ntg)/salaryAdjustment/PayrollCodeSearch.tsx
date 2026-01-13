@@ -1,6 +1,6 @@
 // src/app/(ntg)/salaryAdjustment/PayrollCodeSearch.tsx
 "use client";
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import { generatePayrollCodes } from "@/lib/utils";
 import { InputWithLabel } from "@/components/inputs/InputWithLabel";
 import { SelectWithLabel } from "@/components/inputs/SelectWithLabel";

@@ -17,18 +17,22 @@ import { InputHTMLAttributes } from "react";
 
 type Props<T extends FieldValues = FieldValues> = {
   fieldTitle: string;
-
-  // 👇 Accept BOTH typed paths AND plain strings (legacy-safe)
   nameInSchema: Path<T> | (string & {});
-
   register?: UseFormRegister<T>;
-
   type?: string;
   className?: string;
   value?: string;
   onChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
   readOnly?: boolean;
 } & InputHTMLAttributes<HTMLInputElement>;
+import { stripCommas } from "@/lib/number"; 
+
+export function formatMoney(v: string) {
+  if (!v) return "0";
+  const n = Number(stripCommas(v));
+  if (isNaN(n)) return "0";
+  return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
 
 export function InputWithLabel<T extends FieldValues = FieldValues>({
   fieldTitle,
@@ -36,51 +40,54 @@ export function InputWithLabel<T extends FieldValues = FieldValues>({
   register,
   type = "text",
   className,
-  value,
-  onChange,
   readOnly,
+  format,
   ...props
-}: Props<T>) {
-  const inputProps = register
-    ? {
-        ...register(nameInSchema as Path<T>, {
-          ...(type === "number"
-            ? {
-                setValueAs: (v) =>
-                  v === "" || v === null || v === undefined
-                    ? null
-                    : Number(v),
-              }
-            : {}),
-        }),
-      }
-    : {
-        value,
-        onChange,
-      };
+}: Props<T> & { format?: "money" }) {
+
+  const isMoney = format === "money";
 
   return (
     <FormField
       name={nameInSchema as Path<T>}
-      render={() => (
-        <FormItem>
-          <FormLabel className="text-base" htmlFor={String(nameInSchema)}>
-            {fieldTitle}
-          </FormLabel>
-          <FormControl>
+      render={({ field }) => {
+
+        return (
+          <FormItem>
+            <FormLabel>{fieldTitle}</FormLabel>
+
+            <FormControl>
             <Input
               {...props}
-              {...inputProps}
-              type={type}
-              id={String(nameInSchema)}
-              name={String(nameInSchema)}
-              className={`w-full max-w-xs disabled:text-blue-500 dark:disabled:text-green-500 disabled:opacity-75 ${className}`}
+              {...field}
+              type="text"
+              inputMode={isMoney ? "decimal" : undefined}
               readOnly={readOnly}
+              className={`w-full max-w-xs ${className}`}
+
+              value={
+                isMoney
+                  ? formatMoney(field.value ?? "0")
+                  : field.value ?? ""   // 🔥 ALWAYS string
+              }
+
+              onChange={(e) => {
+                if (!isMoney) {
+                  field.onChange(e.target.value === "" ? "" : e.target.value);
+                  return;
+                }
+
+                const raw = e.target.value.replace(/,/g, "");
+                if (!/^\d*\.?\d*$/.test(raw)) return;
+                field.onChange(raw === "" ? "0" : raw);
+              }}
             />
-          </FormControl>
-          <FormMessage />
-        </FormItem>
-      )}
+            </FormControl>
+
+            <FormMessage />
+          </FormItem>
+        );
+      }}
     />
   );
 }

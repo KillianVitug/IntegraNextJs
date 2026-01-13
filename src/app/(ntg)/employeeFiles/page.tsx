@@ -1,7 +1,7 @@
  import EmployeeFileSearch from "@/app/(ntg)/employeeFiles/EmployeeFileSearch";
  import { getFolderSearchResults } from "@/lib/queries/getEmployeeSearchResults";
  import EmployeeFileTable from "@/app/(ntg)/employeeFiles/EmployeeFileTable";
-import { getEmployeeFiles, getAllFoldersWithFiles } from "@/lib/queries/getEmployeeFiles";
+import { /*getEmployeeFiles,*/ getAllFoldersWithFiles } from "@/lib/queries/getEmployeeFiles";
 
 export const metadata = {
     title: "Employee Files",

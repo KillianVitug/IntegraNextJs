@@ -3,8 +3,9 @@
 
 import { db } from "@/db";
 import { employees, employeesSalary, employeesSalaryAdjustments } from "@/db/schema";
-import { eq, gte, lte, and, like } from "drizzle-orm";
-import { type UpdateEmployeeSalarySchemaType } from "@/zod-schemas/employeeSalary";
+import { eq, and, like } from "drizzle-orm";
+import { EmployeeSalaryRead, employeeSalaryReadSchema, type UpdateEmployeeSalarySchemaType, salaryAdjustmentReadSchema, SalaryAdjustmentRead } from "@/zod-schemas/employeeSalary";
+
 
 // Fetch all employees for dropdown
 export async function getAllEmployees() {
@@ -39,11 +40,11 @@ export async function getAllEmployees() {
 
   // Update salary info
  // Update salary info and create adjustment record
-export async function updateEmployeeSalary(
-  employeeId: string, 
-  newSalary: UpdateEmployeeSalarySchemaType, 
+ export async function updateEmployeeSalary(
+  employeeId: string,
+  newSalary: UpdateEmployeeSalarySchemaType,
   payrollCode: string
-) {
+): Promise<EmployeeSalaryRead> {
   // Get current salary info for comparison
   const currentSalary = await getEmployeeSalaryById(employeeId);
   
@@ -94,15 +95,26 @@ newBillingRate: processedSalary.billingRate,
 };
 
 if (existing[0]) {
-await db
-  .update(employeesSalaryAdjustments)
-  .set(adjustmentPayload)
-  .where(eq(employeesSalaryAdjustments.id, existing[0].id));
+  await db
+    .update(employeesSalaryAdjustments)
+    .set(adjustmentPayload)
+    .where(eq(employeesSalaryAdjustments.id, existing[0].id));
 } else {
-await db.insert(employeesSalaryAdjustments).values(adjustmentPayload);
+  await db.insert(employeesSalaryAdjustments).values(adjustmentPayload);
 }
 
-return processedSalary;
+/* 3️⃣ Return typed read-model */
+const result = {
+  dailyRate: processedSalary.dailyRate,
+  monthlyRate: processedSalary.monthlyRate,
+  monthlyAllowance: processedSalary.monthlyAllowance,
+  dailyAllowance: processedSalary.dailyAllowance,
+  rateDivisor: processedSalary.rateDivisor,
+  billingRate: processedSalary.billingRate,
+  customPayrollCode: payrollCode,
+};
+
+return employeeSalaryReadSchema.parse(result);
 }
 
 // Get salary adjustment history
@@ -134,22 +146,23 @@ export async function getSalaryAdjustmentHistory(payrollCode?: string) {
     .leftJoin(employees, eq(employeesSalaryAdjustments.employeeId, employees.id))
     .orderBy(employeesSalaryAdjustments.adjustmentDate);
 
-  if (payrollCode) {
-    query.where(eq(employeesSalaryAdjustments.payrollCode, payrollCode));
-  }
+  if (payrollCode) query.where(eq(employeesSalaryAdjustments.payrollCode, payrollCode));
 
   const results = await query;
 
-  return results.map(record => ({
-    ...record,
-    fullName: `${record.lastName}, ${record.firstName} ${record.middleName ?? ""}`.trim(),
+  const raw = results.map(r => ({
+    ...r,
+    fullName: `${r.lastName}, ${r.firstName} ${r.middleName ?? ""}`.trim(),
   }));
+  
+  return raw.map(r => salaryAdjustmentReadSchema.parse(r));
 }
+
 
 // Get salary adjustment history by year
 export async function getSalaryAdjustmentHistoryByYear(year: number) {
-  const startOfYear = new Date(year, 0, 1);
-  const endOfYear = new Date(year, 11, 31, 23, 59, 59, 999);
+  // const startOfYear = new Date(year, 0, 1);
+  // const endOfYear = new Date(year, 11, 31, 23, 59, 59, 999);
 
   const results = await db
     .select({
@@ -183,20 +196,17 @@ export async function getSalaryAdjustmentHistoryByYear(year: number) {
     )
     .orderBy(employeesSalaryAdjustments.adjustmentDate);
 
-  return results.map(record => ({
-    ...record,
-    fullName: `${record.lastName}, ${record.firstName} ${record.middleName ?? ""}`.trim(),
-  }));
+    return results.map(r =>
+      salaryAdjustmentReadSchema.parse({
+        ...r,
+        fullName: `${r.lastName}, ${r.firstName} ${r.middleName ?? ""}`.trim(),
+      }))
 }
 
 
-export type SalaryAdjustmentResultsType = Awaited<ReturnType<typeof getSalaryAdjustmentHistory>>
+export type SalaryAdjustmentResultsType = SalaryAdjustmentRead[];
 
-export async function deleteSalaryAdjustmentAndRestore(
-  employeeId: string,
-  payrollCode: string
-) {
-  // 1️⃣ Get the salary adjustment record for this employee & payroll code
+export async function deleteSalaryAdjustmentAndRestore(employeeId: string, payrollCode: string) {
   const adjustment = await db
     .select()
     .from(employeesSalaryAdjustments)
@@ -208,9 +218,7 @@ export async function deleteSalaryAdjustmentAndRestore(
     )
     .limit(1);
 
-  if (!adjustment[0]) {
-    throw new Error("No salary adjustment record found for this employee & payroll code");
-  }
+  if (!adjustment[0]) throw new Error("No salary adjustment record found");
 
   const oldSalary = {
     dailyRate: adjustment[0].oldDailyRate || "0",
@@ -221,13 +229,8 @@ export async function deleteSalaryAdjustmentAndRestore(
     billingRate: adjustment[0].oldBillingRate || "0",
   };
 
-  // 2️⃣ Restore the old salary in employeesSalary
-  await db
-    .update(employeesSalary)
-    .set(oldSalary)
-    .where(eq(employeesSalary.employeeId, employeeId));
+  await db.update(employeesSalary).set(oldSalary).where(eq(employeesSalary.employeeId, employeeId));
 
-  // 3️⃣ Remove the adjustment record
   await db
     .delete(employeesSalaryAdjustments)
     .where(

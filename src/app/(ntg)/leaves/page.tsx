@@ -1,4 +1,4 @@
-import { getSickAndLeave, getSickAndLeaveWithUsage } from "@/lib/queries/getSickAndLeave";
+import { /*getSickAndLeave,*/ getSickAndLeaveWithUsage } from "@/lib/queries/getSickAndLeave";
 import SickandLeaveTable from "./SickandLeaveTable";
 import { getSickAndLeaveSearchResults } from "@/lib/queries/getEmployeeSearchResults";
 import SickandLeaveSearch from "./SickandLeaveSearch";

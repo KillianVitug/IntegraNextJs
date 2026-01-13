@@ -15,8 +15,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { frequencyEnum, statusEnum } from "@/db/schema";
-import { ArrowUpDown } from "lucide-react";
-import { Button } from "@/components/ui/button";
+// import { ArrowUpDown } from "lucide-react";
+// import { Button } from "@/components/ui/button";
 
 export type RecurringEntry = {
   id: number | undefined | "(New)";

@@ -21,7 +21,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { CircleCheckIcon, CircleXIcon, ArrowUpDown, ArrowDown, ArrowUp } from "lucide-react";
+// import { /*CircleCheckIcon, CircleXIcon,*/ ArrowUpDown, ArrowDown, ArrowUp } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useMemo, useEffect } from "react";
 import { usePolling } from "@/hooks/usePolling";
@@ -32,12 +32,11 @@ import EmployeeSalaryEditor from "./form/EmployeeSalaryEditor";
 import { getAllEmployees, getSalaryAdjustmentHistory, getSalaryAdjustmentHistoryByYear } from "@/app/actions/salaryAdjustAction";
 import type { SalaryAdjustmentResultsType } from "@/app/actions/salaryAdjustAction";
 import { SelectWithLabel } from "@/components/inputs/SelectWithLabel";
+import { SalaryAdjustmentRead } from "@/zod-schemas/employeeSalary";
 
 type Props = {
   data: SalaryAdjustmentResultsType;
 };
-
-type RowType = SalaryAdjustmentResultsType[0];
 
 // Helper function to format date
 const formatDate = (dateString: string | Date) => {
@@ -59,7 +58,7 @@ export default function SalaryAdjustTable({ data }: Props) {
   const [employees, setEmployees] = useState<Awaited<ReturnType<typeof getAllEmployees>>>([]);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState("");
   const [loadingEmployees, setLoadingEmployees] = useState(false);
-  const [tableData, setTableData] = useState<any[]>(data); // Initialize with the data prop
+  const [tableData, setTableData] = useState<SalaryAdjustmentRead[]>(data);
   const [loadingTableData, setLoadingTableData] = useState(false);
   const searchParams = useSearchParams();
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
@@ -73,65 +72,24 @@ export default function SalaryAdjustTable({ data }: Props) {
   const pageIndex = useMemo(() => {
     const page = searchParams.get("page")
     return page ? parseInt(page) - 1 : 0
-  }, [searchParams.get("page")])
-  const columnHeaderArray: Array<keyof RowType | 'payrollCode'> = [
-    "payrollCode",
-    "employeeNo",
-    "fullName",
-    "oldDailyRate",
-    "oldMonthlyRate",
-    "oldMonthlyAllowance",
-    "oldDailyAllowance",
-    "oldRateDivisor",
-    "oldBillingRate",
-    "newDailyRate",
-    "newMonthlyRate",
-    "newMonthlyAllowance",
-    "newDailyAllowance",
-    "newRateDivisor",
-    "newBillingRate",
-    "adjustmentDate"
-  ];
-  const columnHelper = createColumnHelper<RowType & { payrollCode?: string }>();
-  const columns = columnHeaderArray.map((columnName) => {
-    return columnHelper.accessor(columnName as any, {
-      id: columnName,
-      header: ({ column }) => {
-        return (
-          <Button
-            variant="ghost"
-            className="pl-1 w-full flex justify-between"
-            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-          >
-            {columnName === 'payrollCode' ? 'Payroll Code' : columnName[0].toUpperCase() + columnName.slice(1)}
+  }, [searchParams.get("page")]) // eslint-disable-line react-hooks/exhaustive-deps
 
-            {column.getIsSorted() === "asc" && (
-              <ArrowUp className="ml-2 h-4 w-4" />
-            )}
+  
+  const columnHelper = createColumnHelper<SalaryAdjustmentRead>();
 
-            {column.getIsSorted() === "desc" && (
-              <ArrowDown className="ml-2 h-4 w-4" />
-            )}
+  const columns = [
+  columnHelper.accessor("payrollCode", { header: "Payroll Code" }),
+  columnHelper.accessor("employeeNo", { header: "Employee No" }),
+  columnHelper.accessor("fullName", { header: "Employee" }),
 
-            {column.getIsSorted() !== "desc" && column.getIsSorted() !== "asc" && (
-              <ArrowUpDown className="ml-2 h-4 w-4" />
-            )}
-          </Button>
-        )
-      },
-      cell: ({ getValue }) => {
-        const value = getValue();
+  columnHelper.accessor("oldDailyRate", { header: "Old Daily" }),
+  columnHelper.accessor("newDailyRate", { header: "New Daily" }),
 
-        // Format the adjustment date
-        if (columnName === 'adjustmentDate' && value) {
-          return formatDate(value);
-        }
-
-        // Return the original value for other columns
-        return value;
-      },
-    });
-  });
+  columnHelper.accessor("adjustmentDate", {
+    header: "Date",
+    cell: info => formatDate(info.getValue()),
+  }),
+];
   const table = useReactTable({
     data: tableData, // Change this from 'data' to 'tableData'
     columns,
@@ -152,31 +110,25 @@ export default function SalaryAdjustTable({ data }: Props) {
     getSortedRowModel: getSortedRowModel(),
   });
 
-  useEffect(() => {
-    const currentPageIndex = table.getState().pagination.pageIndex
-    const pageCount = table.getPageCount()
+  const filters = table.getState().columnFilters;
 
-    if (pageCount <= currentPageIndex && currentPageIndex > 0) {
-      const params = new URLSearchParams(searchParams.toString())
-      params.set('page', '1')
-      router.replace(`?${params.toString()}`, { scroll: false })
+  useEffect(() => {
+    const currentPageIndex = table.getState().pagination.pageIndex;
+    if (table.getPageCount() <= currentPageIndex && currentPageIndex > 0) {
+      const params = new URLSearchParams(searchParams.toString());
+      params.set("page", "1");
+      router.replace(`?${params.toString()}`, { scroll: false });
     }
-  }, [table.getState().columnFilters]) // eslint-disable-line react/hooks/exhaustive-deps
+  }, [filters, router, searchParams, table]);
 
   // Handle salary update completion
-  const handleSalaryUpdate = async (updatedEmployee: any) => {
-    if (payrollCode) {
-      setLoadingTableData(true);
-      const newData = await getSalaryAdjustmentHistory(payrollCode);
-      setTableData(newData);
-      setLoadingTableData(false);
-    } else {
-      setLoadingTableData(true);
-      const newData = await getSalaryAdjustmentHistoryByYear(selectedYear);
-      setTableData(newData);
-      setLoadingTableData(false);
-    }
-    setSelectedEmployeeId(""); // Reset selected employee after update
+  const handleSalaryUpdate = async () => {
+    const newData = payrollCode
+      ? await getSalaryAdjustmentHistory(payrollCode)
+      : await getSalaryAdjustmentHistoryByYear(selectedYear);
+  
+    setTableData(newData);
+    setSelectedEmployeeId("");
   };
 
   const handleYearChange = (year: number) => {

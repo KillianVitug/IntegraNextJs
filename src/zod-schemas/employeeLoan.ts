@@ -20,6 +20,23 @@ export const insertEmployeeLoanSchema = createInsertSchema(employeesLoans, {
 }).extend({
 
 });
+export const employeeLoanListSchema = z.object({
+    id: z.string(),
+    employeeId: z.string(),
+    accountCodeId: z.number().nullable(),
+    loanReferenceNumber: z.string(),
+    amountGranted: z.string(),
+    payrollDateDeduction: z.string(),
+    loanDate: z.string(),
+    paymentTerms: z.string(),
+    payableLoan: z.string(),
+    loanTotalCredit: z.string(),
+    amortization: z.string(),
+    loanBalance: z.string(),
+    loanPaymentDate: z.string().nullable(),
+    status: z.string(),
+  });
+export type EmployeeLoanList = z.infer<typeof employeeLoanListSchema>;
 
 // Select Schema (used when retrieving an employee from the database)
 export const selectEmployeeLoanSchema = createSelectSchema(employeesLoans);

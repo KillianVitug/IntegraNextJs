@@ -4,6 +4,7 @@ import { BackButton } from "@/components/BackButton";
 import LoanForm from "@/app/(ntg)/loans/form/LoanForm";
 import { LoanFormTable } from "./LoanFormTable";
 import { getEmployeeLoan } from "@/app/actions/loanAction";
+import { SelectEmployeeLoanSchemaType } from "@/zod-schemas/employeeLoan"
 
 export default async function LoanFilePage({
   searchParams,
@@ -32,10 +33,38 @@ export default async function LoanFilePage({
     );
   }
 
-  return (
-    <>
-      <LoanForm employeeLoan={loanRecord} />
-      <LoanFormTable reloadFlag={0} loanId={loanId} />
-    </>
-  );
+  const validStatuses = ["Active", "Paid", "Inactive"] as const;
+  const validPaymentTerms = [
+    "Always",
+    "First Payroll",
+    "Second Payroll",
+    "Third Payroll",
+    "Fourth Payroll",
+  ] as const;
+  
+  // Type helpers
+  type StatusType = typeof validStatuses[number];
+  type PaymentTermsType = typeof validPaymentTerms[number];
+  
+  const mappedLoanRecord: Partial<SelectEmployeeLoanSchemaType> | undefined =
+    loanRecord
+      ? {
+          ...loanRecord,
+          status: validStatuses.includes(loanRecord.status as StatusType)
+            ? (loanRecord.status as StatusType)
+            : "Active",
+          paymentTerms: validPaymentTerms.includes(
+            loanRecord.paymentTerms as PaymentTermsType
+          )
+            ? (loanRecord.paymentTerms as PaymentTermsType)
+            : "Always",
+        }
+      : undefined;
+
+return (
+  <>
+    <LoanForm employeeLoan={mappedLoanRecord} />
+    <LoanFormTable reloadFlag={0} loanId={loanId} />
+  </>
+);
 }

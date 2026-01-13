@@ -12,4 +12,3 @@ export type LeaveRecord = {
     reason: string;
     leaveStatus: typeof leaveStatusEnum.enumValues[number];
 };
-

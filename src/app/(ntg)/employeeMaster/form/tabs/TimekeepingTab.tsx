@@ -11,9 +11,8 @@ import { TimeWithLabel } from "@/components/inputs/TimeWithLabel";
 
 import { InsertEmployeeSchemaType } from "@/zod-schemas/employee";
 
-type Props = {};
 
-export default function TimekeepingTab({}: Props) {
+export default function TimekeepingTab() {
   const { control, register } = useFormContext<InsertEmployeeSchemaType>();
 
   return (

@@ -11,7 +11,12 @@ import { TextAreaWithLabel } from "@/components/inputs/TextAreaWithLabel";
 import { Button } from "@/components/ui/button";
 import { leaveTypeEnum, leaveStatusEnum } from "@/db/schema";
 import { enumToSelectOptions } from "@/utils/enumHelpers";
-import { z } from "zod";
+import {
+  leaveFormSchema,
+  LeaveFormSchemaType,
+  LeaveEditPayload,
+} from "@/zod-schemas/SickandLeaveSchema";
+
 import {
   createLeaveRecord,
   updateLeaveRecord,
@@ -22,9 +27,10 @@ import { getActiveEmployees } from "@/app/actions/employeeAction";
 
 interface LeaveFormProps {
   onSubmitSuccess: () => void;
-  initialData?: Partial<LeaveFormData> | null;
+  initialData?: LeaveEditPayload | null;
   onCancelEdit: () => void;
 }
+
 
 type Employee = {
   id: string;
@@ -33,16 +39,6 @@ type Employee = {
   lastName: string;
 };
 
-const leaveFormSchema = z.object({
-  employeeId: z.string().uuid(),
-  dateFiled: z.string(),
-  leaveType: z.enum(leaveTypeEnum.enumValues),
-  noOfDays: z.number().min(1, "Number of days must be at least 1"),
-  reason: z.string().min(1, "Reason is required"),
-  leaveStatus: z.enum(leaveStatusEnum.enumValues),
-});
-
-type LeaveFormData = z.infer<typeof leaveFormSchema>;
 
 export function LeaveForm({
   onSubmitSuccess,
@@ -53,7 +49,7 @@ export function LeaveForm({
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  const form = useForm<LeaveFormData>({
+  const form = useForm<LeaveFormSchemaType>({
     resolver: zodResolver(leaveFormSchema),
     defaultValues: {
       employeeId: "",
@@ -65,7 +61,7 @@ export function LeaveForm({
     },
   });
 
-  const defaultFormValues: LeaveFormData = {
+  const defaultFormValues: LeaveFormSchemaType = {
     employeeId: "",
     dateFiled: new Date().toISOString().split("T")[0],
     leaveType: leaveTypeEnum.enumValues[0],
@@ -77,9 +73,10 @@ export function LeaveForm({
   useEffect(() => {
     fetchEmployees();
     if (initialData) {
-      form.reset(initialData);
+      const { id, ...formValues } = initialData;
+      form.reset(formValues);
     }
-  }, [initialData]);
+  }, [initialData]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchEmployees = async () => {
     try {
@@ -105,71 +102,35 @@ export function LeaveForm({
     }
   };
 
-  const onSubmit = async (data: LeaveFormData) => {
-    try {
-      let result;
-      if (initialData && (initialData as any).id) {
-        // Update mode
-        result = await updateLeaveRecord({
-          ...data,
-          id: (initialData as any).id,
-        });
-      } else {
-        // Create mode
-        result = await createLeaveRecord(data);
-      }
-
-      if (result.error) {
-        toast({
-          title: "Error",
-          description: result.error,
-          variant: "destructive",
-        });
-        return;
-      }
-
-      toast({
-        title: "Success",
-        description:
-          initialData && (initialData as any).id
-            ? "Leave request updated successfully"
-            : "Leave request submitted successfully",
-      });
-      if (onSubmitSuccess) onSubmitSuccess();
-      form.reset();
-    } catch (error) {
-      console.error("Error submitting leave request:", error);
-      toast({
-        title: "Error",
-        description: "Failed to submit leave request",
-        variant: "destructive",
-      });
+  const onSubmit = async (data: LeaveFormSchemaType) => {
+    const result = initialData
+      ? await updateLeaveRecord({ ...data, id: initialData.id })
+      : await createLeaveRecord(data);
+  
+    if (result?.error) {
+      toast({ title: "Error", description: result.error, variant: "destructive" });
+      return;
     }
+  
+    toast({
+      title: "Success",
+      description: initialData
+        ? "Leave request updated successfully"
+        : "Leave request submitted successfully",
+    });
+  
+    onSubmitSuccess();
+    form.reset();
   };
+  
 
   const handleDelete = async () => {
-    if (initialData && (initialData as any).id) {
-      const confirmDelete = window.confirm(
-        "Are you sure you want to delete this leave request?"
-      );
-      if (!confirmDelete) return;
-      const result = await deleteLeaveRecord((initialData as any).id);
-      if (result.error) {
-        toast({
-          title: "Error",
-          description: result.error,
-          variant: "destructive",
-        });
-        return;
-      }
-      toast({
-        title: "Deleted",
-        description: "Leave request deleted successfully",
-      });
-      if (onSubmitSuccess) onSubmitSuccess();
-      form.reset(defaultFormValues); // Reset to default values
-      onCancelEdit();
-    }
+    if (!initialData) return;
+    if (!window.confirm("Delete this leave request?")) return;
+    await deleteLeaveRecord(initialData.id);
+    onSubmitSuccess();
+    form.reset();
+    onCancelEdit();
   };
 
   const handleCancelEdit = () => {

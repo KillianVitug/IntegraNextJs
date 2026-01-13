@@ -1,14 +1,14 @@
 "use server";
 import { db } from "@/db";
-import { accountCode, employees, employeesLoans } from "@/db/schema";
+import { employeesLoans } from "@/db/schema";
 import { asc, eq } from "drizzle-orm";
-import { insertEmployeeLoanSchema, type InsertEmployeeLoanSchemaType } from "@/zod-schemas/employeeLoan";
+import { EmployeeLoanList, employeeLoanListSchema, insertEmployeeLoanSchema, type InsertEmployeeLoanSchemaType } from "@/zod-schemas/employeeLoan";
 import { actionClient } from "@/lib/safe-action";
 import { flattenValidationErrors } from "next-safe-action";
 
 
-export async function getEmployeeLoan(loanId: string) {
-  return db
+export async function getEmployeeLoan(loanId: string): Promise<EmployeeLoanList[]> {
+  const result = await db
     .select({
       id: employeesLoans.id,
       employeeId: employeesLoans.employeeId,
@@ -26,10 +26,10 @@ export async function getEmployeeLoan(loanId: string) {
       status: employeesLoans.status,
     })
     .from(employeesLoans)
-    .leftJoin(employees, eq(employeesLoans.employeeId, employees.id))
-    .leftJoin(accountCode, eq(employeesLoans.accountCodeId, accountCode.id))
-    .where(eq(employeesLoans.id, loanId)) // ✅ filter only this employee
+    .where(eq(employeesLoans.id, loanId))
     .orderBy(asc(employeesLoans.loanDate));
+
+  return employeeLoanListSchema.array().parse(result);
 }
 
 // 🔹 Create Employee Loan
@@ -58,16 +58,18 @@ export const saveEmployeeLoanAction = actionClient
           loanBalance: parsedInput.loanBalance,
           status: parsedInput.status,
           loanPaymentDate: parsedInput.loanPaymentDate || null,
-        } satisfies Partial<typeof employeesLoans.$inferInsert>)
+        // } satisfies Partial<typeof employeesLoans.$inferInsert>)
+        })
         .returning({ insertedId: employeesLoans.id });
 
       return {
         message: `✅ Account Code ID #${result[0].insertedId} created successfully`,
       };
-    } catch (error: any) {
-      if (error.message?.includes("duplicate key value")) {
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message.includes("duplicate key value")) {
         return { error: "❌ Account Code ID already exists." };
       }
+    
       console.error(error);
       return { error: "❌ Unexpected error while saving Account Code." };
     }

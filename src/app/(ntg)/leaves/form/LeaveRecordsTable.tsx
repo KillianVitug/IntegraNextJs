@@ -61,7 +61,7 @@ export function LeaveRecordsTable({ reloadFlag, onRowClick } : LeaveRecordsTable
 
     useEffect(() => {
         fetchLeaveRecords();
-    }, [selectedYear, reloadFlag]);
+    }, [selectedYear, reloadFlag]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const fetchLeaveRecords = async () => {
         setIsLoading(true);

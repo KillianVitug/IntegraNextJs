@@ -2,7 +2,7 @@
 
 import { db } from "@/db";
 import { department, position, slvlGroup, accountCode, customPayrollDefinitions } from "@/db/schema";
-import { asc, eq, isNull } from "drizzle-orm";
+import { asc, isNull } from "drizzle-orm";
 
 export async function fetchDepartments() {
     try {

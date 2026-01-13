@@ -1,6 +1,6 @@
-import {  Control, Controller, useFormContext } from "react-hook-form";
+import {  Control, Controller, FieldValues, Path } from "react-hook-form";
 import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
+// import { Input } from "@/components/ui/input";
 import { CalendarIcon } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
@@ -8,16 +8,22 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { format } from "date-fns";
 import { useState } from "react";
-type Props = {
+
+type Props<T extends FieldValues> = {
   fieldTitle: string;
-  nameInSchema: string;
-  control?: Control<any>;
+  nameInSchema: Path<T>;
+  control?: Control<T>;
   value?: string;
-  
   onChange?: (val: string) => void;
 };
 
-export function DateWithLabel({ fieldTitle, nameInSchema, control, value, onChange }: Props) {
+export function DateWithLabel<T extends FieldValues>({
+  fieldTitle,
+  nameInSchema,
+  control,
+  value,
+  onChange,
+}: Props<T>) {
   const [open, setOpen] = useState(false);
 
   const selectedDate = value && value !== "null" ? new Date(value) : undefined;

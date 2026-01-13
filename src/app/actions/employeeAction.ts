@@ -2,7 +2,7 @@
 
 import { db } from "@/db";
 import { employees } from "@/db/schema";
-import { eq, isNull } from "drizzle-orm";
+import { isNull } from "drizzle-orm";
 
 export async function getActiveEmployees() {
     try {

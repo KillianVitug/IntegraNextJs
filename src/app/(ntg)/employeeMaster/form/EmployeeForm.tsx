@@ -3,17 +3,18 @@
 import { FormProvider, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useRouter } from "next/navigation";
-import { Form } from "@/components/ui/form";
+// import { Form } from "@/components/ui/form";
 import { Button } from "@/components/ui/button";
 import { InputWithLabel } from "@/components/inputs/InputWithLabel";
 import { v4 as uuidv4 } from "uuid"; // Import UUID generator
 import { useAction } from "next-safe-action/hooks";
-import { useKindeBrowserClient } from "@kinde-oss/kinde-auth-nextjs";
+// import { useKindeBrowserClient } from "@kinde-oss/kinde-auth-nextjs";
 import { LoaderCircle } from "lucide-react";
 import { DisplayServerActionResponse } from "@/components/DisplayServerActionResponse";
 import { useSearchParams } from "next/navigation";
 import { useEffect } from "react";
 import TabsSection from "@/app/(ntg)/employeeMaster/form/TabSection";
+import { formatMoney } from "@/components/inputs/InputWithLabel";
 
 import {
   insertEmployeeSchema,
@@ -36,6 +37,16 @@ type Props = {
   positions: { id: number; name: string }[];
   slvlGroups: { id: number; name: string }[];
 };
+
+const MONEY_FIELDS = [
+  "dailyRate",
+  "monthlyRate",
+  "monthlyAllowance",
+  "dailyAllowance",
+  "cola",
+  "rateDivisor",
+  "billingRate",
+] as const;
 
 export default function EmployeeForm({
   employee,
@@ -89,18 +100,25 @@ export default function EmployeeForm({
               departmentId: "",
             },
         salary: employee?.salary
-          ? {
-              ...employee.salary,
+            ? {
+              dailyRate: String(employee.salary.dailyRate ?? "0"),
+              monthlyRate: String(employee.salary.monthlyRate ?? "0"),
+              monthlyAllowance: String(employee.salary.monthlyAllowance ?? "0"),
+              dailyAllowance: String(employee.salary.dailyAllowance ?? "0"),
+                cola: String(employee.salary.cola ?? "0"),
+                rateDivisor: String(employee.salary.rateDivisor ?? "0"),
+              billingRate: String(employee.salary.billingRate ?? "0"),
               slvlGroupId:
-                employee?.salary?.slvlGroupId != null
-                  ? String(employee.salary.slvlGroupId)
-                  : "",
-            }
-          : {
-              ...defaultSalary,
-              employeeId: employee?.id || generatedId,
-              slvlGroupId: "",
-            },
+                  employee.salary.slvlGroupId != null
+                    ? String(employee.salary.slvlGroupId)
+                    : null,
+              customPayrollCode: employee.salary.customPayrollCode ?? "",
+              customPayrollDescription: employee.salary.customPayrollDescription ?? "",
+              }
+            : {
+                ...defaultSalary,
+                employeeId: employee?.id || generatedId,
+              },
         otherReferences: employee?.otherReferences
           ? {
               ...employee.otherReferences,
@@ -114,7 +132,11 @@ export default function EmployeeForm({
               employeeId: employee?.id || generatedId,
               positionId: "",
             },
-        timekeeping: employee?.timekeeping ?? {
+        timekeeping: employee?.timekeeping ? {
+              hoursWorked: Number(employee.timekeeping.hoursWorked ?? 0),
+              minutesWorked: Number(employee.timekeeping.minutesWorked ?? 0),
+        }
+        : {
           ...defaultTimekeeping,
           employeeId: employee?.id || generatedId,
         },
@@ -128,7 +150,25 @@ export default function EmployeeForm({
   });
 
   useEffect(() => {
-    form.reset(hasEmployeeId ? defaultValues : emptyValues);
+    const valuesToReset = hasEmployeeId ? defaultValues : emptyValues;
+  
+    // Format salary fields for display
+    const formattedSalary = valuesToReset.salary
+  ? {
+      ...valuesToReset.salary,
+      ...Object.fromEntries(
+        MONEY_FIELDS.map((k) => [
+          k,
+          formatMoney(String(valuesToReset.salary?.[k] ?? "0")),
+        ])
+      ),
+    }
+  : defaultSalary;
+  
+    form.reset({
+      ...valuesToReset,
+      salary: formattedSalary,
+    });
   }, [searchParams.get("employeeId")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const {
@@ -139,12 +179,13 @@ export default function EmployeeForm({
   } = useAction(saveEmployeeAction);
 
   async function submitForm(data: InsertEmployeeSchemaType) {
-    const result = await executeSave(data);
+     const result = await executeSave(data);
     if (data) {
       router.refresh(); // Seamlessly reloads the current route without a full refresh
+      console.log(result);
     }
   }
-  const { register, control } = form;
+  const { register } = form;
   return (
     <FormProvider {...form}>
       <div className="flex flex-col gap-1 sm:px-8">

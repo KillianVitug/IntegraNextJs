@@ -1,5 +1,5 @@
 
-import { Document, Page, Text, View, StyleSheet, Font } from "@react-pdf/renderer";
+import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
 import type { SickAndLeaveResultsType } from "@/lib/queries/getSickAndLeave";
 
 // Style definitions
@@ -63,7 +63,7 @@ type EnrichedRowType = SickAndLeaveResultsType[0] & {
     asOfDate: Date;
   };
   
-  export default function LeaveSummaryPDF({ data, asOfDate }: Props) {
+  export default function LeaveSummaryPDF({ data,/*asOfDate*/ }: Props) {
     const grouped = groupByDepartment(data ?? []);
   
     return (

@@ -15,7 +15,11 @@ import { Pool } from "@neondatabase/serverless";
 import * as schema from "./schema"; // Import your schema
 import { config } from "dotenv";
 
-config({ path: ".env.local" });
+if(process.env.NODE_ENV === "development") {
+    config({ path: ".env.local" });
+} else {
+    
+}
 
 // Create a Pool for WebSocket connections
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
