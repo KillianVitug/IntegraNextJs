@@ -3,7 +3,7 @@
 import React, { useEffect } from "react";
 import { useFormContext, useWatch } from "react-hook-form";
 import { enumToSelectOptions } from "@/utils/enumHelpers";
-import { civilStatusEnum, genderEnum } from "@/db/schema";
+import { bankCodeTypeEnum, civilStatusEnum, genderEnum } from "@/db/schema";
 
 import { InputWithLabel } from "@/components/inputs/InputWithLabel";
 import { SelectWithLabel } from "@/components/inputs/SelectWithLabel";
@@ -42,11 +42,11 @@ export default function ReferencesTab({ positions }: Props) {
   return (
     <div className="p-4">
       <div className="grid grid-cols-2 gap-3">
-        <InputWithLabel
+        <SelectWithLabel
           fieldTitle="Bank Code"
           nameInSchema="otherReferences.bankCode"
-          register={register}
-          placeholder=""
+          control={control}
+          data={enumToSelectOptions(bankCodeTypeEnum.enumValues)}
         />
         <InputWithLabel
           fieldTitle="Bank Account No."

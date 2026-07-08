@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import Link from "next/link";
 import { useFormContext } from "react-hook-form";
 import { enumToSelectOptions } from "@/utils/enumHelpers";
 import { shiftScheduleEnum, restDayEnum } from "@/db/schema";
@@ -8,11 +9,12 @@ import { shiftScheduleEnum, restDayEnum } from "@/db/schema";
 import { InputWithLabel } from "@/components/inputs/InputWithLabel";
 import { SelectWithLabel } from "@/components/inputs/SelectWithLabel";
 import { TimeWithLabel } from "@/components/inputs/TimeWithLabel";
+import { Button } from "@/components/ui/button";
 
 import { InsertEmployeeSchemaType } from "@/zod-schemas/employee";
 
 
-export default function TimekeepingTab() {
+export default function TimekeepingTab({ employeeId }: { employeeId?: string }) {
   const { control, register } = useFormContext<InsertEmployeeSchemaType>();
 
   return (
@@ -62,6 +64,26 @@ export default function TimekeepingTab() {
           step="any"
         />
       </div>
+      {employeeId ? (
+        <div className="mt-4 space-y-3">
+          <p className="text-sm text-muted-foreground">
+            Use Weekly Schedule for the employee's normal Monday-Sunday pattern. Use
+            Shift Overrides only for temporary date-based exceptions.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button asChild type="button" variant="outline">
+              <Link href={`/weeklyShiftPatterns?employeeId=${employeeId}`}>
+                Manage Weekly Schedule
+              </Link>
+            </Button>
+            <Button asChild type="button" variant="outline">
+              <Link href={`/shiftAssignments?employeeId=${employeeId}`}>
+                Manage Shift Overrides
+              </Link>
+            </Button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

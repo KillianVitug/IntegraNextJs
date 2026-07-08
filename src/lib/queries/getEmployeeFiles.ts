@@ -1,11 +1,13 @@
 import { db } from "@/db";
 import { employees, employeeFiles, employeeFolders } from "@/db/schema";
 import { eq, sql, isNull, asc } from "drizzle-orm";
+import { sortEmployeesByLastName } from "@/utils/employeeDisplay";
 
 export async function getEmployeeFiles() {
     const results = await db.select({
         id: employeeFiles.id,
         employeeNo: employees.employeeNo,
+        employeeType: employees.employeeType,
         employeeName: sql<string>`CONCAT(${employees.lastName}, ', ', ${employees.firstName}, ' ', COALESCE(${employees.middleName}, ''))`,
         // fileType: employeeFiles.fileType,
         fileName: employeeFiles.fileName,
@@ -55,6 +57,7 @@ export async function getFilesByGroup(groupId: string) {
         files: true,
         employee: {
           columns: {
+            employeeType: true,
             employeeNo: true,
             firstName: true,
             middleName: true,
@@ -66,9 +69,10 @@ export async function getFilesByGroup(groupId: string) {
       orderBy: asc(employeeFolders.createdAt),
     });
   
-    return folders.map(folder => ({
+    return sortEmployeesByLastName(folders.map(folder => ({
       id: folder.id,
       employeeNo: folder.employee.employeeNo,
+      employeeType: folder.employee.employeeType,
       employeeName: `${folder.employee.lastName}, ${folder.employee.firstName} ${
         folder.employee.middleName ?? ""
       }`,
@@ -78,6 +82,6 @@ export async function getFilesByGroup(groupId: string) {
       remarks: folder.remarks,
       createdAt: folder.createdAt,
       files: folder.files,   // 👈 list of employeeFiles
-    }));
+    })));
   }
   

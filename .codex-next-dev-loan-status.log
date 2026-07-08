@@ -1,0 +1,27 @@
+
+> integra@0.1.0 dev
+> next dev --turbopack
+
+   ▲ Next.js 15.5.9 (Turbopack)
+   - Local:        http://localhost:3000
+   - Network:      http://25.13.216.62:3000
+   - Environments: .env.local
+
+ ✓ Starting...
+Creating turbopack project {
+  dir: 'C:\\Users\\63917\\VsProjects2024\\IntegraNextJs(2)\\IntegraNextJs',
+  testMode: true
+}
+ ✓ Ready in 1801ms
+ ○ Compiling /loans ...
+ ✓ Compiled /loans in 5s
+ GET /loans 200 in 6176ms
+ ○ Compiling / ...
+ ✓ Compiled / in 689ms
+ GET /loans 200 in 392ms
+ GET / 200 in 381ms
+ GET /loans 200 in 361ms
+ GET / 200 in 299ms
+ ✓ Compiled in 9ms
+ ✓ Compiled in 23.1s
+ ✓ Compiled in 19.2s

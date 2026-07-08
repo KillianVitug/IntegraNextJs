@@ -9,35 +9,36 @@ export async function generateMetadata({
 }) {
     const { customPayrollId } = await searchParams;
 
-    if (!customPayrollId) return { title: "New Employee" };
+    if (!customPayrollId) return { title: "New Payroll COde" };
 
-    return { title: `Edit Employee #${customPayrollId}` };
+    return { title: `Edit Payroll Code #${customPayrollId}` };
 }
 
-export default async function EmployeeFormPage({
+export default async function CustomPayrollCodePage({
     searchParams,
 }: {
     searchParams: Promise<{ [key: string]: string | undefined }>;
 }) {
     try {
         const { customPayrollId } = await searchParams;
-        let employee = undefined;
+        let payrollCode = undefined;
 
         if (customPayrollId) {
-            employee = await getPayrollCode(customPayrollId);
-        }
+            payrollCode = await getPayrollCode(Number(customPayrollId));
+          }
 
         return (
             <div className="p-6">
-                {customPayrollId && !employee ? (
+                {customPayrollId && !payrollCode ? (
                     <>
-                        <h2 className="text-2xl mb-2">Employee ID #{customPayrollId} Not Found.</h2>
+                        <h2 className="text-2xl mb-2">Payroll Code ID #{customPayrollId} Not Found.</h2>
                         <BackButton title="Go Back" variant="default" />
                     </>
                 ) : (
                     <>
-                        <PayrollCodeForm 
+                        <PayrollCodeForm
                         key={customPayrollId}
+                        initialData={payrollCode}
                         />
                     </>
                 )}

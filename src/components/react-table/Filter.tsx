@@ -1,17 +1,27 @@
 import { Column } from "@tanstack/react-table";
+import { useMemo } from "react";
 import { DebouncedInput } from "@/components/react-table/DebouncedInput";
 
 type Props<T> = {
     column: Column<T, unknown>
-    filteredRows: string[],
+    filteredRows?: unknown[],
+    value?: string,
+    onValueChange?: (value: string) => void,
 }
 
-export default function Filter<T>({ column, filteredRows }: Props<T>) {
-    const columnFilterValue = column.getFilterValue()
-
-    const uniqueFilteredValues = new Set(filteredRows)
-
-    const sortedUniqueValues = Array.from(uniqueFilteredValues).sort()
+export default function Filter<T>({ column, filteredRows = [], value, onValueChange }: Props<T>) {
+    const columnFilterValue = value ?? column.getFilterValue()
+    const sortedUniqueValues = useMemo(
+        () =>
+            Array.from(
+                new Set(
+                    filteredRows
+                        .filter((value) => value != null)
+                        .map((value) => String(value))
+                )
+            ).sort(),
+        [filteredRows]
+    )
 
     return (
         <>
@@ -23,8 +33,17 @@ export default function Filter<T>({ column, filteredRows }: Props<T>) {
             <DebouncedInput
                 type="text"
                 value={(columnFilterValue ?? '') as string}
-                onChange={value => column.setFilterValue(value)}
-                placeholder={`Search... (${uniqueFilteredValues.size})`}
+                onChange={value => {
+                    const nextValue = String(value)
+
+                    if (onValueChange) {
+                        onValueChange(nextValue)
+                        return
+                    }
+
+                    column.setFilterValue(value)
+                }}
+                placeholder={filteredRows.length ? `Search... (${sortedUniqueValues.length})` : "Search..."}
                 className="w-full border shadow rounded bg-card"
                 list={column.id + 'list'}
             />

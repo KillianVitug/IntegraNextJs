@@ -10,11 +10,13 @@ import { actionClient } from "@/lib/safe-action";
 import fs from "fs";
 import path from "path";
 import { z } from "zod";
+import { requireAdminActor } from "@/lib/admin";
 
 export const saveEmployeeFolderAction = actionClient
   .metadata({ actionName: "saveEmployeeFolderAction" })
   .schema(insertEmployeeFolderSchema)
   .action(async ({ parsedInput }) => {
+    await requireAdminActor();
     const { id, /*employeeId,*/ folderName, description, remarks, folderType } =
       parsedInput;
 
@@ -34,10 +36,7 @@ export const saveEmployeeFolderAction = actionClient
 
     const result = await db
       .insert(employeeFolders)
-      .values({
-        ...parsedInput,
-        employeeId: parsedInput.employeeId ?? null, // <-- ensure null instead of undefined
-      })
+      .values(parsedInput)
       .returning({ id: employeeFolders.id });
 
     return { message: "Folder created", id: result[0].id };
@@ -47,6 +46,7 @@ export const saveEmployeeFileAction = actionClient
   .metadata({ actionName: "saveEmployeeFileAction" })
   .schema(insertEmployeeFileSchema)
   .action(async ({ parsedInput }) => {
+    await requireAdminActor();
     try {
       // If this is a NEW FILE
       if (parsedInput.filePath && parsedInput.filePath !== "") {
@@ -101,6 +101,7 @@ export const deleteEmployeeFileAction = actionClient
     })
   )
   .action(async ({ parsedInput }) => {
+    await requireAdminActor();
     try {
       const filesToDelete = await db
         .select()
@@ -138,6 +139,7 @@ export const deleteSingleEmployeeFileAction = actionClient
     })
   )
   .action(async ({ parsedInput }) => {
+    await requireAdminActor();
     const fileRecord = await db.query.employeeFiles.findFirst({
       where: eq(employeeFiles.id, parsedInput.id),
     });
@@ -172,6 +174,7 @@ export const deleteEmployeeFolderAction = actionClient
     })
   )
   .action(async ({ parsedInput }) => {
+    await requireAdminActor();
     const { groupId } = parsedInput;
 
     try {
@@ -218,6 +221,7 @@ export const updateEmployeeFileMetaAction = actionClient
     })
   )
   .action(async ({ parsedInput }) => {
+    await requireAdminActor();
     const { id, fileName, description, remarks } = parsedInput;
 
     try {

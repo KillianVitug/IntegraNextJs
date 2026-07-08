@@ -1,7 +1,6 @@
 "use client";
 import SickandLeaveFilter from "./SickandLeaveFilter";
-import type { SickAndLeaveSearchResultsType } from "@/lib/queries/getEmployeeSearchResults"
-import { getLeaveRecordsByYear, LeaveRecordWithEmployeeInfo } from "@/app/actions/leaveAction";
+import type { SickAndLeaveResultsType } from "@/lib/queries/getSickAndLeave"
 // import type { SelectEmployeeLeaveSchemaType } from "@/zod-schemas/SickandLeaveSchema";
 
 import {
@@ -9,12 +8,6 @@ import {
   flexRender,
   getCoreRowModel,
   useReactTable,
-  ColumnFiltersState,
-  SortingState,
-  getPaginationRowModel,
-  getFilteredRowModel,
-  getFacetedUniqueValues,
-  getSortedRowModel,
 } from "@tanstack/react-table";
 
 import {
@@ -27,17 +20,23 @@ import {
 } from "@/components/ui/table";
 
 import { ArrowUpDown, ArrowDown, ArrowUp } from "lucide-react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useState, useMemo, useEffect } from "react";
+import { useMemo, useState } from "react";
 import { usePolling } from "@/hooks/usePolling";
 import { Button } from "@/components/ui/button";
 import Filter from "@/components/react-table/Filter";
+import { useServerTableUrlState } from "@/components/react-table/useServerTableUrlState";
+import {
+  formatEmployeeNoDisplay,
+  getEmployeeTypeDisplay,
+} from "@/utils/employeeDisplay";
 
 type Props = {
-  data: SickAndLeaveSearchResultsType;
+  data: SickAndLeaveResultsType;
+  total: number;
+  pageSize: number;
 };
 
-type RowType = SickAndLeaveSearchResultsType[0] & {
+type RowType = SickAndLeaveResultsType[0] & {
   yearsOfService: number;
   monthsOfService: number;
   usedSickLeave?: number;
@@ -46,87 +45,10 @@ type RowType = SickAndLeaveSearchResultsType[0] & {
 
 // const PDFLink = dynamic(() => import("@/components/PDFLink"), { ssr: false });
 
-export default function SickandLeaveTable({ data }: Props) {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
-  const [sorting, setSorting] = useState<SortingState>([
-    {
-      id: "employeeNo",
-      desc: false //false for ascending
-    }
-  ])
-  usePolling(searchParams.get("searchText"), 300000)
-  const [asOfDate, setAsOfDate] = useState(new Date());
-  const [filterYear, setFilterYear] = useState(String(new Date().getFullYear()));
-  const [filteredData, setFilteredData] = useState<RowType[]>([]);
-
-  const [leaveUsageMap, setLeaveUsageMap] = useState<Record<string, { usedSL: number; usedVL: number }>>({});
-
-  // Fetch approved leave records for the selected year
-  useEffect(() => {
-    async function fetchLeaveUsage() {
-      const result = await getLeaveRecordsByYear(Number(filterYear));
-      if (!result.data) {
-        setLeaveUsageMap({});
-        return;
-      }
-      // Only "Approved" leaves
-      const approved = result.data.filter((lr: LeaveRecordWithEmployeeInfo) => lr.leaveStatus === "Approved");
-      // Aggregate by employeeId and leaveType
-      const usage: Record<string, { usedSL: number; usedVL: number }> = {};
-      approved.forEach((lr: LeaveRecordWithEmployeeInfo) => {
-        if (!usage[lr.employeeId]) {
-          usage[lr.employeeId] = { usedSL: 0, usedVL: 0 };
-        }
-        if (lr.leaveType === "SL") usage[lr.employeeId].usedSL += Number(lr.noOfDays);
-        if (lr.leaveType === "VL") usage[lr.employeeId].usedVL += Number(lr.noOfDays);
-      });
-      setLeaveUsageMap(usage);
-    }
-    fetchLeaveUsage();
-  }, [filterYear]);
-
-  // Compute service years/months based on `asOfDate`
-  useEffect(() => {
-    const computed = data.map((item) => {
-      const hiredDate = item.dateHired ? new Date(item.dateHired) : null;
-      const totalMonths = (() => {
-        if (!hiredDate) return 0;
-        const totalDays = (asOfDate.getTime() - hiredDate.getTime()) / (1000 * 60 * 60 * 24);
-        return totalDays / 30.44; // average days per month
-      })();
-      const yearsOfService = totalMonths / 12;
-      const monthsOfService = totalMonths;    // total months
-
-      return {
-        ...item,
-        yearsOfService,
-        monthsOfService,
-      };
-    });
-    const filteredByYear = computed.filter((item) => {
-      if (!item.dateHired) return false;
-      const hiredDate = new Date(item.dateHired);
-      return hiredDate.getFullYear() <= parseInt(filterYear);
-    });
-
-    setFilteredData(filteredByYear);
-  }, [data, asOfDate, filterYear]);
-
-  // Handle changes from the filter
-  const handleFilterChange = (newAsOf: Date, newYear: string) => {
-    setAsOfDate(newAsOf);
-    setFilterYear(newYear);
-  };
-
-  const pageIndex = useMemo(() => {
-    const page = searchParams.get("page");
-    return page ? parseInt(page) - 1 : 0;
-  }, [searchParams]);
-
-  const columnHeaderArray: Array<keyof RowType | "fullName"| "usedSickLeave" | "usedVacationLeave"> = [
+export default function SickandLeaveTable({ data, total, pageSize }: Props) {
+  const columnHeaderArray: Array<keyof RowType> = [
     "employeeNo",
+    "employeeType",
     "fullName",
     "dateHired",
     "yearsOfService",
@@ -138,20 +60,103 @@ export default function SickandLeaveTable({ data }: Props) {
     "usedVacationLeave",   
   ];
 
+  const serverBackedColumnIds: Array<keyof RowType> = [
+    "employeeNo",
+    "employeeType",
+    "fullName",
+    "dateHired",
+    "department",
+    "sickLeave",
+    "vacationLeave",
+  ];
+
+  const {
+    router,
+    searchParams,
+    pageIndex,
+    sorting,
+    columnFilters,
+    getColumnFilterValue,
+    setColumnFilterValue,
+    onSortingChange,
+    setPageIndex,
+    resetSorting,
+    resetColumnFilters,
+  } = useServerTableUrlState({
+    defaultSort: { id: "employeeNo", desc: false },
+    filterColumnIds: serverBackedColumnIds.map(String),
+  });
+
+  usePolling(searchParams.get("search") ?? searchParams.get("searchText"), 300000)
+  const [asOfDate, setAsOfDate] = useState(new Date());
+
+  const computedData = useMemo<RowType[]>(() => {
+    return data.map(item => {
+      const hiredDate = item.dateHired ? new Date(item.dateHired) : null;
+      if (!hiredDate) return { ...item, yearsOfService: 0, monthsOfService: 0 };
+  
+      const totalMonths =
+        (asOfDate.getTime() - hiredDate.getTime()) /
+        (1000 * 60 * 60 * 24 * 30.44);
+  
+      return {
+        ...item,
+        yearsOfService: totalMonths / 12,
+        monthsOfService: totalMonths,
+      };
+    });
+  }, [data, asOfDate]);
+
+  // Handle changes from the filter
+  const handleFilterChange = (newAsOf: Date, newYear: string) => {
+    setAsOfDate(newAsOf);
+
+    const currentYear = searchParams.get("year") ?? String(new Date().getFullYear());
+
+    if (newYear === currentYear) {
+      return;
+    }
+  
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("year", newYear);
+    params.set("page", "1");
+    router.replace(`?${params.toString()}`, { scroll: false });
+  };
+
   const columnHelper = createColumnHelper<RowType>();
 
+  const columnHeaderLabels: Partial<Record<keyof RowType, string>> = {
+    employeeNo: "Employee No",
+    employeeType: "Type",
+  };
+
   const columns = columnHeaderArray.map((columnName) => {
+    const isServerBackedColumn = serverBackedColumnIds.includes(columnName);
+
     return columnHelper.accessor(columnName, {
       // transformational of datatype
       id: columnName,
+      enableColumnFilter: isServerBackedColumn,
+      enableSorting: isServerBackedColumn,
       header: ({ column }) => {
+        const label = columnHeaderLabels[columnName as keyof RowType] ??
+          (columnName[0].toUpperCase() + columnName.slice(1));
+
+        if (!column.getCanSort()) {
+          return (
+            <div className="pl-1 w-full flex justify-between text-sm font-medium">
+              {label}
+            </div>
+          );
+        }
+
         return (
           <Button
             variant="ghost"
             className="pl-1 w-full flex justify-between"
             onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
           >
-            {columnName[0].toUpperCase() + columnName.slice(1)}
+            {label}
 
             {column.getIsSorted() === "asc" && (
               <ArrowUp className="ml-2 h-4 w-4" />
@@ -167,9 +172,20 @@ export default function SickandLeaveTable({ data }: Props) {
           </Button>
         )
       },
-      cell: ({ getValue }) => {
-      const value = getValue();
+      cell: (info) => {
+      const value = info.getValue();
       // List all columns you want to show as integer
+      if (columnName === "employeeNo") {
+        return formatEmployeeNoDisplay(value as string | null);
+      }
+
+      if (columnName === "employeeType") {
+        return getEmployeeTypeDisplay({
+          employeeType: value as string | null,
+          employeeNo: info.row.original.employeeNo,
+        });
+      }
+
       if (
         columnName === "sickLeave" ||
         columnName === "vacationLeave" ||
@@ -185,40 +201,30 @@ export default function SickandLeaveTable({ data }: Props) {
   });
 });
 
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
   const table = useReactTable({
-    data: filteredData,
+    data: computedData,
     columns,
     state: {
       sorting,
       columnFilters,
       pagination: {
         pageIndex,
-        pageSize: 10,
+        pageSize,
       },
     },
-    onColumnFiltersChange: setColumnFilters,
-    onSortingChange: setSorting,
+    pageCount,
+    manualPagination: true,
+    manualFiltering: true,
+    manualSorting: true,
+    onSortingChange,
     getCoreRowModel: getCoreRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
-    getFacetedUniqueValues: getFacetedUniqueValues(),
-    getSortedRowModel: getSortedRowModel(),
   });
-
-  useEffect(() => {
-    const currentPageIndex = table.getState().pagination.pageIndex
-    const pageCount = table.getPageCount()
-
-    if (pageCount <= currentPageIndex && currentPageIndex > 0) {
-      const params = new URLSearchParams(searchParams.toString())
-      params.set('page', '1')
-      router.replace(`?${params.toString()}`, { scroll: false })
-    }
-  }, [table.getState().columnFilters]) // eslint-disable-line react-hooks/exhaustive-deps
 
 
   return (
-    <div className="mt-6 flex flex-col gap-4">
+    <div className="p-1 flex flex-col gap-2">
       {/* FILTER FORM */}
       <SickandLeaveFilter onFilterChange={handleFilterChange} />
       <div className="rounded-lg overflow-hidden border border-border">
@@ -241,8 +247,9 @@ export default function SickandLeaveTable({ data }: Props) {
                         <div className="grid place-content-center">
                           <Filter
                             column={header.column}
-                            filteredRows={table.
-                              getFilteredRowModel().rows.map(row => row.getValue(header.column.id))
+                            value={getColumnFilterValue(header.column.id)}
+                            onValueChange={(value) =>
+                              setColumnFilterValue(header.column.id, value)
                             }
                           />
                         </div>
@@ -277,13 +284,9 @@ export default function SickandLeaveTable({ data }: Props) {
       <div className="flex justify-between items-center gap-1 flex-wrap">
         <div>
           <p className="whitespace-nowrap font-bold">
-            {`Page ${table.getState().pagination.pageIndex + 1
-              } of ${Math.max(1, table.getPageCount())}`}
+            {`Page ${table.getState().pagination.pageIndex + 1} of ${pageCount}`}
             &nbsp;&nbsp;
-            {`[${table.getFilteredRowModel().rows.length} ${table.getFilteredRowModel().rows.length !== 1
-                ? "total results"
-                : "result"
-              }]`}
+            {`[${total} ${total !== 1 ? "total results" : "result"}]`}
           </p>
         </div>
         <div className="flex flex-row gap-1">
@@ -299,13 +302,13 @@ export default function SickandLeaveTable({ data }: Props) {
             </Button>
             <Button
               variant="outline"
-              onClick={() => table.resetSorting()}
+              onClick={resetSorting}
             >
               Reset Sorting
             </Button>
             <Button
               variant="outline"
-              onClick={() => table.resetColumnFilters()}
+              onClick={resetColumnFilters}
             >
               Reset Filters
             </Button>
@@ -315,10 +318,7 @@ export default function SickandLeaveTable({ data }: Props) {
               variant="outline"
               onClick={() => {
                 const newIndex = table.getState().pagination.pageIndex - 1
-                table.setPageIndex(newIndex)
-                const params = new URLSearchParams(searchParams.toString())
-                params.set("page", (newIndex + 1).toString())
-                router.replace(`?${params.toString()}`, { scroll: false })
+                setPageIndex(newIndex)
               }}
               disabled={!table.getCanPreviousPage()}
             >
@@ -328,10 +328,7 @@ export default function SickandLeaveTable({ data }: Props) {
               variant="outline"
               onClick={() => {
                 const newIndex = table.getState().pagination.pageIndex + 1
-                table.setPageIndex(newIndex)
-                const params = new URLSearchParams(searchParams.toString())
-                params.set("page", (newIndex + 1).toString())
-                router.replace(`?${params.toString()}`, { scroll: false })
+                setPageIndex(newIndex)
               }}
               disabled={!table.getCanNextPage()}
             >

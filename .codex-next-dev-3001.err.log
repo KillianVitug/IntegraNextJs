@@ -1,0 +1,14 @@
+ ⨯ Error: Unauthorized.
+    at requireAuthenticatedUser (src\lib\auth\server.ts:140:11)
+    at async requireAdmin (src\lib\auth\server.ts:147:16)
+    at async requireAdminActor (src\lib\admin.ts:24:16)
+    at async PayrollPage (src\app\(ntg)\payroll\page.tsx:223:3)
+  138 |     }
+  139 |
+> 140 |     throw new Error("Unauthorized.");
+      |           ^
+  141 |   }
+  142 |
+  143 |   return auth; {
+  digest: '3271852453'
+}

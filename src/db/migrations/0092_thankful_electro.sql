@@ -1,0 +1,5 @@
+CREATE INDEX "idx_attendance_raw_logs_employee_log_date" ON "attendance_raw_logs" USING btree ("employee_id","log_date");--> statement-breakpoint
+CREATE INDEX "idx_shift_assignment_active" ON "employee_shift_assignments" USING btree ("employee_id","effective_from") WHERE "employee_shift_assignments"."effective_to" is null;--> statement-breakpoint
+CREATE INDEX "idx_leave_record_status_active" ON "employees_leave_records" USING btree ("leave_status") WHERE "employees_leave_records"."deleted_at" is null;--> statement-breakpoint
+CREATE INDEX "idx_entries_employee_date_range" ON "employees_recurring_entries" USING btree ("employee_id","start_date","end_date");--> statement-breakpoint
+CREATE INDEX "idx_leave_ledger_employee_transaction_year" ON "leave_balance_ledger" USING btree ("employee_id","transaction_type","period_year");

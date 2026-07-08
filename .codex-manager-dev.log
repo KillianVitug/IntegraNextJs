@@ -1,0 +1,60 @@
+
+> integra@0.1.0 dev
+> next dev --turbopack --port 3000
+
+   ▲ Next.js 15.5.9 (Turbopack)
+   - Local:        http://localhost:3000
+   - Network:      http://25.13.216.62:3000
+   - Environments: .env.local
+
+ ✓ Starting...
+Creating turbopack project {
+  dir: 'C:\\Users\\63917\\VsProjects2024\\IntegraNextJs(2)\\IntegraNextJs',
+  testMode: true
+}
+ ✓ Ready in 2.4s
+ ○ Compiling /managerHome ...
+ ✓ Compiled /managerHome in 7.1s
+ GET /managerHome 200 in 8332ms
+ GET / 200 in 8826ms
+ GET /home/applications 200 in 9076ms
+ ✓ Compiled in 202ms
+ ✓ Compiled in 255ms
+ ✓ Compiled /managerHome in 273ms
+ GET /managerHome 200 in 1125ms
+ GET /home/applications 200 in 1373ms
+ ○ Compiling /home ...
+ ✓ Compiled /home in 630ms
+ ○ Compiling /_error ...
+ ✓ Compiled /_error in 1541ms
+ GET /home 500 in 2691ms
+ GET /home 500 in 292ms
+ ✓ Compiled /favicon.ico in 299ms
+ GET /favicon.ico 200 in 664ms
+ GET /home 500 in 461ms
+ GET /favicon.ico 200 in 428ms
+ ✓ Compiled in 20.3s
+ ✓ Compiled in 623ms
+ ✓ Compiled in 547ms
+ ✓ Compiled in 5.7s
+ ✓ Compiled in 291ms
+ ✓ Compiled in 385ms
+ ✓ Compiled in 508ms
+ ✓ Compiled in 194ms
+ ○ Compiling /managerCalendar ...
+ ✓ Compiled /managerCalendar in 5.3s
+ GET /managerCalendar 200 in 15033ms
+ ✓ Compiled in 39s
+ ✓ Compiled in 5.2s
+ ✓ Compiled in 943ms
+ ✓ Compiled in 458ms
+ ✓ Compiled in 1094ms
+ ✓ Compiled in 177.2s
+ ✓ Compiled in 2.7s
+ ✓ Compiled in 1919ms
+ ✓ Compiled in 36.3s
+ ○ Compiling / ...
+ ✓ Compiled / in 15.9s
+ ✓ Compiled in 79.7s
+ ○ Compiling /loans/form ...
+ ✓ Compiled /loans/form in 216.1s

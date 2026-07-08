@@ -10,11 +10,13 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { TextareaHTMLAttributes } from "react";
 import { useFormContext } from "react-hook-form";
+import { cn } from "@/lib/utils";
 
 type Props<S> = {
   fieldTitle: string;
   nameInSchema: keyof S & string;
   className?: string;
+  containerClassName?: string;
   value?: string;
   onChange?: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
 } & TextareaHTMLAttributes<HTMLTextAreaElement>;
@@ -23,6 +25,7 @@ export function TextAreaWithLabel<S>({
   fieldTitle,
   nameInSchema,
   className,
+  containerClassName,
   value,
   onChange,
   ...props
@@ -32,12 +35,11 @@ export function TextAreaWithLabel<S>({
   const isControlled = typeof value !== "undefined" && typeof onChange === "function";
 
   if (isControlled) {
-    // ?? Use as a controlled input, outside react-hook-form
     return (
-      <div className="space-y-1.5">
-        <FormLabel className="text-base mb-2" htmlFor={nameInSchema}>
+      <div className={cn("space-y-1.5", containerClassName)}>
+        <label className="block text-sm font-medium" htmlFor={nameInSchema}>
           {fieldTitle}
-        </FormLabel>
+        </label>
         <Textarea
           id={nameInSchema}
           value={value}
@@ -55,12 +57,18 @@ export function TextAreaWithLabel<S>({
       control={form.control}
       name={nameInSchema}
       render={({ field }) => (
-        <FormItem>
-          <FormLabel className="text-base mb-2" htmlFor={nameInSchema}>
+        <FormItem className={cn("space-y-1.5", containerClassName)}>
+          <FormLabel className="text-sm font-medium" htmlFor={nameInSchema}>
             {fieldTitle}
           </FormLabel>
           <FormControl>
-            <Textarea id={nameInSchema} className={className} {...props} {...field} />
+            <Textarea
+              id={nameInSchema}
+              className={className}
+              {...props}
+              {...field}
+              value={field.value ?? ""}
+            />
           </FormControl>
           <FormMessage />
         </FormItem>

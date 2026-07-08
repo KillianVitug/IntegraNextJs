@@ -1,0 +1,1 @@
+ALTER TABLE "employees_salary" ADD COLUMN "ignore_dtr_for_monthly_rate" boolean DEFAULT false NOT NULL;

@@ -16,11 +16,8 @@ export const selectDepartmentSchema = createSelectSchema(department);
 
 // ✅ Delete Schema (used when deleting a department)
 export const deleteDepartmentSchema = z.object({
-    id: z
-      .number({
-        required_error: "Department ID is required for deletion",
-        invalid_type_error: "Department ID must be a number",
-      })
+    id: z.coerce
+      .number()
       .positive("Department ID must be a positive number"),
   });
 

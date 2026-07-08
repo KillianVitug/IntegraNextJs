@@ -1,18 +1,13 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import {
-  createColumnHelper,
-  flexRender,
-  getCoreRowModel,
-  useReactTable,
-  ColumnFiltersState,
-  SortingState,
-  getPaginationRowModel,
-  getFilteredRowModel,
-  getFacetedUniqueValues,
-  getSortedRowModel,
-} from "@tanstack/react-table";
-
+  listSalaryAdjustmentPeriods,
+  listSalaryChanges,
+  type SalaryChangeHistoryResultsType,
+} from "@/app/actions/salaryAdjustAction";
+import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/layout/page-layout";
 import {
   Table,
   TableBody,
@@ -21,332 +16,364 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-// import { /*CircleCheckIcon, CircleXIcon,*/ ArrowUpDown, ArrowDown, ArrowUp } from "lucide-react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useState, useMemo, useEffect } from "react";
-import { usePolling } from "@/hooks/usePolling";
-import { Button } from "@/components/ui/button";
-import Filter from "@/components/react-table/Filter";
-import PayrollCodeSearch from "./PayrollCodeSearch";
-import EmployeeSalaryEditor from "./form/EmployeeSalaryEditor";
-import { getAllEmployees, getSalaryAdjustmentHistory, getSalaryAdjustmentHistoryByYear } from "@/app/actions/salaryAdjustAction";
-import type { SalaryAdjustmentResultsType } from "@/app/actions/salaryAdjustAction";
 import { SelectWithLabel } from "@/components/inputs/SelectWithLabel";
-import { SalaryAdjustmentRead } from "@/zod-schemas/employeeSalary";
+import EmployeeSalaryEditor from "./form/EmployeeSalaryEditor";
+import type {
+  SalaryChangeHistoryRead,
+  SalaryChangeMode,
+  SalaryChangeStatus,
+} from "@/zod-schemas/salaryChange";
+import {
+  formatEmployeeNoDisplay,
+  formatEmployeePickerLabel,
+  getEmployeeTypeDisplay,
+  sortEmployeesByLastName,
+} from "@/utils/employeeDisplay";
+
+type EmployeeOption = {
+  id: string;
+  employeeNo: string;
+  employeeType?: string | null;
+  firstName: string;
+  middleName?: string | null;
+  lastName: string;
+};
+
+type PayrollPeriodOption = {
+  id: string;
+  code: string;
+  payrollTerms: string;
+  year: number;
+  startDate: string;
+  endDate: string;
+  adjustedPayDate: string;
+  cycle: "A" | "B";
+  status: string;
+};
 
 type Props = {
-  data: SalaryAdjustmentResultsType;
+  initialData: SalaryChangeHistoryResultsType;
+  initialEmployees: EmployeeOption[];
+  initialPeriods: PayrollPeriodOption[];
+  initialYear: number;
 };
 
-// Helper function to format date
-const formatDate = (dateString: string | Date) => {
-  const date = new Date(dateString);
-  return date.toLocaleString('en-US', {
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: true
+function formatDateTime(value: Date | string) {
+  return new Date(value).toLocaleString("en-PH", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
   });
-};
+}
 
-export default function SalaryAdjustTable({ data }: Props) {
-  const router = useRouter();
-  const [payrollCode, setPayrollCode] = useState("");
-  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
-  const [employees, setEmployees] = useState<Awaited<ReturnType<typeof getAllEmployees>>>([]);
+function pickDefaultPeriodId(periods: PayrollPeriodOption[]) {
+  if (periods.length === 0) return "";
+
+  const today = new Date().toISOString().slice(0, 10);
+  const currentPeriod = periods.find(
+    (period) => period.startDate <= today && period.endDate >= today
+  );
+
+  if (currentPeriod) return currentPeriod.id;
+  return periods[periods.length - 1]?.id ?? periods[0]?.id ?? "";
+}
+
+function getStatusClass(status: SalaryChangeStatus) {
+  if (status === "Active") return "bg-emerald-100 text-emerald-700";
+  if (status === "AppliedPermanent") return "bg-sky-100 text-sky-700";
+  if (status === "Superseded") return "bg-amber-100 text-amber-700";
+  return "bg-rose-100 text-rose-700";
+}
+
+function formatMode(mode: SalaryChangeMode) {
+  if (mode === "OnePeriodOverride") return "One-period";
+  if (mode === "ForwardEffective") return "Forward-effective";
+  return "Multi-period";
+}
+
+export default function SalaryAdjustTable({
+  initialData,
+  initialEmployees,
+  initialPeriods,
+  initialYear,
+}: Props) {
+  const [allChanges, setAllChanges] = useState<SalaryChangeHistoryRead[]>(initialData);
+  const [employees] = useState(initialEmployees);
+  const [periods, setPeriods] = useState(initialPeriods);
+  const [selectedYear, setSelectedYear] = useState(initialYear);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState("");
-  const [loadingEmployees, setLoadingEmployees] = useState(false);
-  const [tableData, setTableData] = useState<SalaryAdjustmentRead[]>(data);
-  const [loadingTableData, setLoadingTableData] = useState(false);
-  const searchParams = useSearchParams();
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
-  const [sorting, setSorting] = useState<SortingState>([
-    {
-      id: "employeeNo",
-      desc: false //false for ascending
+  const [selectedPeriodId, setSelectedPeriodId] = useState(
+    pickDefaultPeriodId(initialPeriods)
+  );
+  const [selectedMode, setSelectedMode] =
+    useState<SalaryChangeMode>("OnePeriodOverride");
+  const [selectedStatus, setSelectedStatus] = useState<SalaryChangeStatus | "">("");
+  const [isReloading, setIsReloading] = useState(false);
+
+  useEffect(() => {
+    if (!periods.some((period) => period.id === selectedPeriodId)) {
+      setSelectedPeriodId(pickDefaultPeriodId(periods));
     }
-  ])
-  usePolling(searchParams.get("searchText"), 300000)
-  const pageIndex = useMemo(() => {
-    const page = searchParams.get("page")
-    return page ? parseInt(page) - 1 : 0
-  }, [searchParams.get("page")]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [periods, selectedPeriodId]);
 
-  
-  const columnHelper = createColumnHelper<SalaryAdjustmentRead>();
+  const selectedPeriod = useMemo(
+    () => periods.find((period) => period.id === selectedPeriodId) ?? null,
+    [periods, selectedPeriodId]
+  );
 
-  const columns = [
-  columnHelper.accessor("payrollCode", { header: "Payroll Code" }),
-  columnHelper.accessor("employeeNo", { header: "Employee No" }),
-  columnHelper.accessor("fullName", { header: "Employee" }),
+  const visibleChanges = useMemo(
+    () =>
+      allChanges.filter((change) => {
+        if (selectedEmployeeId && change.employeeId !== selectedEmployeeId) return false;
+        if (selectedPeriodId && change.payrollPeriodId !== selectedPeriodId) {
+          if (change.mode !== "MultiPeriodOverride") return false;
+          if (!change.endPeriodStartDate) return false;
+          if (!selectedPeriod) return false;
+          if (
+            selectedPeriod.startDate < change.periodStartDate ||
+            selectedPeriod.startDate > change.endPeriodStartDate
+          ) {
+            return false;
+          }
+        }
+        if (selectedStatus && change.status !== selectedStatus) return false;
+        return true;
+      }),
+    [allChanges, selectedEmployeeId, selectedPeriod, selectedPeriodId, selectedStatus]
+  );
 
-  columnHelper.accessor("oldDailyRate", { header: "Old Daily" }),
-  columnHelper.accessor("newDailyRate", { header: "New Daily" }),
+  const activeChangeForSelection = useMemo(
+    () =>
+      allChanges.find((change) => {
+        if (change.employeeId !== selectedEmployeeId) return false;
+        if (change.mode !== selectedMode) return false;
+        if (change.status !== "Active") return false;
 
-  columnHelper.accessor("adjustmentDate", {
-    header: "Date",
-    cell: info => formatDate(info.getValue()),
-  }),
-];
-  const table = useReactTable({
-    data: tableData, // Change this from 'data' to 'tableData'
-    columns,
-    state: {
-      sorting,
-      columnFilters,
-      pagination: {
-        pageIndex,
-        pageSize: 10,
-      },
-    },
-    onColumnFiltersChange: setColumnFilters,
-    onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
-    getFacetedUniqueValues: getFacetedUniqueValues(),
-    getSortedRowModel: getSortedRowModel(),
+        if (change.mode === "MultiPeriodOverride") {
+          if (!selectedPeriod || !change.endPeriodStartDate) return false;
+          return (
+            selectedPeriod.startDate >= change.periodStartDate &&
+            selectedPeriod.startDate <= change.endPeriodStartDate
+          );
+        }
+
+        return change.payrollPeriodId === selectedPeriodId;
+      }) ?? null,
+    [allChanges, selectedEmployeeId, selectedMode, selectedPeriod, selectedPeriodId]
+  );
+
+  const employeeOptions = sortEmployeesByLastName(employees).map((employee) => ({
+    id: employee.id,
+    name: formatEmployeePickerLabel(employee),
+  }));
+
+  const periodOptions = periods.map((period) => ({
+    id: period.id,
+    name: `${period.code} | ${period.startDate} to ${period.endDate} | Pay ${period.adjustedPayDate}`,
+  }));
+
+  const statusOptions = [
+    { id: "Active", name: "Active" },
+    { id: "AppliedPermanent", name: "Applied Permanent" },
+    { id: "Superseded", name: "Superseded" },
+    { id: "Canceled", name: "Canceled" },
+  ];
+
+  const yearOptions = Array.from({ length: 7 }, (_, index) => {
+    const year = initialYear - 3 + index;
+    return { id: String(year), name: String(year) };
   });
 
-  const filters = table.getState().columnFilters;
-
-  useEffect(() => {
-    const currentPageIndex = table.getState().pagination.pageIndex;
-    if (table.getPageCount() <= currentPageIndex && currentPageIndex > 0) {
-      const params = new URLSearchParams(searchParams.toString());
-      params.set("page", "1");
-      router.replace(`?${params.toString()}`, { scroll: false });
+  async function reloadYear(year: number) {
+    setIsReloading(true);
+    try {
+      const [nextPeriods, nextChanges] = await Promise.all([
+        listSalaryAdjustmentPeriods(year),
+        listSalaryChanges({ year }),
+      ]);
+      setPeriods(nextPeriods);
+      setAllChanges(nextChanges);
+    } finally {
+      setIsReloading(false);
     }
-  }, [filters, router, searchParams, table]);
+  }
 
-  // Handle salary update completion
-  const handleSalaryUpdate = async () => {
-    const newData = payrollCode
-      ? await getSalaryAdjustmentHistory(payrollCode)
-      : await getSalaryAdjustmentHistoryByYear(selectedYear);
-  
-    setTableData(newData);
-    setSelectedEmployeeId("");
-  };
-
-  const handleYearChange = (year: number) => {
-    setSelectedYear(year);
-    setPayrollCode(""); // Clear payroll code when year changes
-  };
-
-  // Load table data when payroll code or year changes
-  useEffect(() => {
-    if (payrollCode) {
-      setLoadingTableData(true);
-      getSalaryAdjustmentHistory(payrollCode)
-        .then(setTableData)
-        .finally(() => setLoadingTableData(false));
-    } else {
-      // If no payroll code is selected, show all records for the selected year
-      setLoadingTableData(true);
-      getSalaryAdjustmentHistoryByYear(selectedYear)
-        .then(setTableData)
-        .finally(() => setLoadingTableData(false));
+  async function refreshChanges() {
+    setIsReloading(true);
+    try {
+      setAllChanges(await listSalaryChanges({ year: selectedYear }));
+    } finally {
+      setIsReloading(false);
     }
-  }, [payrollCode, selectedYear]);
-
-  useEffect(() => {
-    if (employees.length === 0) {
-      setLoadingEmployees(true);
-      getAllEmployees()
-        .then(setEmployees)
-        .finally(() => setLoadingEmployees(false));
-    }
-  }, [employees.length]);
-
-  // Handle row click to select employee for editing
-  const handleRowClick = (employeeId: string, payrollCode: string) => {
-    if (!employeeId || !payrollCode) {
-      console.warn("Employee ID or Payroll Code is missing");
-      return;
-    }
-    setSelectedEmployeeId(employeeId);
-    setPayrollCode(payrollCode);
-  };
+  }
 
   return (
-    <div className="mt-6 flex flex-col gap-4">
-      <div className="flex flex-row gap-4 items-end">
-        <PayrollCodeSearch
-          value={payrollCode}
-          onChange={setPayrollCode}
-          onYearChange={handleYearChange}
-          onResetSelectedEmployee={() => setSelectedEmployeeId("")}
-        />
-        <div className="flex flex-row gap-2 items-end">
+    <div className="space-y-4">
+      <PageHeader
+        title="Salary Adjustment"
+        description="Apply and audit one-period, forward-effective, and multi-period salary changes."
+      />
+      <div className="flex flex-wrap items-end gap-3">
         <SelectWithLabel
-            fieldTitle="Search Employee"
-            nameInSchema="selectedEmployeeId"
-            data={employees.map((emp) => ({
-              id: emp.id,
-              name: `${emp.employeeNo} - ${emp.fullName}`,
-            }))}
-            value={selectedEmployeeId}
-            onChange={(val) => setSelectedEmployeeId(val)}
-            className="max-w-xs"
-          />
-        </div>
+          fieldTitle="Year"
+          nameInSchema="selectedYear"
+          data={yearOptions}
+          value={String(selectedYear)}
+          onChange={async (value) => {
+            const nextYear = Number(value);
+            setSelectedYear(nextYear);
+            setSelectedEmployeeId("");
+            await reloadYear(nextYear);
+          }}
+        />
+        <SelectWithLabel
+          fieldTitle="Payroll Period"
+          nameInSchema="selectedPeriodId"
+          data={periodOptions}
+          value={selectedPeriodId}
+          onChange={setSelectedPeriodId}
+          className="max-w-md"
+        />
+        <SelectWithLabel
+          fieldTitle="Employee"
+          nameInSchema="selectedEmployeeId"
+          data={employeeOptions}
+          value={selectedEmployeeId}
+          onChange={setSelectedEmployeeId}
+          className="max-w-md"
+        />
+        <SelectWithLabel
+          fieldTitle="History Status"
+          nameInSchema="selectedStatus"
+          data={[{ id: "__all__", name: "All" }, ...statusOptions]}
+          value={selectedStatus || "__all__"}
+          onChange={(value) =>
+            setSelectedStatus(
+              value === "__all__" ? "" : ((value || "") as SalaryChangeStatus | "")
+            )
+          }
+        />
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => {
+            setSelectedEmployeeId("");
+            setSelectedStatus("");
+            setSelectedMode("OnePeriodOverride");
+          }}
+        >
+          Reset Filters
+        </Button>
+        <Button type="button" variant="outline" onClick={refreshChanges}>
+          {isReloading ? "Refreshing..." : "Refresh"}
+        </Button>
       </div>
 
-      {/* Salary Editor - Only show if payroll code is selected */}
-      {selectedEmployeeId && payrollCode && (
+      {selectedEmployeeId && selectedPeriod ? (
         <EmployeeSalaryEditor
+          key={`${selectedEmployeeId}-${selectedPeriod.id}`}
           selectedEmployeeId={selectedEmployeeId}
-          payrollCode={payrollCode}
-          onUpdateComplete={handleSalaryUpdate}
-          onCancel={() => setSelectedEmployeeId("")}
+          payrollPeriod={selectedPeriod}
+          periods={periods}
+          mode={selectedMode}
+          onModeChange={setSelectedMode}
+          activeChange={activeChangeForSelection}
+          onCommitted={refreshChanges}
         />
-      )}
-
-      {/* Warning if no payroll code selected */}
-      {selectedEmployeeId && !payrollCode && (
-        <div className="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded">
-          Please select a Payroll Code before updating salary information.
+      ) : (
+        <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+          Select a payroll period and employee to create or cancel a salary change.
         </div>
       )}
 
-      <div className="rounded-lg overflow-hidden border border-border">
-        <Table className="border">
+      <div className="rounded-md border">
+        <Table>
           <TableHeader>
-            {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id}>
-                {headerGroup.headers.map((header) => {
-                  return (
-                    <TableHead key={header.id} className="bg-secondary p-1">
-                      <div>
-                        {header.isPlaceholder
-                          ? null
-                          : flexRender(
-                            header.column.columnDef.header,
-                            header.getContext()
-                          )}
-                      </div>
-                      {header.column.getCanFilter() ? (
-                        <div className="grid place-content-center">
-                          <Filter
-                            column={header.column}
-                            filteredRows={table.
-                              getFilteredRowModel().rows.map(row => row.getValue(header.column.id))
-                            }
-                          />
-                        </div>
-                      ) : null}
-                    </TableHead>
-                  );
-                })}
-              </TableRow>
-            ))}
+            <TableRow>
+              <TableHead>Created</TableHead>
+              <TableHead>Actor</TableHead>
+              <TableHead>Period</TableHead>
+              <TableHead>Employee No</TableHead>
+              <TableHead>Type</TableHead>
+              <TableHead>Employee</TableHead>
+              <TableHead>Mode</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Applied Permanent</TableHead>
+              <TableHead>Before Monthly</TableHead>
+              <TableHead>After Monthly</TableHead>
+              <TableHead>Reason</TableHead>
+            </TableRow>
           </TableHeader>
           <TableBody>
-            {/* Render data rows */}
-            {table.getRowModel().rows.map((row) => {
-              const isSelected = row.original.employeeId === selectedEmployeeId && row.original.payrollCode === payrollCode;
-              return (
-                <TableRow
-                  key={row.id}
-                  className={`cursor-pointer hover:bg-border/25 dark:hover:bg-ring/40 ${
-                    isSelected ? 'bg-blue-100 dark:bg-blue-900/20 border-blue-300' : ''
-                  }`}
-                  onClick={() => {
-                    const employeeId = row.original.employeeId;
-                    const payrollCode = row.original.payrollCode;
-                    if (employeeId && payrollCode) {
-                      handleRowClick(employeeId, payrollCode);
-                    }
-                  }}
-                  title="Click to edit this employee's salary information"
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id} className="border">
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </TableCell>
-                  ))}
-                </TableRow>
-              );
-            })}
-
-            {/* Render empty rows if less than 10 */}
-            {Array.from({ length: Math.max(0, 10 - table.getRowModel().rows.length) }).map((_, idx) => (
-              <TableRow key={`empty-${idx}`}>
-                {table.getAllLeafColumns().map((col) => (
-                  <TableCell key={col.id} className="border">
-                    &nbsp;
-                  </TableCell>
-                ))}
+            {visibleChanges.map((change) => (
+              <TableRow
+                key={change.id}
+                className="cursor-pointer hover:bg-muted/40"
+                onClick={() => {
+                  setSelectedEmployeeId(change.employeeId);
+                  setSelectedPeriodId(change.payrollPeriodId);
+                  setSelectedMode(change.mode);
+                }}
+              >
+                <TableCell>{formatDateTime(change.createdAt)}</TableCell>
+                <TableCell>{change.createdByUserId}</TableCell>
+                <TableCell>
+                  <div className="font-medium">
+                    {change.endPayrollCode
+                      ? `${change.payrollCode} to ${change.endPayrollCode}`
+                      : change.payrollCode}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {change.periodStartDate} to{" "}
+                    {change.endPeriodEndDate ?? change.periodEndDate}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  {formatEmployeeNoDisplay(change.employeeNo)}
+                </TableCell>
+                <TableCell>
+                  {getEmployeeTypeDisplay({
+                    employeeType: change.employeeType,
+                    employeeNo: change.employeeNo,
+                  }) || "-"}
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium">{change.fullName}</div>
+                </TableCell>
+                <TableCell>{formatMode(change.mode)}</TableCell>
+                <TableCell>
+                  <span className={`rounded-full px-2 py-1 text-xs font-medium ${getStatusClass(change.status)}`}>
+                    {change.status === "AppliedPermanent"
+                      ? "Applied Permanent"
+                      : change.status}
+                  </span>
+                </TableCell>
+                <TableCell>
+                  {change.appliedPermanentAt
+                    ? formatDateTime(change.appliedPermanentAt)
+                    : "-"}
+                </TableCell>
+                <TableCell>{change.before.monthlyRate ?? "-"}</TableCell>
+                <TableCell>{change.after.monthlyRate ?? "-"}</TableCell>
+                <TableCell>
+                  <div>{change.reason}</div>
+                  {change.notes ? (
+                    <div className="text-xs text-muted-foreground">{change.notes}</div>
+                  ) : null}
+                </TableCell>
               </TableRow>
             ))}
+            {visibleChanges.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={12} className="py-10 text-center text-muted-foreground">
+                  No salary changes match the current filters.
+                </TableCell>
+              </TableRow>
+            ) : null}
           </TableBody>
         </Table>
-      </div>
-      <div className="flex justify-between items-center gap-1 flex-wrap">
-        <div>
-          <p className="whitespace-nowrap font-bold">
-            {`Page ${table.getState().pagination.pageIndex + 1
-              } of ${Math.max(1, table.getPageCount())}`}
-            &nbsp;&nbsp;
-            {`[${table.getFilteredRowModel().rows.length} ${table.getFilteredRowModel().rows.length !== 1
-              ? "total results"
-              : "result"
-              }]`}
-          </p>
-        </div>
-        <div className="flex flex-row gap-1">
-          <div className="flex flex-row gap-1">
-            <Button
-              variant="outline"
-              onClick={() => router.refresh()}
-            >
-              Refresh Data
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => table.resetSorting()}
-            >
-              Reset Sorting
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => table.resetColumnFilters()}
-            >
-              Reset Filters
-            </Button>
-          </div>
-          <div className="flex flex-row gap-1">
-            <Button
-              variant="outline"
-              onClick={() => {
-                const newIndex = table.getState().pagination.pageIndex - 1
-                table.setPageIndex(newIndex)
-                const params = new URLSearchParams(searchParams.toString())
-                params.set("page", (newIndex + 1).toString())
-                router.replace(`?${params.toString()}`, { scroll: false })
-              }}
-              disabled={!table.getCanPreviousPage()}
-            >
-              Previous
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => {
-                const newIndex = table.getState().pagination.pageIndex + 1
-                table.setPageIndex(newIndex)
-                const params = new URLSearchParams(searchParams.toString())
-                params.set("page", (newIndex + 1).toString())
-                router.replace(`?${params.toString()}`, { scroll: false })
-              }}
-              disabled={!table.getCanNextPage()}
-            >
-              Next
-            </Button>
-          </div>
-        </div>
       </div>
     </div>
   );

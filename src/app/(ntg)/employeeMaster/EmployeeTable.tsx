@@ -1,18 +1,12 @@
 "use client";
 
-import type { EmployeeSearchResultsType } from "@/lib/queries/getEmployeeSearchResults";
+import type { OpenEmployeesResult } from "@/lib/queries/getEmployee";
 
 import {
   createColumnHelper,
   flexRender,
   getCoreRowModel,
   useReactTable,
-  ColumnFiltersState,
-  SortingState,
-  getPaginationRowModel,
-  getFilteredRowModel,
-  getFacetedUniqueValues,
-  getSortedRowModel,
 } from "@tanstack/react-table";
 
 import {
@@ -26,39 +20,24 @@ import {
 
 import { /*CircleCheckIcon, CircleXIcon,*/ ArrowUpDown, ArrowDown, ArrowUp } from "lucide-react";
 
-import { useRouter, useSearchParams } from "next/navigation";
-import { useState, useMemo, useEffect } from "react";
 import { usePolling } from "@/hooks/usePolling";
 import { Button } from "@/components/ui/button";
 import Filter from "@/components/react-table/Filter";
+import { useServerTableUrlState } from "@/components/react-table/useServerTableUrlState";
+import {
+  formatEmployeeNoDisplay,
+  getEmployeeTypeDisplay,
+} from "@/utils/employeeDisplay";
 
 type Props = {
-  data: EmployeeSearchResultsType;
+  data: OpenEmployeesResult["data"];
+  total: number;
+  pageSize: number;
 };
 
-type RowType = EmployeeSearchResultsType[0];
+type RowType = OpenEmployeesResult["data"][number];
 
-export default function EmployeeTable({ data }: Props) {
-  const router = useRouter();
-
-  const searchParams = useSearchParams();
-
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
-
-  const [sorting, setSorting] = useState<SortingState>([
-    {
-        id: "employeeNo",
-        desc: false //false for ascending
-    }
-  ])
-
-  usePolling(searchParams.get("searchText"), 300000)
-
-  const pageIndex = useMemo(() => {
-    const page = searchParams.get("page")
-    return page ? parseInt(page) - 1 : 0
-}, [searchParams.get("page")]) // eslint-disable-line react-hooks/exhaustive-deps
-
+export default function EmployeeTable({ data, total, pageSize }: Props) {
   const columnHeaderArray: Array<keyof RowType> = [
     "employeeNo",
     "firstName",
@@ -70,7 +49,32 @@ export default function EmployeeTable({ data }: Props) {
     "Address",
     "Telephone",
     "Email",
+    "employeeType",
   ];
+
+  const {
+    router,
+    searchParams,
+    pageIndex,
+    sorting,
+    columnFilters,
+    getColumnFilterValue,
+    setColumnFilterValue,
+    onSortingChange,
+    setPageIndex,
+    resetSorting,
+    resetColumnFilters,
+  } = useServerTableUrlState({
+    defaultSort: { id: "employeeNo", desc: false },
+    filterColumnIds: columnHeaderArray.map(String),
+  });
+
+  usePolling(searchParams.get("search") ?? searchParams.get("searchText"), 300000)
+
+  const columnHeaderLabels: Partial<Record<keyof RowType, string>> = {
+    employeeNo: "Employee No",
+    employeeType: "Type",
+  };
 
   const columnHelper = createColumnHelper<RowType>();
 
@@ -85,7 +89,8 @@ export default function EmployeeTable({ data }: Props) {
                 className="pl-1 w-full flex justify-between"
                 onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
             >
-                {columnName[0].toUpperCase() + columnName.slice(1)}
+                {columnHeaderLabels[columnName] ??
+                  (columnName[0].toUpperCase() + columnName.slice(1))}
 
                 {column.getIsSorted() === "asc" && (
                     <ArrowUp className="ml-2 h-4 w-4" />
@@ -101,11 +106,24 @@ export default function EmployeeTable({ data }: Props) {
             </Button>
             )
         },
-      // cell: ({ getValue }) => { //presentational edit cells
-      //     const value = getValue()
-      // }
+      cell: ({ getValue, row }) => {
+        if (columnName === "employeeNo") {
+          return formatEmployeeNoDisplay(getValue() as string | null);
+        }
+
+        if (columnName === "employeeType") {
+          return getEmployeeTypeDisplay({
+            employeeType: getValue() as string | null,
+            employeeNo: row.original.employeeNo,
+          });
+        }
+
+        return getValue();
+      },
     });
   });
+
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
   const table = useReactTable({
     data,
@@ -115,28 +133,16 @@ export default function EmployeeTable({ data }: Props) {
         columnFilters,
         pagination: {
           pageIndex,
-          pageSize: 10,
+          pageSize,
         },
     },
-    onColumnFiltersChange: setColumnFilters,
-    onSortingChange: setSorting,
+    pageCount,
+    manualPagination: true,
+    manualFiltering: true,
+    manualSorting: true,
+    onSortingChange,
     getCoreRowModel: getCoreRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
-    getFacetedUniqueValues: getFacetedUniqueValues(),
-    getSortedRowModel: getSortedRowModel(),
   });
-
-  useEffect(() => {
-    const currentPageIndex = table.getState().pagination.pageIndex
-    const pageCount = table.getPageCount()
-
-    if(pageCount <= currentPageIndex && currentPageIndex > 0) {
-      const params = new URLSearchParams(searchParams.toString())
-      params.set('page','1')
-      router.replace(`?${params.toString()}`, {scroll: false})
-    }
-  }, [table.getState().columnFilters]) // eslint-disable-line react-hooks/exhaustive-deps
 
 
   return (
@@ -161,8 +167,9 @@ export default function EmployeeTable({ data }: Props) {
                         <div className="grid place-content-center">
                             <Filter
                               column={header.column}
-                              filteredRows={table.
-                              getFilteredRowModel().rows.map(row=> row.getValue(header.column.id))
+                              value={getColumnFilterValue(header.column.id)}
+                              onValueChange={(value) =>
+                                setColumnFilterValue(header.column.id, value)
                               }
                             />
                         </div>
@@ -199,13 +206,9 @@ export default function EmployeeTable({ data }: Props) {
           <p className="whitespace-nowrap font-bold">
             {`Page ${
               table.getState().pagination.pageIndex + 1
-            } of ${Math.max(1, table.getPageCount())}`}
+            } of ${pageCount}`}
             &nbsp;&nbsp;
-            {`[${table.getFilteredRowModel().rows.length} ${
-              table.getFilteredRowModel().rows.length !== 1
-                ? "total results"
-                : "result"
-            }]`}
+            {`[${total} ${total !== 1 ? "total results" : "result"}]`}
           </p>
         </div>
         <div className="flex flex-row gap-1">
@@ -218,13 +221,13 @@ export default function EmployeeTable({ data }: Props) {
           </Button>
           <Button
             variant="outline"
-            onClick={() => table.resetSorting()}
+            onClick={resetSorting}
           >
             Reset Sorting
           </Button>
           <Button
             variant="outline"
-            onClick={() => table.resetColumnFilters()}
+            onClick={resetColumnFilters}
           >
             Reset Filters
           </Button>
@@ -234,10 +237,7 @@ export default function EmployeeTable({ data }: Props) {
             variant="outline"
             onClick={() => {
               const newIndex = table.getState().pagination.pageIndex - 1
-              table.setPageIndex(newIndex)
-              const params = new URLSearchParams(searchParams.toString())
-              params.set("page", (newIndex + 1).toString())
-              router.replace(`?${params.toString()}`, { scroll: false })
+              setPageIndex(newIndex)
           }}
             disabled={!table.getCanPreviousPage()}
           >
@@ -247,10 +247,7 @@ export default function EmployeeTable({ data }: Props) {
             variant="outline"
             onClick={() => {
               const newIndex = table.getState().pagination.pageIndex + 1
-              table.setPageIndex(newIndex)
-              const params = new URLSearchParams(searchParams.toString())
-              params.set("page", (newIndex + 1).toString())
-              router.replace(`?${params.toString()}`, { scroll: false })
+              setPageIndex(newIndex)
           }}
             disabled={!table.getCanNextPage()}
           >

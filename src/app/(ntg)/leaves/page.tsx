@@ -1,49 +1,50 @@
-import { /*getSickAndLeave,*/ getSickAndLeaveWithUsage } from "@/lib/queries/getSickAndLeave";
-import SickandLeaveTable from "./SickandLeaveTable";
-import { getSickAndLeaveSearchResults } from "@/lib/queries/getEmployeeSearchResults";
+import { getSickAndLeaveWithUsage } from "@/lib/queries/getSickAndLeave";
+import { parseTableQueryParams } from "@/lib/queries/tableQuery";
+import { PageHeader } from "@/components/layout/page-layout";
 import SickandLeaveSearch from "./SickandLeaveSearch";
-import { getLeaveUsageByEmployeeIds } from "@/lib/queries/getLeaveUsageByEmployeeIds";
+import SickandLeaveTable from "./SickandLeaveTable";
 
 export const metadata = {
     title: "Sick & Vacation Leaves",
-}
+};
+
+const PAGE_SIZE = 50;
 
 export default async function Leaves({
     searchParams,
 }: {
     searchParams: Promise<{ [key: string]: string | undefined }>;
 }) {
-    const { searchText } = await searchParams
+    const params = await searchParams;
+    const currentYear = new Date().getFullYear();
+    const parsedYear = Number(params.year ?? currentYear);
+    const year = Number.isFinite(parsedYear) ? parsedYear : currentYear;
+    const query = parseTableQueryParams(params, { id: "employeeNo", desc: false });
+    const { data, total } = await getSickAndLeaveWithUsage(year, {
+        page: query.page,
+        pageSize: PAGE_SIZE,
+        search: query.search,
+        filters: query.filters,
+        sort: query.sort,
+    });
+    const hasActiveFilters = Object.keys(query.filters).length > 0;
+    const shouldShowTable = data.length > 0 || total > 0 || query.search || hasActiveFilters;
 
-     if (!searchText) {
-        const results = await getSickAndLeaveWithUsage()
-        return (
-            <>
-                <SickandLeaveSearch />
-                {results.length ? <SickandLeaveTable data={results} /> : <p className="mt-4">No employee found</p>}
-            </>
-        )
-    }
-
-    const rawResults = await getSickAndLeaveSearchResults(searchText);
-    const employeeIds = rawResults.map((emp) => emp.id);
-  
-    const usageMap = await getLeaveUsageByEmployeeIds(employeeIds);
-  
-    const results = rawResults.map((item) => ({
-      ...item,
-      fullName: `${item.lastName}, ${item.firstName} ${item.middleName ?? ""}`.trim(),
-      usedSickLeave: usageMap[item.id]?.usedSickLeave || 0,
-      usedVacationLeave: usageMap[item.id]?.usedVacationLeave || 0,
-    }));
-    
     return (
-        <>
+        <div className="space-y-4">
+            <PageHeader
+                title="Used Leaves and Services"
+                description="Review leave balances and service usage by employee."
+            />
             <SickandLeaveSearch />
-            {results.length ? <SickandLeaveTable data={results}/> : (
-                <p className="mt-4"> No results found.</p>
+            {shouldShowTable ? (
+                <>
+                    {!data.length ? <p className="mt-4">No results found.</p> : null}
+                    <SickandLeaveTable data={data} total={total} pageSize={PAGE_SIZE} />
+                </>
+            ) : (
+                <p className="mt-4">No employee found</p>
             )}
-        </>
-    )
-
+        </div>
+    );
 }

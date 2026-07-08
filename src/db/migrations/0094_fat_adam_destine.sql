@@ -1,0 +1,1 @@
+ALTER TYPE "public"."payroll_exception_dtr_override_source" ADD VALUE 'DTR_UNDERTIME' BEFORE 'DTR_REGULAR_OVERTIME';

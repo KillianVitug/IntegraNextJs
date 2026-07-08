@@ -7,8 +7,10 @@ import { z } from "zod";
 export const insertEmployeeLeaveSchema = createInsertSchema(employeesLeaveRecords, {
   employeeId: z.string().uuid(),
   dateFiled: z.string(),
-  leaveType: z.enum(employeesLeaveRecords.leaveType.enumValues),
-  noOfDays: z.coerce.number().min(1),
+  leaveStartDate: z.string().min(1),
+  leaveEndDate: z.string().optional().nullable(),
+  leaveType: z.string().trim().min(1, "Leave Type is required"),
+  noOfDays: z.coerce.number().min(0.5),
   reason: z.string().min(1),
   leaveStatus: z.enum(employeesLeaveRecords.leaveStatus.enumValues),
 });
@@ -20,10 +22,15 @@ export const selectEmployeeLeaveSchema = createSelectSchema(employeesLeaveRecord
 export const leaveFormSchema = insertEmployeeLeaveSchema.pick({
   employeeId: true,
   dateFiled: true,
+  leaveStartDate: true,
+  leaveEndDate: true,
   leaveType: true,
   noOfDays: true,
   reason: true,
   leaveStatus: true,
+}).extend({
+  leaveEndDate: z.string().optional().nullable().or(z.literal("")),
+  dayPart: z.enum(["FullDay", "AM", "PM"]).default("FullDay"),
 });
 
 export type LeaveFormSchemaType = z.infer<typeof leaveFormSchema>;

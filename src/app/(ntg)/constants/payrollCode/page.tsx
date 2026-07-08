@@ -1,10 +1,10 @@
 import PayrollCodeSearch from "@/app/(ntg)/constants/payrollCode/payrollCodeSearch";
 import { getCustomPayrollSearchResults } from "@/lib/queries/getEmployeeSearchResults";
 import PayrollCodeTable from "@/app/(ntg)/constants/payrollCode/payrollCodeTable";
-import { fetchCustomPayroll } from "@/lib/queries/fetchLookupData";
+import { fetchCustomPayrollCodes } from "@/lib/queries/fetchLookupData";
 
 export const metadata = {
-    title: "Employee Master",
+    title: "Custom Payroll Code Master",
 }
 
 export default async function payrollCodeMaster({
@@ -15,7 +15,7 @@ export default async function payrollCodeMaster({
     const { searchText } = await searchParams
 
     if (!searchText) {
-        const results = await fetchCustomPayroll()
+        const results = await fetchCustomPayrollCodes()
         return (
             <>
                 <PayrollCodeSearch />

@@ -1,32 +1,29 @@
-import { getSalaryAdjustmentHistory } from "@/app/actions/salaryAdjustAction";
-import SalaryAdjustTable from "./SalaryAdjustTable"
+import { getActiveEmployees } from "@/app/actions/employeeAction";
+import {
+  listSalaryAdjustmentPeriods,
+  listSalaryChanges,
+} from "@/app/actions/salaryAdjustAction";
+import SalaryAdjustTable from "./SalaryAdjustTable";
 
 export const metadata = {
-    title: "Salary Adjustment",
-}
+  title: "Salary Adjustment",
+};
 
-export default async function SalaryAdjustment({
-    searchParams,
-}: {
-    searchParams: Promise<{ [key: string]: string | undefined }>;
-}) {
-    const { searchText } = await searchParams
+export default async function SalaryAdjustmentPage() {
+  const year = new Date().getFullYear();
 
-    if (!searchText) {
-        const results = await getSalaryAdjustmentHistory(searchText as string)
-        return (
-            <>
-                <SalaryAdjustTable data={results} />
-            </>
-        )
-    }
+  const [periods, salaryChanges, employees] = await Promise.all([
+    listSalaryAdjustmentPeriods(year),
+    listSalaryChanges({ year }),
+    getActiveEmployees(),
+  ]);
 
-    // const results = await getEmployeeSearchResults(searchText)
-    return (
-        <>
-            {/* {results.length ? <SalaryAdjustTable data={results}/> : (
-                <p className="mt-4"> No results found.</p>
-            )} */}
-        </>
-    )
+  return (
+    <SalaryAdjustTable
+      initialData={salaryChanges}
+      initialEmployees={employees.data ?? []}
+      initialPeriods={periods}
+      initialYear={year}
+    />
+  );
 }

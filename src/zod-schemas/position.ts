@@ -15,11 +15,8 @@ export const selectPositionSchema = createSelectSchema(position);
 
 // ✅ Delete Schema (used when deleting a Position)
 export const deletePositionSchema = z.object({
-    id: z
-      .number({
-        required_error: "Position ID is required for deletion",
-        invalid_type_error: "Position ID must be a number",
-      })
+    id: z.coerce
+      .number()
       .positive("Position ID must be a positive number"),
   });
 

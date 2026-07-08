@@ -1,36 +1,53 @@
-"use client"
+// src/app/(ntg)/leaves/form/page.tsx
+"use server";
 
-import React, { useState } from "react";
-import { LeaveForm } from "./LeaveForm";
-import { LeaveRecordsTable} from "./LeaveRecordsTable";
-import { LeaveRecord } from "./types";
+import { getActiveEmployees } from "@/app/actions/employeeAction";
+import LeaveClient from "@/app/(ntg)/leaves/form/LeaveClient";
+import { ensureDefaultLeaveTypes } from "@/lib/payroll/leave";
+import { fetchLeaveTypes } from "@/lib/queries/fetchLookupData";
 
-export default function LeavePage() {
-  const [reloadFlag, setReloadFlag] = useState(0);
-  const [selectedRecord, setSelectedRecord] = useState<LeaveRecord | null>(null);
+function isValidYear(value: string | undefined) {
+  if (!value) return false;
 
-  // Called after form submit to reload table
-  const handleFormSubmit = () => {
-    setReloadFlag((f) => f + 1);
-    setSelectedRecord(null); // Optionally reset form after submit
-  };
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 2000 && parsed <= 2100;
+}
 
-  // Called when a row is clicked
-  const handleRowClick = (record: LeaveRecord) => {
-    setSelectedRecord(record);
-  };
+function parseLeaveId(value: string | undefined) {
+  if (!value) return null;
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+export default async function LeavePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ [key: string]: string | undefined }>;
+}) {
+  const params = await searchParams;
+  const currentYear = new Date().getFullYear();
+  const initialYear = isValidYear(params.year)
+    ? Number(params.year)
+    : currentYear;
+  const initialSelectedLeaveId = parseLeaveId(params.leaveId);
+
+  await ensureDefaultLeaveTypes();
+
+  const [employeesRes, leaveTypes] = await Promise.all([
+    getActiveEmployees(),
+    fetchLeaveTypes(),
+  ]);
 
   return (
-    <div>
-      <LeaveForm
-        onSubmitSuccess={handleFormSubmit}
-        initialData={selectedRecord}
-        onCancelEdit={() => setSelectedRecord(null)}
-      />
-      <LeaveRecordsTable
-        reloadFlag={reloadFlag}
-        onRowClick={handleRowClick}
-      />
-    </div>
+    <LeaveClient
+      employees={employeesRes.data ?? []}
+      leaveTypeOptions={leaveTypes.map((leaveType) => ({
+        id: leaveType.code,
+        name: `${leaveType.code} | ${leaveType.name}`,
+      }))}
+      initialYear={initialYear}
+      initialSelectedLeaveId={initialSelectedLeaveId}
+    />
   );
 }

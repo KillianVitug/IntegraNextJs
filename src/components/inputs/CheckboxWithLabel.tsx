@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/form";
 
 import { Checkbox } from "@/components/ui/checkbox";
+import { cn } from "@/lib/utils";
 
 type Props<T extends FieldValues = FieldValues> = {
   fieldTitle: string;
@@ -24,6 +25,7 @@ type Props<T extends FieldValues = FieldValues> = {
   onCheckedChange?: (value: boolean) => void;
   message?: string;
   disabled?: boolean;
+  className?: string;
 };
 
 export function CheckboxWithLabel<T extends FieldValues = FieldValues>({
@@ -32,6 +34,7 @@ export function CheckboxWithLabel<T extends FieldValues = FieldValues>({
   message,
   disabled = false,
   onCheckedChange,
+  className,
 }: Props<T>) {
   const form = useFormContext<T>();
 
@@ -40,9 +43,11 @@ export function CheckboxWithLabel<T extends FieldValues = FieldValues>({
       control={form.control}
       name={nameInSchema as Path<T>}
       render={({ field }) => (
-        <FormItem className="w-full flex items-center gap-2">
+        <FormItem
+          className={cn("flex w-full items-center gap-2 space-y-0", className)}
+        >
           <FormLabel
-            className="text-base w-full mt-2"
+            className="w-full text-sm font-medium"
             htmlFor={String(nameInSchema)}
           >
             {fieldTitle}

@@ -22,7 +22,7 @@ export default function DepartmentPage() {
   }, [loadDepartments]);
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-4">
       <DepartmentCodeForm
         selectedDepartment={selected}
         onResetSelection={() => setSelected(null)}

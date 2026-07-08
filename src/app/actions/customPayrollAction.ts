@@ -1,66 +1,28 @@
 "use server";
 
+import { revalidatePath, revalidateTag } from "next/cache";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
+import { recordAdminAuditEvent, requireAdminActor } from "@/lib/admin";
 import {
   customPayrollDefinitions,
   employeeContributionGroups,
   employeeContributionFlags,
-  basisOfComputationEnum,
-  contributionTypeEnum,
 } from "@/db/schema";
-import { CustomPayrollPayload } from "@/zod-schemas/payrollCodeCustom";
+import {
+  type CustomPayrollPayload,
+  customPayrollContributionKeys,
+} from "@/zod-schemas/payrollCodeCustom";
 
-type ContributionType = (typeof contributionTypeEnum.enumValues)[number];
+type ContributionType = (typeof customPayrollContributionKeys)[number];
+type ContributionData = CustomPayrollPayload["contributions"][ContributionType];
 
-interface ContributionFlags {
-  scheduleAlways: boolean;
-  scheduleEndOfMonth: boolean;
-  scheduleFirstPayroll: boolean;
-  scheduleSecondPayroll: boolean;
-  scheduleThirdPayroll: boolean;
-  scheduleForthPayroll?: boolean;
-
-  pagibigMaxContribution?: boolean;
-  pagibigDeductShare?: boolean;
-
-  peraaComputeBoth?: boolean;
-  peraaComputeEmployer?: boolean;
-
-  taxFixedPercentage?: boolean;
-  taxFixedValue?: number;
-  taxMonthEndAdjustment?: boolean;
-
-  flag1?: boolean;
-  flag2?: boolean;
-  flag3?: boolean;
-}
-
-interface ContributionData {
-  basisOfComputation: (typeof basisOfComputationEnum.enumValues)[number];
-  basisValue: number | null;
-  approximationPercent: number;
-  percentage: number | null;
-  fixedAmount: number | null;
-  minimum: number | null;
-  maximum: number | null;
-  fixedEmployeeShare: number;
-  fixedEmployerShare: number;
-  fixedECShare: number;
-  scheduleFlags: {
-    always: boolean;
-    endOfMonth: boolean;
-    firstPayroll: boolean;
-    secondPayroll: boolean;
-    thirdPayroll: boolean;
-    forthPayroll?: boolean;
-  };
-  flags?: ContributionFlags;
-}
+const emptyToNull = (value?: string | number | null) =>
+  value === "" ? null : value;
 
 export async function createCustomPayrollCode(payload: CustomPayrollPayload) {
-  return db.transaction(async (tx) => {
-    // 1️⃣ Insert Payroll Master
+  const actor = await requireAdminActor();
+  const definitionId = await db.transaction(async (tx) => {
     const [definition] = await tx
       .insert(customPayrollDefinitions)
       .values({
@@ -71,23 +33,26 @@ export async function createCustomPayrollCode(payload: CustomPayrollPayload) {
       })
       .returning({ id: customPayrollDefinitions.id });
 
-    // 2️⃣ Insert Contributions & Flags
-    for (const [type, data] of Object.entries(payload.contributions) as [ContributionType, ContributionData][]) {
+    for (const type of customPayrollContributionKeys) {
+      const data: ContributionData = payload.contributions[type];
+
       const [group] = await tx
         .insert(employeeContributionGroups)
         .values({
           payrollCode: definition.id,
           contributionType: type,
           basisOfComputation: data.basisOfComputation,
-          basisValue: data.basisValue?.toString() ?? null,
           approximationPercent: data.approximationPercent.toString(),
-          percentage: data.percentage?.toString() ?? null,
-          fixedAmount: data.fixedAmount?.toString() ?? null,
-          minimum: data.minimum?.toString() ?? null,
-          maximum: data.maximum?.toString() ?? null,
-          fixedEmployeeShare: data.fixedEmployeeShare.toString(),
-          fixedEmployerShare: data.fixedEmployerShare.toString(),
-          fixedECShare: data.fixedECShare.toString(),
+          basisValue: emptyToNull(data.basisValue)?.toString() ?? null,
+          percentage: emptyToNull(data.percentage)?.toString() ?? null,
+          fixedAmount: emptyToNull(data.fixedAmount)?.toString() ?? null,
+          minimum: emptyToNull(data.minimum)?.toString() ?? null,
+          maximum: emptyToNull(data.maximum)?.toString() ?? null,
+          fixedEmployeeShare:
+            emptyToNull(data.fixedEmployeeShare)?.toString() ?? null,
+          fixedEmployerShare:
+            emptyToNull(data.fixedEmployerShare)?.toString() ?? null,
+          fixedECShare: emptyToNull(data.fixedECShare)?.toString() ?? null,
         })
         .returning({ id: employeeContributionGroups.id });
 
@@ -99,13 +64,12 @@ export async function createCustomPayrollCode(payload: CustomPayrollPayload) {
         scheduleSecondPayroll: data.scheduleFlags.secondPayroll,
         scheduleThirdPayroll: data.scheduleFlags.thirdPayroll,
         scheduleForthPayroll: data.scheduleFlags.forthPayroll ?? false,
-
         pagibigMaxContribution: data.flags?.pagibigMaxContribution ?? false,
         pagibigDeductShare: data.flags?.pagibigDeductShare ?? false,
         peraaComputeBoth: data.flags?.peraaComputeBoth ?? false,
         peraaComputeEmployer: data.flags?.peraaComputeEmployer ?? false,
         taxFixedPercentage: data.flags?.taxFixedPercentage ?? false,
-         taxFixedValue: data.flags?.taxFixedValue?.toString() ?? null, 
+        taxFixedValue: data.flags?.taxFixedValue?.toString() ?? null,
         taxMonthEndAdjustment: data.flags?.taxMonthEndAdjustment ?? false,
         flag1: data.flags?.flag1 ?? false,
         flag2: data.flags?.flag2 ?? false,
@@ -115,11 +79,25 @@ export async function createCustomPayrollCode(payload: CustomPayrollPayload) {
 
     return definition.id;
   });
+
+  await recordAdminAuditEvent({
+    actorUserId: actor.userId,
+    entityType: "custom_payroll_definition",
+    entityId: definitionId,
+    action: "custom_payroll.created",
+    details: { code: payload.code },
+  });
+  revalidatePath("/constants/payrollCode");
+  revalidateTag("custom-payroll-codes");
+  return definitionId;
 }
 
-export async function updateCustomPayrollCode(id: number, payload: CustomPayrollPayload) {
-  return db.transaction(async (tx) => {
-    // 1️⃣ Update Payroll Master
+export async function updateCustomPayrollCode(
+  id: number,
+  payload: CustomPayrollPayload
+) {
+  const actor = await requireAdminActor();
+  await db.transaction(async (tx) => {
     await tx
       .update(customPayrollDefinitions)
       .set({
@@ -130,28 +108,30 @@ export async function updateCustomPayrollCode(id: number, payload: CustomPayroll
       })
       .where(eq(customPayrollDefinitions.id, id));
 
-    // 2️⃣ Delete existing contributions and flags
     await tx
       .delete(employeeContributionGroups)
       .where(eq(employeeContributionGroups.payrollCode, id));
 
-    // 3️⃣ Re-insert Contributions & Flags
-    for (const [type, data] of Object.entries(payload.contributions) as [ContributionType, ContributionData][]) {
+    for (const type of customPayrollContributionKeys) {
+      const data: ContributionData = payload.contributions[type];
+
       const [group] = await tx
         .insert(employeeContributionGroups)
         .values({
           payrollCode: id,
           contributionType: type,
           basisOfComputation: data.basisOfComputation,
-          basisValue: data.basisValue?.toString() ?? null,
           approximationPercent: data.approximationPercent.toString(),
-          percentage: data.percentage?.toString() ?? null,
-          fixedAmount: data.fixedAmount?.toString() ?? null,
-          minimum: data.minimum?.toString() ?? null,
-          maximum: data.maximum?.toString() ?? null,
-          fixedEmployeeShare: data.fixedEmployeeShare.toString(),
-          fixedEmployerShare: data.fixedEmployerShare.toString(),
-          fixedECShare: data.fixedECShare.toString(),
+          basisValue: emptyToNull(data.basisValue)?.toString() ?? null,
+          percentage: emptyToNull(data.percentage)?.toString() ?? null,
+          fixedAmount: emptyToNull(data.fixedAmount)?.toString() ?? null,
+          minimum: emptyToNull(data.minimum)?.toString() ?? null,
+          maximum: emptyToNull(data.maximum)?.toString() ?? null,
+          fixedEmployeeShare:
+            emptyToNull(data.fixedEmployeeShare)?.toString() ?? null,
+          fixedEmployerShare:
+            emptyToNull(data.fixedEmployerShare)?.toString() ?? null,
+          fixedECShare: emptyToNull(data.fixedECShare)?.toString() ?? null,
         })
         .returning({ id: employeeContributionGroups.id });
 
@@ -163,13 +143,12 @@ export async function updateCustomPayrollCode(id: number, payload: CustomPayroll
         scheduleSecondPayroll: data.scheduleFlags.secondPayroll,
         scheduleThirdPayroll: data.scheduleFlags.thirdPayroll,
         scheduleForthPayroll: data.scheduleFlags.forthPayroll ?? false,
-
         pagibigMaxContribution: data.flags?.pagibigMaxContribution ?? false,
         pagibigDeductShare: data.flags?.pagibigDeductShare ?? false,
         peraaComputeBoth: data.flags?.peraaComputeBoth ?? false,
         peraaComputeEmployer: data.flags?.peraaComputeEmployer ?? false,
         taxFixedPercentage: data.flags?.taxFixedPercentage ?? false,
-         taxFixedValue: data.flags?.taxFixedValue?.toString() ?? null, 
+        taxFixedValue: data.flags?.taxFixedValue?.toString() ?? null,
         taxMonthEndAdjustment: data.flags?.taxMonthEndAdjustment ?? false,
         flag1: data.flags?.flag1 ?? false,
         flag2: data.flags?.flag2 ?? false,
@@ -177,57 +156,30 @@ export async function updateCustomPayrollCode(id: number, payload: CustomPayroll
       });
     }
   });
+
+  await recordAdminAuditEvent({
+    actorUserId: actor.userId,
+    entityType: "custom_payroll_definition",
+    entityId: id,
+    action: "custom_payroll.updated",
+    details: { code: payload.code },
+  });
+  revalidatePath("/constants/payrollCode");
+  revalidateTag("custom-payroll-codes");
 }
 
 export async function deleteCustomPayrollCode(id: number) {
-  await db.delete(customPayrollDefinitions).where(eq(customPayrollDefinitions.id, id));
-}
+  const actor = await requireAdminActor();
+  await db
+    .delete(customPayrollDefinitions)
+    .where(eq(customPayrollDefinitions.id, id));
 
-export async function getCustomPayroll(id: number) {
-  return db.query.customPayrollDefinitions.findFirst({
-    where: (t, { eq }) => eq(t.id, id),
-    with: {
-      contributionGroups: {
-        with: { flags: true },
-      },
-    },
+  await recordAdminAuditEvent({
+    actorUserId: actor.userId,
+    entityType: "custom_payroll_definition",
+    entityId: id,
+    action: "custom_payroll.deleted",
   });
+  revalidatePath("/constants/payrollCode");
+  revalidateTag("custom-payroll-codes");
 }
-
-export async function getCustomPayrollForEdit(id: number) {
-    // const res = await getCustomPayroll(id);
-  
-    return {
-    //   code: res.code,
-    //   description: res.description,
-    //   rateDivisor: res.rateDivisor,
-    //   hourlyRateDivisor: res.hourlyRateDivisor,
-    //   contributions: Object.fromEntries(
-    //     res.contributionGroups.map((g) => [
-    //       g.contributionType,
-    //       {
-    //         basisOfComputation: g.basisOfComputation,
-    //         basisValue: g.basisValue,
-    //         approximationPercent: g.approximationPercent,
-    //         percentage: g.percentage,
-    //         fixedAmount: g.fixedAmount,
-    //         minimum: g.minimum,
-    //         maximum: g.maximum,
-    //         fixedEmployeeShare: g.fixedEmployeeShare,
-    //         fixedEmployerShare: g.fixedEmployerShare,
-    //         fixedECShare: g.fixedECShare,
-    //         scheduleFlags: {
-    //           always: g.flags.scheduleAlways,
-    //           endOfMonth: g.flags.scheduleEndOfMonth,
-    //           firstPayroll: g.flags.scheduleFirstPayroll,
-    //           secondPayroll: g.flags.scheduleSecondPayroll,
-    //           thirdPayroll: g.flags.scheduleThirdPayroll,
-    //           forthPayroll: g.flags.scheduleForthPayroll,
-    //         },
-    //         flags: g.flags,
-    //       },
-    //     ])
-    //   ),
-    };
-  }
-  

@@ -29,9 +29,9 @@ export default function DepartmentCodeForm({
   const form = useForm<InsertDepartmentSchemaType>({
     resolver: zodResolver(insertDepartmentSchema),
     defaultValues: {
-      id: 0 || selectedDepartment?.id,
-      name: "",
-      code: "",
+      id: selectedDepartment?.id ?? 0,
+      name: selectedDepartment?.name ?? "",
+      code: selectedDepartment?.code ?? "",
     },
   });
 

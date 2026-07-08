@@ -2,96 +2,151 @@
 
 import { eq } from "drizzle-orm";
 import { flattenValidationErrors } from "next-safe-action";
-import { redirect } from "next/navigation";
+import { revalidatePath } from "next/cache";
 import { db } from "@/db";
 import {
   employees,
   employeesGeneralInfo,
-  employeesSalary,
   employeesOtherReferences,
+  employeesSalary,
   employeesTimekeeping,
 } from "@/db/schema";
+import { requireAdmin, syncLinkedAccountEmailTx } from "@/lib/auth/server";
 import { actionClient } from "@/lib/safe-action";
-import { getKindeServerSession } from "@kinde-oss/kinde-auth-nextjs/server";
-import { insertEmployeeSchema, InsertEmployeeSchemaType } from "@/zod-schemas/employee";
-import { InsertEmployeeSalarySchemaType } from "@/zod-schemas/employeeSalary"
-import { toNumber } from "@/lib/number";
+import { SaveEmployeeResult } from "@/types/employeeResults";
+import {
+  InvalidEmployeeNoError,
+  formatEmployeeCodeFromParts,
+  normalizeEmployeeNoForSave,
+  normalizeEmployeeTypeForSave,
+} from "@/utils/employeeNo";
+import { generateEmployeeNoTx } from "@/utils/generateEmployeeNo";
+import { DEFAULT_EMPLOYEE_TYPE, isManagerialConfidentialityLevel } from "@/utils/employeeCode";
+import {
+  insertEmployeeSchema,
+  type InsertEmployeeSchemaType,
+} from "@/zod-schemas/employee";
+import { normalizeSalaryForDb } from "@/lib/payroll/salaryNormalization";
+import { markEmployeePayrollRunsStale } from "@/lib/payroll/staleRuns";
 
-type SalaryInput = Partial<InsertEmployeeSalarySchemaType>;
-
-// Union type of all tables that have employeeId
 type EmployeeOwnedTable =
   | typeof employeesGeneralInfo
   | typeof employeesSalary
   | typeof employeesOtherReferences
   | typeof employeesTimekeeping;
 
+const salaryImpactFields = [
+  "dailyRate",
+  "monthlyRate",
+  "monthlyAllowance",
+  "dailyAllowance",
+  "cola",
+  "rateDivisor",
+  "billingRate",
+  "ignoreDtrForMonthlyRate",
+  "ignoreContributionDeduction",
+  "customPayrollId",
+  "customPayrollDescription",
+  "slvlGroupId",
+] as const;
 
-/* ───────────────────────────────────────────── */
-// Deeply nested object with unknown values
-type DeepObject = Record<string, unknown>;
+const salaryRateFields = new Set<(typeof salaryImpactFields)[number]>([
+  "dailyRate",
+  "monthlyRate",
+]);
 
-/**
- * Recursively flatten an object into { "parent.child": value }.
- * Keeps null and undefined as-is for better matching.
- */
-function flattenForPgError(obj: DeepObject, prefix = ""): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
+const salaryMoneyFields = new Set<(typeof salaryImpactFields)[number]>([
+  "monthlyAllowance",
+  "dailyAllowance",
+  "cola",
+  "rateDivisor",
+  "billingRate",
+]);
 
-  for (const key in obj) {
-    const value = obj[key];
-    const path = prefix ? `${prefix}.${key}` : key;
+const salaryIdFields = new Set<(typeof salaryImpactFields)[number]>([
+  "customPayrollId",
+  "slvlGroupId",
+]);
 
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      Object.assign(result, flattenForPgError(value as DeepObject, path));
-    } else {
-      result[path] = value;
-    }
-  }
+function isDuplicateEmployeeNoError(error: unknown) {
+  const dbError = error as {
+    code?: string;
+    constraint?: string;
+    message?: string;
+  };
+  const message = dbError.message ?? "";
+  const constraint = dbError.constraint ?? "";
 
-  return result;
+  return (
+    (dbError.code === "23505" &&
+      (constraint === "employees_employee_type_no_unique" ||
+        message.includes("employee_no"))) ||
+    message.includes("employees_employee_type_no_unique") ||
+    (message.includes("duplicate key value") && message.includes("employee_no"))
+  );
 }
 
-/**
- * Find the field in a nested object that matches the bad value from PostgreSQL
- */
-function parsePgError<T extends DeepObject>(
-  payload: T,
-  message: string
-): { fieldName?: string; message: string } {
-  const match = message.match(/invalid input syntax for type \w+: "(.+?)"/);
-  if (!match) return { message: "Invalid database value." };
+function normalizeOptionalInt(value: string | number | null | undefined) {
+  if (value === "" || value === undefined || value === null) return null;
 
-  const badValue = match[1];
-  const flat = flattenForPgError(payload);
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && numericValue > 0 ? numericValue : null;
+}
 
-  // Try to match exact value (string or number)
-  let matchedPath = Object.entries(flat).find(
-    ([_, v]) => String(v) === badValue
-  )?.[0];
-
-  // Fallback: match null/empty for numeric columns
-  if (!matchedPath) {
-    matchedPath = Object.entries(flat).find(
-      ([_, v]) => v === null || v === undefined || v === ""
-    )?.[0];
+function normalizeOtherReferences(
+  otherReferences: InsertEmployeeSchemaType["otherReferences"],
+) {
+  if (!otherReferences) {
+    return undefined;
   }
 
-  const prettyField = matchedPath
-    ? matchedPath
-        .split(".")
-        .pop()!
-        .replace(/([a-z])([A-Z])/g, "$1 $2")
-        .replace(/\b\w/g, (c) => c.toUpperCase())
-    : "Unknown Field";
-
   return {
-    fieldName: matchedPath,
-    message: `Invalid value for "${prettyField}": "${badValue}"`,
+    ...otherReferences,
+    email: otherReferences.email?.trim().toLowerCase() || null,
   };
 }
 
+function normalizeSalaryComparisonValue(
+  field: (typeof salaryImpactFields)[number],
+  value: unknown,
+) {
+  if (field === "ignoreDtrForMonthlyRate" || field === "ignoreContributionDeduction") {
+    return value === true || value === "true";
+  }
 
+  if (value === "" || value === null || value === undefined) return null;
+
+  if (salaryRateFields.has(field) || salaryMoneyFields.has(field)) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return null;
+    return numericValue.toFixed(salaryRateFields.has(field) ? 4 : 2);
+  }
+
+  if (salaryIdFields.has(field)) {
+    const numericValue = Number(value);
+    return Number.isFinite(numericValue) ? numericValue : null;
+  }
+
+  return String(value).trim() || null;
+}
+
+function hasSalaryImpactChange(
+  existingSalary: typeof employeesSalary.$inferSelect | null | undefined,
+  normalizedSalary: Partial<typeof employeesSalary.$inferInsert>,
+) {
+  return salaryImpactFields.some((field) => {
+    const nextValue = normalizeSalaryComparisonValue(
+      field,
+      normalizedSalary[field],
+    );
+    const existingValue = normalizeSalaryComparisonValue(
+      field,
+      existingSalary?.[field],
+    );
+
+    return nextValue !== existingValue;
+  });
+}
 
 export const saveEmployeeAction = actionClient
   .metadata({ actionName: "saveEmployeeAction" })
@@ -99,12 +154,15 @@ export const saveEmployeeAction = actionClient
     handleValidationErrorsShape: async (ve) =>
       flattenValidationErrors(ve).fieldErrors,
   })
-  .action(async ({ parsedInput }: { parsedInput: InsertEmployeeSchemaType }) => {
-    const { isAuthenticated } = getKindeServerSession();
-    if (!(await isAuthenticated())) redirect("/login");
+  .action(async ({ parsedInput }): Promise<SaveEmployeeResult> => {
+    const auth = await requireAdmin();
+    const canChooseEmployeeType = isManagerialConfidentialityLevel(
+      auth.confidentialityLevel,
+    );
 
     const {
       id,
+      employeeType,
       employeeNo,
       firstName,
       lastName,
@@ -117,266 +175,165 @@ export const saveEmployeeAction = actionClient
       timekeeping,
     } = parsedInput;
 
+    const normalizedOtherReferences = normalizeOtherReferences(otherReferences);
+    let attemptedEmployeeNo = employeeNo?.trim() ?? "";
+    let attemptedEmployeeType = normalizeEmployeeTypeForSave(employeeType);
+
     try {
-      if (!id) throw new Error("Employee ID must be provided from frontend (UUID).");
+      return await db.transaction(async (tx) => {
+        let employeeId = id;
 
-      await db.transaction(async (tx) => {
-        // 🔹 Check for duplicate employeeNo
-        const duplicate = await tx.query.employees.findFirst({
-          where: eq(employees.employeeNo, employeeNo),
-        });
-        if (duplicate && duplicate.id !== id) {
-          throw new Error("DUPLICATE_EMPLOYEE_NO");
-        }
+        if (!employeeId) {
+          const finalEmployeeType = canChooseEmployeeType
+            ? normalizeEmployeeTypeForSave(employeeType)
+            : DEFAULT_EMPLOYEE_TYPE;
+          const finalEmployeeNo =
+            employeeNo && employeeNo.trim() !== ""
+              ? normalizeEmployeeNoForSave(employeeNo)
+              : await generateEmployeeNoTx(tx, finalEmployeeType);
+          attemptedEmployeeNo = finalEmployeeNo;
+          attemptedEmployeeType = finalEmployeeType;
 
-        // 🔹 Insert or update main employee row
-        const existing = await tx.query.employees.findFirst({
-          where: eq(employees.id, id),
-        });
+          const [created] = await tx
+            .insert(employees)
+            .values({
+              employeeType: finalEmployeeType,
+              employeeNo: finalEmployeeNo,
+              firstName,
+              lastName,
+              middleName,
+              middleInitial,
+              suffix,
+            })
+            .returning({ id: employees.id });
 
-        if (!existing) {
-          await tx.insert(employees).values({
-            id,
-            employeeNo,
-            firstName,
-            lastName,
-            middleName,
-            middleInitial,
-            suffix,
-          });
+          employeeId = created.id;
         } else {
+          const [existingEmployee] = await tx
+            .select({
+              employeeType: employees.employeeType,
+            })
+            .from(employees)
+            .where(eq(employees.id, employeeId))
+            .limit(1);
+
+          if (!existingEmployee) {
+            throw new Error("Employee not found.");
+          }
+
+          const finalEmployeeNo = normalizeEmployeeNoForSave(employeeNo, {
+            allowLegacyPrefix: true,
+          });
+          const finalEmployeeType = existingEmployee.employeeType;
+          attemptedEmployeeNo = finalEmployeeNo;
+          attemptedEmployeeType = finalEmployeeType;
+
           await tx
             .update(employees)
-            .set({ employeeNo, firstName, lastName, middleName, middleInitial, suffix })
-            .where(eq(employees.id, id));
+            .set({
+              employeeType: finalEmployeeType,
+              employeeNo: finalEmployeeNo,
+              firstName,
+              lastName,
+              middleName,
+              middleInitial,
+              suffix,
+            })
+            .where(eq(employees.id, employeeId));
         }
 
-        // 🔹 Upsert helper for related tables
         const upsert = async <T extends object>(
           table: EmployeeOwnedTable,
-          data: T | undefined
+          data?: T,
         ) => {
           if (!data) return;
 
           await tx
             .insert(table)
-            .values({ ...data, employeeId: id })
+            .values({ ...data, employeeId })
             .onConflictDoUpdate({
               target: [table.employeeId],
               set: data,
             });
         };
 
-        function normalizeOptionalFk<T extends string | null | undefined>(v: T) {
-          return v === "" || v === undefined ? null : v;
-        }
+        const normalizedSalary = salary ? normalizeSalaryForDb(salary) : undefined;
+        const existingSalary = normalizedSalary
+          ? await tx.query.employeesSalary.findFirst({
+              where: eq(employeesSalary.employeeId, employeeId),
+            })
+          : null;
+        const salaryChanged =
+          normalizedSalary != null &&
+          hasSalaryImpactChange(existingSalary, normalizedSalary);
 
-        function normalizeSalaryForDb(salary: SalaryInput) {
-          if (!salary) return salary;
-        
-          return Object.fromEntries(
-            Object.entries(salary).map(([key, val]) => [
-              key,
-              toNumber(val),
-            ])
-          ) as SalaryInput;
-        }
-
-        // 🔹 Insert or update related tables
-        await upsert(employeesGeneralInfo, generalInfo);
-        await upsert(employeesSalary, salary && {
-          ...normalizeSalaryForDb(salary),
-          customPayrollCode: normalizeOptionalFk(salary.customPayrollCode),
-          customPayrollDescription: normalizeOptionalFk(salary.customPayrollDescription),
-        });
-        await upsert(employeesOtherReferences, otherReferences);
-        await upsert(employeesTimekeeping, timekeeping);
-      });
-
-      return { message: `Employee ID #${id} saved successfully` };
-    } catch (error) {
-      console.error("❌ Error saving employee:", error);
-
-      if (error instanceof Error && error.message === "DUPLICATE_EMPLOYEE_NO") {
-        return { serverError: `Employee number "${employeeNo}" is already taken.` };
-      }
-
-      if (
-        error instanceof Error &&
-        error.message.includes("invalid input syntax for type")
-      ) {
-        const { fieldName, message } = parsePgError(parsedInput, error.message);
-        return {
-          validationErrors: {
-            // Use the full path so RHF can identify the field
-            [fieldName ?? "unknown"]: [message],
+        await upsert(
+          employeesGeneralInfo,
+          generalInfo && {
+            ...generalInfo,
+            departmentId: normalizeOptionalInt(generalInfo.departmentId),
           },
+        );
+        await upsert(employeesSalary, normalizedSalary);
+        await upsert(
+          employeesOtherReferences,
+          normalizedOtherReferences && {
+            ...normalizedOtherReferences,
+            positionId: normalizeOptionalInt(normalizedOtherReferences.positionId),
+          },
+        );
+        await upsert(
+          employeesTimekeeping,
+          timekeeping && {
+            ...timekeeping,
+          },
+        );
+
+        await syncLinkedAccountEmailTx(
+          tx,
+          employeeId,
+          normalizedOtherReferences?.email ?? null,
+        );
+
+        if (salaryChanged) {
+          await markEmployeePayrollRunsStale({
+            tx,
+            employeeId,
+            actorUserId: auth.accountId,
+            notes: "Marked stale because employee salary setup changed.",
+          });
+        }
+
+        revalidatePath("/employeeMaster");
+        revalidatePath("/payroll");
+        return {
+          data: { employeeId },
+          message: "Employee saved successfully",
+        };
+      });
+    } catch (error) {
+      if (error instanceof InvalidEmployeeNoError) {
+        return {
+          serverError: error.message,
         };
       }
 
-      return { serverError: "Failed to save employee. Please try again." };
+      if (isDuplicateEmployeeNoError(error)) {
+        return {
+          serverError: `Employee number "${formatEmployeeCodeFromParts({
+            employeeType: attemptedEmployeeType,
+            employeeNo: attemptedEmployeeNo || employeeNo,
+          })}" is already taken.`,
+        };
+      }
+
+      if (error instanceof Error && error.message.includes("email")) {
+        return {
+          serverError: error.message,
+        };
+      }
+
+      console.error(error);
+      return { serverError: "Failed to save employee." };
     }
   });
-
-// export const saveEmployeeAction = actionClient
-//   .metadata({ actionName: "saveEmployeeAction" })
-//   .schema(insertEmployeeSchema, {
-//     handleValidationErrorsShape: async (ve) =>
-//       flattenValidationErrors(ve).fieldErrors,
-//   })
-//   .action(
-//     async ({ parsedInput }: { parsedInput: InsertEmployeeSchemaType }) => {
-//       const { isAuthenticated } = getKindeServerSession();
-//       const isAuth = await isAuthenticated();
-//       if (!isAuth) redirect("/login");
-
-//       const {
-//         id,
-//         employeeNo,
-//         firstName,
-//         lastName,
-//         middleName,
-//         middleInitial,
-//         suffix,
-//         generalInfo,
-//         salary,
-//         otherReferences,
-//         timekeeping,
-//       } = parsedInput;
-
-//       try {
-//         if (!id) {
-//           throw new Error("Employee ID must be provided from frontend (UUID).");
-//         }
-
-//         await db.transaction(async (tx) => {
-//           type DBExecutor = Omit<typeof db, "$client">;
-
-//           // 1.1: Check for unique employeeNo
-//           const duplicateEmployee = await tx.query.employees.findFirst({
-//             where: eq(employees.employeeNo, employeeNo),
-//           });
-//           if (duplicateEmployee && duplicateEmployee.id !== id) {
-//             throw new Error("DUPLICATE_EMPLOYEE_NO");
-//           }
-
-//           // Always insert the employee row first if it doesn't exist
-//           const existing = await tx.query.employees.findFirst({
-//             where: eq(employees.id, id),
-//           });
-
-//           if (!existing) {
-//             await tx.insert(employees).values({
-//               id,
-//               employeeNo,
-//               firstName,
-//               lastName,
-//               middleName,
-//               middleInitial,
-//               suffix,
-//             });
-//           } else {
-//             await tx
-//               .update(employees)
-//               .set({ employeeNo, firstName, lastName, middleName, middleInitial, suffix })
-//               .where(eq(employees.id, id));
-//           }
-
-//           // Helper for inserting or updating related rows without transactions
-//           const insertOrUpdate = async <T>(
-//             executor: DBExecutor,
-//             table: any,
-//             data: T | undefined,
-//             employeeId: string
-//           ) => {
-//             if (data) {
-//               await executor
-//                 .insert(table)
-//                 .values({ ...data, employeeId })
-//                 .onConflictDoUpdate({
-//                   target: [table.employeeId],
-//                   set: data,
-//                 });
-//             }
-//           };
-
-//           // Insert or update related tables
-//           await insertOrUpdate(tx, employeesGeneralInfo, generalInfo, id);
-//           await insertOrUpdate(tx, employeesSalary, salary, id);
-//           await insertOrUpdate(tx, employeesOtherReferences, otherReferences, id);
-//           await insertOrUpdate(tx, employeesTimekeeping, timekeeping, id);
-//         });
-//         return { message: `Employee ID #${id} saved successfully` };
-//       } catch (error) {
-//         console.error("Error saving employee:", error);
-
-//         if (
-//           error instanceof Error &&
-//           error.message.includes("invalid input syntax for type")
-//         ) {
-//           const match = error.message.match(
-//             /invalid input syntax for type \w+: "(.+?)"/
-//           );
-//           if (match) {
-//             const invalidValue = match[1];
-
-//             // Flatten all fields from parsedInput into a key-value map
-//             const flattenFields = (
-//               obj: Record<string, any>,
-//               prefix = ""
-//             ): Record<string, string> => {
-//               const result: Record<string, string> = {};
-//               for (const key in obj) {
-//                 const value = obj[key];
-//                 const path = prefix ? `${prefix}.${key}` : key;
-//                 if (
-//                   value &&
-//                   typeof value === "object" &&
-//                   !Array.isArray(value)
-//                 ) {
-//                   Object.assign(result, flattenFields(value, path));
-//                 } else {
-//                   result[path] = String(value);
-//                 }
-//               }
-//               return result;
-//             };
-
-//             // Convert something like "monthlyRate" ➝ "Monthly Rate"
-//             const prettifyFieldName = (fieldPath: string): string => {
-//               const lastKey = fieldPath.split(".").pop() ?? fieldPath;
-//               return lastKey
-//                 .replace(/([a-z])([A-Z])/g, "$1 $2") // camelCase ➝ camel Case
-//                 .replace(/_/g, " ") // snake_case ➝ snake case
-//                 .replace(/\b\w/g, (c) => c.toUpperCase()); // capitalize words
-//             };
-
-//             const allFields = flattenFields(parsedInput);
-//             const matchedField = Object.entries(allFields).find(
-//               ([, value]) => value === invalidValue
-//             );
-
-//             const rawFieldPath = matchedField?.[0] ?? "unknown";
-//             const prettyField = prettifyFieldName(rawFieldPath);
-
-//             return {
-//               serverError: `Invalid value for ${prettyField}: "${invalidValue}". Please check the input.`,
-//             };
-//           }
-//         }
-
-//         if (
-//           error instanceof Error &&
-//           error.message === "DUPLICATE_EMPLOYEE_NO"
-//         ) {
-//           return {
-//             serverError: `Employee number "${employeeNo}" is already taken.`,
-//           };
-//         }
-
-//         return {
-//           serverError: "Failed to save employee. Please try again.",
-//         };
-//       }
-//     }
-//   );

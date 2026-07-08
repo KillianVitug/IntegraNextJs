@@ -5,6 +5,11 @@ import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Form } from "@/components/ui/form";
 import { Button } from "@/components/ui/button";
+import {
+  FormActions,
+  FormGrid,
+  PageHeader,
+} from "@/components/layout/page-layout";
 import { InputWithLabel } from "@/components/inputs/InputWithLabel";
 import { CheckboxWithLabel } from "@/components/inputs/CheckboxWithLabel";
 import { SelectWithLabel } from "@/components/inputs/SelectWithLabel";
@@ -40,6 +45,11 @@ type Props = {
   onResetSelection?: () => void;
   onRefresh?: () => void;
 };
+
+function formatDecimalInput(value: string | number | null | undefined) {
+  if (value == null || value === "") return null;
+  return String(value);
+}
 
 export default function AccountCodeForm({
   selectedAccountCode,
@@ -130,6 +140,8 @@ export default function AccountCodeForm({
         ...selectedAccountCode,
         id: numericId,
         accountCode: strippedCode, // ✅ only show the digits
+        dailyRate: formatDecimalInput(selectedAccountCode.dailyRate),
+        monthlyRate: formatDecimalInput(selectedAccountCode.monthlyRate),
       });
     } else {
       setSelectedId(null);
@@ -207,8 +219,8 @@ export default function AccountCodeForm({
   const accountTypeCode = accountTypeCodeMap[accountType ?? ""] ?? "";
 
   return (
-    <div className="flex flex-col gap-1 sm:px-8">
-      <h2 className="text-2xl font-bold">Account Code</h2>
+    <div className="space-y-4">
+      <PageHeader title="Account Code" />
       <Form {...form}>
         <form
           onSubmit={form.handleSubmit(
@@ -217,8 +229,9 @@ export default function AccountCodeForm({
               console.log("❌ Validation failed, errors:", errors);
             }
           )}
-          className="flex flex-col md:flex-row gap-4 md:gap-8"
+          className="space-y-3"
         >
+          <FormGrid columns={4}>
           {/* Hidden ID input */}
           <Controller
             name="id"
@@ -229,7 +242,7 @@ export default function AccountCodeForm({
           />
 
           {/* Left column */}
-          <div className="flex flex-col gap-4 w-full max-w-xs">
+          <div className="flex w-full min-w-0 flex-col gap-3">
             <SelectWithLabel<InsertAccountCodeSchemaType>
               fieldTitle="Account Type"
               nameInSchema="accountType"
@@ -265,25 +278,25 @@ export default function AccountCodeForm({
           </div>
 
           {/* Middle column */}
-          <div className="flex flex-col gap-4 w-full">
+          <div className="flex w-full min-w-0 flex-col gap-3">
             <InputWithLabel<InsertAccountCodeSchemaType>
               fieldTitle="Daily Rate"
               nameInSchema="dailyRate"
               register={form.register}
-              type="number"
-              step="any"
+              inputMode="decimal"
+              placeholder="0.0000"
             />
             <InputWithLabel<InsertAccountCodeSchemaType>
               fieldTitle="Monthly Rate"
               nameInSchema="monthlyRate"
               register={form.register}
-              type="number"
-              step="any"
+              inputMode="decimal"
+              placeholder="0.0000"
             />
           </div>
 
           {/* Right column */}
-          <div className="flex flex-col gap-4 w-full">
+          <div className="flex w-full min-w-0 flex-col gap-3">
             <CheckboxWithLabel<InsertAccountCodeSchemaType>
               fieldTitle="13th Month Pay"
               nameInSchema="month13thPay"
@@ -307,7 +320,7 @@ export default function AccountCodeForm({
           </div>
 
           {/* Buttons */}
-          <div className="flex flex-col gap-2 w-full max-w-xs">
+          <FormActions align="start" className="flex-col items-stretch pt-0 sm:items-start">
             <Button type="submit" disabled={saving || updating}>
               {saving
                 ? "Saving..."
@@ -332,7 +345,8 @@ export default function AccountCodeForm({
             <Button type="button" variant="outline" onClick={handleCancel}>
               {selectedId ? "Cancel" : "Reset"}
             </Button>
-          </div>
+          </FormActions>
+          </FormGrid>
         </form>
       </Form>
     </div>

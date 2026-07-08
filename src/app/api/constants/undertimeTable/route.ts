@@ -1,0 +1,7 @@
+import { NextResponse } from "next/server";
+import { fetchUndertimeRules } from "@/lib/queries/fetchLookupData";
+
+export async function GET() {
+  const rows = await fetchUndertimeRules();
+  return NextResponse.json(rows, { headers: { "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400" } });
+}

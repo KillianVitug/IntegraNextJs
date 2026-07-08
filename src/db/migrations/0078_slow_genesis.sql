@@ -1,0 +1,1 @@
+ALTER TABLE "admin_audit_events" ALTER COLUMN "entity_id" SET DATA TYPE varchar(255);

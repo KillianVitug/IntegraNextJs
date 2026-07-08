@@ -1,0 +1,1 @@
+ALTER TYPE "public"."holiday_year_source_enum" ADD VALUE 'Package';

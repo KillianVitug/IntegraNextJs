@@ -2,6 +2,16 @@ import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { employeeContributionFlags } from "@/db/schema";
 import { z } from "zod";
 
+
+const numericString = z.preprocess((val) => {
+  if (val === "") return null;
+  if (val == null) return null;
+  if (typeof val === "number") return String(val);
+  if (typeof val === "string") return val.replace(/,/g, "").trim();
+  return val;
+}, z.string().regex(/^\d*\.?\d*$/, "Must be a number").nullable());
+
+
 //Form Purposes
 export const insertEmployeeContributionFlagsSchema =
   createInsertSchema(employeeContributionFlags, {
@@ -28,7 +38,7 @@ export const employeeContributionFlagsInputSchema = z.object({
   peraaComputeBoth: z.boolean().optional(),
   peraaComputeEmployer: z.boolean().optional(),
   taxFixedPercentage: z.boolean().optional(),
-  taxFixedValue: z.coerce.number().optional(),
+  taxFixedValue: numericString.nullable(),
   taxMonthEndAdjustment: z.boolean().optional(),
 
   flag1: z.boolean().optional(),

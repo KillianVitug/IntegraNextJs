@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { InputHTMLAttributes } from "react";
+import { cn } from "@/lib/utils";
 
 type Props<T extends FieldValues = FieldValues> = {
   fieldTitle: string;
@@ -24,14 +25,23 @@ type Props<T extends FieldValues = FieldValues> = {
   value?: string;
   onChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
   readOnly?: boolean;
+  containerClassName?: string;
 } & InputHTMLAttributes<HTMLInputElement>;
 import { stripCommas } from "@/lib/number"; 
 
 export function formatMoney(v: string) {
   if (!v) return "0";
-  const n = Number(stripCommas(v));
-  if (isNaN(n)) return "0";
-  return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  const raw = stripCommas(v).trim();
+  if (!/^\d*\.?\d*$/.test(raw) || raw === ".") return "0";
+
+  const hasDecimal = raw.includes(".");
+  const [wholeValue, decimalValue = ""] = raw.split(".");
+  const whole = wholeValue === "" ? "0" : wholeValue;
+  const groupedWhole = Number(whole).toLocaleString("en-US", {
+    maximumFractionDigits: 0,
+  });
+
+  return hasDecimal ? `${groupedWhole}.${decimalValue}` : groupedWhole;
 }
 
 export function InputWithLabel<T extends FieldValues = FieldValues>({
@@ -40,12 +50,14 @@ export function InputWithLabel<T extends FieldValues = FieldValues>({
   register,
   type = "text",
   className,
+  containerClassName,
   readOnly,
   format,
   ...props
 }: Props<T> & { format?: "money" }) {
 
   const isMoney = format === "money";
+  void register;
 
   return (
     <FormField
@@ -53,35 +65,64 @@ export function InputWithLabel<T extends FieldValues = FieldValues>({
       render={({ field }) => {
 
         return (
-          <FormItem>
+          <FormItem className={cn("space-y-1.5", containerClassName)}>
             <FormLabel>{fieldTitle}</FormLabel>
 
             <FormControl>
             <Input
-              {...props}
-              {...field}
-              type="text"
-              inputMode={isMoney ? "decimal" : undefined}
-              readOnly={readOnly}
-              className={`w-full max-w-xs ${className}`}
+            {...props}
+            {...field}
+            type={isMoney ? "text" : type}
+            inputMode={isMoney ? "decimal" : props.inputMode}
+            readOnly={readOnly}
+            className={cn("w-full min-w-0", className)}
 
-              value={
-                isMoney
-                  ? formatMoney(field.value ?? "0")
-                  : field.value ?? ""   // 🔥 ALWAYS string
+            value={
+              isMoney
+                ? field.value === "" || field.value == null
+                  ? "0"
+                  : field.value
+                : field.value ?? ""
+            }
+
+            onChange={(e) => {
+              if (!isMoney) {
+                field.onChange(e.target.value);
+                return;
               }
 
-              onChange={(e) => {
-                if (!isMoney) {
-                  field.onChange(e.target.value === "" ? "" : e.target.value);
-                  return;
-                }
+              let raw = e.target.value.replace(/,/g, "");
 
-                const raw = e.target.value.replace(/,/g, "");
-                if (!/^\d*\.?\d*$/.test(raw)) return;
-                field.onChange(raw === "" ? "0" : raw);
-              }}
-            />
+              // Allow user to temporarily clear while typing
+              if (raw === "") {
+                field.onChange("0");
+                return;
+              }
+
+              // Allow ".", "12.", "12.3"
+              if (!/^\d*\.?\d*$/.test(raw)) return;
+
+              // Replace leading zero when typing a number
+              if (raw.length > 1 && raw.startsWith("0") && !raw.startsWith("0.")) {
+                raw = raw.replace(/^0+/, "");
+              }
+
+              field.onChange(raw);
+            }}
+
+            onBlur={() => {
+              if (!isMoney) return;
+
+              const v = field.value;
+
+              if (!v || v === "") {
+                field.onChange("0");
+                return;
+              }
+
+              field.onChange(formatMoney(v));
+            }}
+          />
             </FormControl>
 
             <FormMessage />

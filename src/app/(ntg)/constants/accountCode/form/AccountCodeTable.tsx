@@ -21,6 +21,20 @@ import { z } from "zod";
 
 type AccountCode = z.infer<typeof selectAccountCodeSchema>;
 
+function formatDecimalUpTo4(value: string | number | null | undefined) {
+  if (value == null || value === "") return "-";
+
+  const normalized = String(value).replace(/,/g, "").trim();
+  if (!/^(?:\d+\.?\d*|\.\d+)$/.test(normalized)) return String(value);
+
+  const [wholeValue, decimalValue] = normalized.split(".");
+  const whole = wholeValue === "" ? "0" : wholeValue;
+
+  if (decimalValue == null || decimalValue === "") return whole;
+
+  return `${whole}.${decimalValue.slice(0, 4)}`;
+}
+
 export default function AccountCodeTable({
   accountCode,
   onRowSelect,
@@ -91,6 +105,7 @@ export default function AccountCodeTable({
     }),
     columnHelper.accessor("dailyRate", {
       id: "dailyRate",
+      cell: ({ getValue }) => formatDecimalUpTo4(getValue()),
       header: ({ column }) => (
         <Button
           variant="ghost"
@@ -106,6 +121,7 @@ export default function AccountCodeTable({
     }),
     columnHelper.accessor("monthlyRate", {
       id: "monthlyRate",
+      cell: ({ getValue }) => formatDecimalUpTo4(getValue()),
       header: ({ column }) => (
         <Button
           variant="ghost"

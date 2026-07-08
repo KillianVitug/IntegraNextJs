@@ -1,5 +1,6 @@
 "use server";
 
+import { revalidateTag } from "next/cache";
 import { eq } from "drizzle-orm";
 import { flattenValidationErrors } from "next-safe-action";
 import { db } from "@/db";
@@ -18,6 +19,7 @@ import {
   type UpdateAccountCodeSchemaType,
 } from "@/zod-schemas/accountCode";
 import { insertPositionSchema, deletePositionSchema, type InsertPositionSchemaType} from "@/zod-schemas/position";
+import { requireAdminActor } from "@/lib/admin";
 
 // 🔹 Create Department
 export const saveDepartmentAction = actionClient
@@ -28,6 +30,7 @@ export const saveDepartmentAction = actionClient
   })
   .action(
     async ({ parsedInput }: { parsedInput: InsertDepartmentSchemaType }) => {
+      await requireAdminActor();
       try {
         const result = await db
           .insert(department)
@@ -37,6 +40,7 @@ export const saveDepartmentAction = actionClient
           } satisfies Partial<typeof department.$inferInsert>)
           .returning({ insertedId: department.id });
 
+        revalidateTag("departments");
         return {
           message: `✅ Department ID #${result[0].insertedId} created successfully`,
         };
@@ -58,6 +62,7 @@ export const updateDepartmentAction = actionClient
   })
   .action(
     async ({ parsedInput }: { parsedInput: InsertDepartmentSchemaType }) => {
+      await requireAdminActor();
       try {
         if (!parsedInput.id) {
           return { error: "❌ Department ID is required for update." };
@@ -72,6 +77,7 @@ export const updateDepartmentAction = actionClient
           .where(eq(department.id, parsedInput.id))
           .returning({ updatedId: department.id });
 
+        revalidateTag("departments");
         return {
           message: `✅ Department ID #${result[0].updatedId} updated successfully`,
         };
@@ -89,7 +95,9 @@ export const deleteDepartmentAction = actionClient
   .metadata({ actionName: "deleteDepartmentAction" })
   .schema(deleteDepartmentSchema)
   .action(async ({ parsedInput }) => {
+    await requireAdminActor();
     await db.delete(department).where(eq(department.id, parsedInput.id));
+    revalidateTag("departments");
     return {
       message: `🗑️ Department ID #${parsedInput.id} deleted successfully`,
     };
@@ -105,18 +113,12 @@ export const saveAccountCodeAction = actionClient
   })
   .action(
     async ({ parsedInput }: { parsedInput: InsertAccountCodeSchemaType }) => {
+      await requireAdminActor();
       try {
         // ✅ Convert numbers to strings for decimal fields
-        const dailyRate =
-          parsedInput.dailyRate !== null && parsedInput.dailyRate !== undefined
-            ? parsedInput.dailyRate.toString()
-            : null;
+        const dailyRate = parsedInput.dailyRate ?? null;
 
-        const monthlyRate =
-          parsedInput.monthlyRate !== null &&
-          parsedInput.monthlyRate !== undefined
-            ? parsedInput.monthlyRate.toString()
-            : null;
+        const monthlyRate = parsedInput.monthlyRate ?? null;
 
         const result = await db
           .insert(accountCode)
@@ -133,6 +135,7 @@ export const saveAccountCodeAction = actionClient
           } satisfies Partial<typeof accountCode.$inferInsert>)
           .returning({ insertedId: accountCode.id });
 
+        revalidateTag("account-codes");
         return {
           message: `✅ Account Code ID #${result[0].insertedId} created successfully`,
         };
@@ -155,15 +158,10 @@ export const updateAccountCodeAction = actionClient
   })
   .action(
     async ({ parsedInput }: { parsedInput: UpdateAccountCodeSchemaType }) => {
+      await requireAdminActor();
       try {
-        const dailyRate =
-          parsedInput.dailyRate != null
-            ? parsedInput.dailyRate.toString()
-            : null;
-        const monthlyRate =
-          parsedInput.monthlyRate != null
-            ? parsedInput.monthlyRate.toString()
-            : null;
+        const dailyRate = parsedInput.dailyRate ?? null;
+        const monthlyRate = parsedInput.monthlyRate ?? null;
 
         const result = await db
           .update(accountCode)
@@ -182,6 +180,7 @@ export const updateAccountCodeAction = actionClient
           .where(eq(accountCode.id, parsedInput.id))
           .returning({ updatedId: accountCode.id });
 
+        revalidateTag("account-codes");
         return {
           message: `✅ Account Code ID #${result[0].updatedId} updated successfully`,
         };
@@ -197,7 +196,9 @@ export const deleteAccountCodeAction = actionClient
   .metadata({ actionName: "deleteAccountCodeAction" })
   .schema(deleteAccountCodeSchema)
   .action(async ({ parsedInput }) => {
+    await requireAdminActor();
     await db.delete(accountCode).where(eq(accountCode.id, parsedInput.id));
+    revalidateTag("account-codes");
     return {
       message: `🗑️ Account Code ID #${parsedInput.id} deleted successfully`,
     };
@@ -213,6 +214,7 @@ export const savePositionAction = actionClient
 })
 .action(
   async ({ parsedInput }: { parsedInput: InsertPositionSchemaType }) => {
+    await requireAdminActor();
     try {
       const result = await db
         .insert(position)
@@ -221,6 +223,7 @@ export const savePositionAction = actionClient
         } satisfies Partial<typeof position.$inferInsert>)
         .returning({ insertedId: position.id });
 
+      revalidateTag("positions");
       return {
         message: `✅ Position ID #${result[0].insertedId} created successfully`,
       };
@@ -230,7 +233,7 @@ export const savePositionAction = actionClient
       }
       console.error(error);
       return { error: "❌ Unexpected error while saving position." };
-    }    
+    }
   }
 );
 // 🔹 Update Position
@@ -242,6 +245,7 @@ export const updatePositionAction = actionClient
 })
 .action(
   async ({ parsedInput }: { parsedInput: InsertPositionSchemaType }) => {
+    await requireAdminActor();
     try {
       if (!parsedInput.id) {
         return { error: "❌ Position ID is required for update." };
@@ -255,6 +259,7 @@ export const updatePositionAction = actionClient
         .where(eq(position.id, parsedInput.id))
         .returning({ updatedId: position.id });
 
+      revalidateTag("positions");
       return {
         message: `✅ Position ID #${result[0].updatedId} updated successfully`,
       };
@@ -264,7 +269,7 @@ export const updatePositionAction = actionClient
       }
       console.error(error);
       return { error: "❌ Unexpected error while updating position." };
-    }    
+    }
   }
 );
 
@@ -273,7 +278,9 @@ export const deletePositionAction = actionClient
 .metadata({ actionName: "deletePositionAction" })
 .schema(deletePositionSchema)
 .action(async ({ parsedInput }) => {
+  await requireAdminActor();
   await db.delete(position).where(eq(position.id, parsedInput.id));
+  revalidateTag("positions");
   return {
     message: `🗑️ Position ID #${parsedInput.id} deleted successfully`,
   };

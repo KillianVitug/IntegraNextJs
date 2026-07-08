@@ -119,3 +119,17 @@
     @apply bg-background text-foreground;
   }
 }
+
+@layer components {
+  .app-sidebar-toggle:checked ~ .app-sidebar {
+    width: 3.5rem;
+  }
+
+  .app-sidebar-toggle:checked ~ .app-sidebar .app-sidebar-label {
+    display: none;
+  }
+
+  .app-sidebar-toggle:checked ~ .app-sidebar .app-sidebar-toggle-icon {
+    transform: rotate(180deg);
+  }
+}

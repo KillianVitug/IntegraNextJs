@@ -1,36 +1,49 @@
 import LoanSearch from "@/app/(ntg)/loans/LoanSearch";
- import { getEmployeeLoanSearchResults } from "@/lib/queries/getEmployeeSearchResults";
 import LoanRecordTable from "@/app/(ntg)/loans/LoanRecordTable";
+import { PageHeader } from "@/components/layout/page-layout";
 import { getLoanRecords } from "@/lib/queries/getLoanRecords";
+import { parseTableQueryParams } from "@/lib/queries/tableQuery";
 
 export const metadata = {
     title: "Loan Files",
-}
+};
+
+const PAGE_SIZE = 50;
 
 export default async function LoanMaster({
     searchParams,
 }: {
     searchParams: Promise<{ [key: string]: string | undefined }>;
 }) {
-    const { searchText } = await searchParams
+    const params = await searchParams;
+    const query = parseTableQueryParams(params, { id: "employeeName", desc: false });
 
-    if (!searchText) {
-         const results = await getLoanRecords()
-        return (    
-            <>
-                <LoanSearch />
-                {results.length ? <LoanRecordTable data={results} /> : <p className="mt-4">No loan record found</p>}
-            </>
-        )
-    }
+    const { data, total } = await getLoanRecords({
+        page: query.page,
+        pageSize: PAGE_SIZE,
+        search: query.search,
+        filters: query.filters,
+        sort: query.sort,
+    });
+    const hasActiveFilters = Object.keys(query.filters).length > 0;
+    const shouldShowTable = data.length > 0 || total > 0 || query.search || hasActiveFilters;
 
-     const results = await getEmployeeLoanSearchResults(searchText)
     return (
-        <>
+        <div className="space-y-4">
+            <PageHeader
+                title="Employee Loans"
+                description="Search, review, and maintain employee loan records."
+            />
             <LoanSearch />
-            {results.length ? <LoanRecordTable data={results}/> : (
-                <p className="mt-4"> No results found.</p>
-            )}
-        </>
-    )
+            {shouldShowTable
+                ? (
+                    <>
+                        {!data.length ? <p className="mt-4">No results found.</p> : null}
+                        <LoanRecordTable data={data} total={total} pageSize={PAGE_SIZE} />
+                    </>
+                )
+                : <p className="mt-4">No loan record found</p>
+            }
+        </div>
+    );
 }

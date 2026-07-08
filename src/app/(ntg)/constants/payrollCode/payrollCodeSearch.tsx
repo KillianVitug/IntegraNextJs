@@ -1,8 +1,13 @@
+"use client"
+
 import Form from "next/form"
 import { Input } from "@/components/ui/input"
 import SearchButton from "@/components/SearchButton"
+import { Button } from "@/components/ui/button"
+import { useRouter } from "next/navigation"
 
 export default function PayrollCodeSearch() {
+    const router = useRouter();
     return (
         <Form
             action="/payrollMaster"
@@ -16,6 +21,14 @@ export default function PayrollCodeSearch() {
                 autoFocus
             />
             <SearchButton />
+
+            <Button
+                type="button"
+                variant="secondary"
+                onClick={() => router.push("/constants/payrollCode/form")}
+              >
+                Create
+              </Button>
         </Form>
     )
 }

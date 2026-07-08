@@ -1,0 +1,1 @@
+ALTER TABLE "employees_leave_records" ALTER COLUMN "leave_type" SET DATA TYPE varchar(20);

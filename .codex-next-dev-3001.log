@@ -1,0 +1,31 @@
+
+> integra@0.1.0 dev
+> next dev --turbopack --hostname 127.0.0.1 --port 3001
+
+   ▲ Next.js 15.5.9 (Turbopack)
+   - Local:        http://127.0.0.1:3001
+   - Network:      http://127.0.0.1:3001
+   - Environments: .env.local
+
+ ✓ Starting...
+Creating turbopack project {
+  dir: 'C:\\Users\\63917\\VsProjects2024\\IntegraNextJs(2)\\IntegraNextJs',
+  testMode: true
+}
+ ✓ Ready in 1941ms
+ ○ Compiling /payroll ...
+ ✓ Compiled /payroll in 5.8s
+ GET /payroll 200 in 7483ms
+ ✓ Compiled in 585ms
+ ✓ Compiled in 540ms
+ ✓ Compiled in 1029ms
+ ✓ Compiled in 419ms
+ ✓ Compiled in 179ms
+ ✓ Compiled in 939ms
+ ✓ Compiled in 1025ms
+ ✓ Compiled in 26ms
+ ✓ Compiled in 261ms
+ ✓ Compiled in 29.3s
+ ✓ Compiled in 535ms
+ ✓ Compiled in 24ms
+ ✓ Compiled in 1497ms

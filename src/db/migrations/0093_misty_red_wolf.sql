@@ -1,0 +1,2 @@
+CREATE INDEX "idx_employee_payroll_exception_period_id" ON "employee_payroll_exception_rows" USING btree ("payroll_period_id");--> statement-breakpoint
+CREATE INDEX "idx_general_info_department_active" ON "employees_general_info" USING btree ("department_id") WHERE "employees_general_info"."deleted_at" is null;

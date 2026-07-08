@@ -1,12 +1,11 @@
 import { db } from "@/db";
 import { employeeFolders } from "@/db/schema";
 import { NextResponse } from "next/server";
-import { v4 as uuid } from "uuid";
 
 export async function POST(req: Request) {
   const body = await req.json();
 
-  const newId = uuid();
+  const newId = crypto.randomUUID();
 
   const result = await db.insert(employeeFolders).values({
     id: newId,

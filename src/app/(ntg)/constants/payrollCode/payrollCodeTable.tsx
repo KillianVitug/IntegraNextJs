@@ -47,7 +47,7 @@ export default function PayrollCodeTable({ data }: Props) {
 
   const [sorting, setSorting] = useState<SortingState>([
     {
-        id: "employeeNo",
+        id: "code",
         desc: false //false for ascending
     }
   ])
@@ -173,7 +173,7 @@ export default function PayrollCodeTable({ data }: Props) {
                 className="cursor-pointer hover:bg-border/25 dark:hover:bg-ring/40"
                 onClick={() =>
                   router.push(
-                    `/payrollCode/form?customPayroll=${row.original.id}`
+                    `/constants/payrollCode/form?customPayrollId=${row.original.id}`
                   )
                 }
               >

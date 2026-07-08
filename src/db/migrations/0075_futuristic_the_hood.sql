@@ -1,0 +1,1 @@
+ALTER TABLE "employee_daily_overtime_overrides" ADD COLUMN "worked_minutes_override" integer;

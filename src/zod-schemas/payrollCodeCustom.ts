@@ -6,12 +6,9 @@ import {
 } from "./payrollCodeDefinitions";
 import {
   payrollContributionSchema,
-  // insertEmployeeContributionGroupSchema,
   selectEmployeeContributionGroupSchema,
 } from "./payrollContributionGroups";
 import {
-  // employeeContributionFlagsInputSchema,
-  // insertEmployeeContributionFlagsSchema,
   selectEmployeeContributionFlagsSchema,
 } from "./payrollContributionFlags";
 
@@ -20,11 +17,24 @@ import {
 //Form Purposes
 export const insertCustomPayrollSchema =
   insertCustomPayrollDefinitionSchema.extend({
-    
   });
 
+export const customPayrollContributionKeys = [
+  "SSS",
+  "PHILHEALTH",
+  "PAGIBIG",
+  "PERAA",
+  "TAX",
+] as const;
 
-  
+export const customPayrollContributionsSchema = z.object({
+  SSS: payrollContributionSchema,
+  PHILHEALTH: payrollContributionSchema,
+  PAGIBIG: payrollContributionSchema,
+  PERAA: payrollContributionSchema,
+  TAX: payrollContributionSchema,
+});
+
 const selectEmployeeContributionGroupWithFlagsSchema =
   selectEmployeeContributionGroupSchema.extend({
     flags: selectEmployeeContributionFlagsSchema.optional(),
@@ -46,10 +56,17 @@ selectCustomPayrollDefinitionSchema.extend({
 //Server Purposes
 export const customPayrollPayloadSchema =
   customPayrollDefinitionInputSchema.extend({
-    contributions: z.record(
-      payrollContributionSchema
-    ),
+    contributions: customPayrollContributionsSchema,
   });
+
+export type CustomPayrollContributionKey =
+  (typeof customPayrollContributionKeys)[number];
+
+export type CustomPayrollContribution =
+  z.infer<typeof payrollContributionSchema>;
+
+export type CustomPayrollContributions =
+  z.infer<typeof customPayrollContributionsSchema>;
 
 export type CustomPayrollPayload =
   z.infer<typeof customPayrollPayloadSchema>;

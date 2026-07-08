@@ -1,0 +1,1 @@
+ALTER TABLE "employees_salary" ADD COLUMN "ignore_contribution_deduction" boolean DEFAULT false NOT NULL;

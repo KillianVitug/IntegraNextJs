@@ -6,11 +6,16 @@ import { insertEmployeeSalarySchema, selectEmployeeSalarySchema } from "./employ
 import { insertEmployeeOtherReferencesSchema, selectEmployeeOtherReferencesSchema } from "./employeeOtherReferences";
 import { insertEmployeeRecurringEntriesSchema, selectEmployeeRecurringEntriesSchema } from "./employeeRecurringEntries";
 import { insertEmployeeTimekeepingSchema, selectEmployeeTimekeepingSchema } from "./employeeTimekeeping";
+import {
+    DEFAULT_EMPLOYEE_TYPE,
+    employeeTypeValues,
+} from "@/utils/employeeCode";
 
 // Insert Schema (used when adding a new employee)
 export const insertEmployeeSchema = createInsertSchema(employees, {
     id: z.string().uuid().optional(),
-    employeeNo: (schema) => schema.min(1, "Employee No. is required"),
+    employeeType: z.enum(employeeTypeValues).default(DEFAULT_EMPLOYEE_TYPE),
+    employeeNo: (schema) => schema.optional(),
     firstName: (schema) => schema.min(1, "First Name is required"),
     lastName: (schema) => schema.min(1, "Last Name is required"),
 }).extend({
@@ -22,7 +27,9 @@ export const insertEmployeeSchema = createInsertSchema(employees, {
 });
 
 // Select Schema (used when retrieving an employee from the database)
-export const selectEmployeeSchema = createSelectSchema(employees);
+export const selectEmployeeSchema = createSelectSchema(employees, {
+    employeeType: z.enum(employeeTypeValues),
+});
 
 export const selectEmployeeWithRelationsSchema = selectEmployeeSchema.extend({
     generalInfo: selectEmployeeGeneralInfoSchema.optional(),

@@ -6,13 +6,13 @@ export default function LoanSearch() {
     return (
         <Form
             action="/loans"
-            className="flex gap-2 items-center"
+            className="flex flex-col gap-2 sm:flex-row sm:items-center"
         >
             <Input 
-                name="searchText"
+                name="search"
                 type="text"
                 placeholder="Search Loan Record"
-                className="w-full"
+                className="min-w-0 sm:max-w-md"
                 autoFocus
             />
             <SearchButton />

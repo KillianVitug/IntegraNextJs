@@ -15,6 +15,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { cn } from "@/lib/utils";
+
+const CLEAR_SELECTION_VALUE = "__clear_selection__";
 
 type DataObj = {
   id: string | number;
@@ -29,7 +32,9 @@ type Props<T extends FieldValues> = {
   value?: string;
   onChange?: (val: string) => void;
   className?: string;
+  containerClassName?: string;
   isClearable?: boolean;
+  disabled?: boolean;
 };
 
 export function SelectWithLabel<T extends FieldValues>({
@@ -40,9 +45,33 @@ export function SelectWithLabel<T extends FieldValues>({
   value,
   onChange,
   className,
+  containerClassName,
   isClearable,
+  disabled,
 }: Props<T>) {
-  const isControlled = Boolean(control) && !value && !onChange;
+  const isControlled =
+    Boolean(control) && value === undefined && onChange === undefined;
+
+  const resolveValue = (rawValue: unknown) => {
+    if (rawValue == null || rawValue === "") return "";
+
+    const normalizedValue = String(rawValue);
+    const hasMatchingOption = data.some(
+      (item) => String(item.id) === normalizedValue
+    );
+
+    return hasMatchingOption ? normalizedValue : "";
+  };
+
+  const handleValueChange = (
+    nextValue: string,
+    change?: (val: string) => void
+  ) => {
+    const resolvedValue =
+      isClearable && nextValue === CLEAR_SELECTION_VALUE ? "" : nextValue;
+
+    change?.(resolvedValue);
+  };
 
   if (isControlled) {
     // react-hook-form mode
@@ -51,23 +80,34 @@ export function SelectWithLabel<T extends FieldValues>({
         name={nameInSchema}
         control={control}
         render={() => (
-          <FormItem>
+          <FormItem className={cn("space-y-1.5", containerClassName)}>
             <FormLabel>{fieldTitle}</FormLabel>
             <Controller
               name={nameInSchema}
               control={control}
               render={({ field }) => (
                 <Select
-                  onValueChange={field.onChange}
-                  value={field.value ?? ""} // empty string for "no selection"
+                  onValueChange={(nextValue) =>
+                    handleValueChange(nextValue, field.onChange)
+                  }
+                  value={resolveValue(field.value)}
+                  disabled={disabled}
                 >
                   <FormControl>
-                    <SelectTrigger className={`w-full max-w-xs ${className}`}>
+                    <SelectTrigger
+                      className={cn(
+                        "w-full min-w-0 overflow-hidden [&>span]:min-w-0 [&>span]:truncate",
+                        className
+                      )}
+                      disabled={disabled}
+                    >
                       <SelectValue placeholder="Select" />
                     </SelectTrigger>
                   </FormControl>
                   <SelectContent>
-                    {isClearable && <SelectItem value="">None</SelectItem>}
+                    {isClearable && (
+                      <SelectItem value={CLEAR_SELECTION_VALUE}>None</SelectItem>
+                    )}
                     {data.map((item) => (
                       <SelectItem key={item.id} value={String(item.id)}>
                         {item.name}
@@ -86,13 +126,26 @@ export function SelectWithLabel<T extends FieldValues>({
 
   // uncontrolled mode
   return (
-    <div>
-      <label className="text-base mb-2">{fieldTitle}</label>
-      <Select onValueChange={onChange} value={value}>
-        <SelectTrigger className={`w-full max-w-xs ${className}`}>
+    <div className={cn("space-y-1.5", containerClassName)}>
+      <label className="block text-sm font-medium">{fieldTitle}</label>
+      <Select
+        onValueChange={(nextValue) => handleValueChange(nextValue, onChange)}
+        value={resolveValue(value)}
+        disabled={disabled}
+      >
+        <SelectTrigger
+          className={cn(
+            "w-full min-w-0 overflow-hidden [&>span]:min-w-0 [&>span]:truncate",
+            className
+          )}
+          disabled={disabled}
+        >
           <SelectValue placeholder="Select" />
         </SelectTrigger>
         <SelectContent>
+          {isClearable && (
+            <SelectItem value={CLEAR_SELECTION_VALUE}>None</SelectItem>
+          )}
           {data.map((item) => (
             <SelectItem key={item.id} value={String(item.id)}>
               {item.name}

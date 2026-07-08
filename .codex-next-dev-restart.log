@@ -1,0 +1,22 @@
+
+> integra@0.1.0 dev
+> next dev --turbopack
+
+   ▲ Next.js 15.5.9 (Turbopack)
+   - Local:        http://localhost:3000
+   - Network:      http://25.13.216.62:3000
+   - Environments: .env.local
+
+ ✓ Starting...
+Creating turbopack project {
+  dir: 'C:\\Users\\63917\\VsProjects2024\\IntegraNextJs(2)\\IntegraNextJs',
+  testMode: true
+}
+ ✓ Ready in 1927ms
+ ○ Compiling /employeeMaster ...
+ ✓ Compiled /employeeMaster in 6.2s
+ GET /employeeMaster 200 in 8421ms
+ ✓ Compiled in 1990ms
+ ○ Compiling /employeeMaster ...
+ ✓ Compiled /employeeMaster in 1003ms
+ GET /employeeMaster?search=EMP 200 in 3246ms

@@ -3,11 +3,51 @@ import { /*contributionTypeEnum,*/ basisOfComputationEnum, employeeContributionG
 import {employeeContributionFlagsInputSchema} from "./payrollContributionFlags"
 import { z } from "zod";
 
+const numericString = z.preprocess((val) => {
+  if (val === "") return null;
+  if (val == null) return null;
+  if (typeof val === "number") return String(val);
+  if (typeof val === "string") return val.replace(/,/g, "").trim();
+  return val;
+}, z.string().regex(/^\d*\.?\d*$/, "Must be a number").nullable());
+
+
 //Form Purposes
 export const insertEmployeeContributionGroupSchema =
   createInsertSchema(employeeContributionGroups, {
     // payrollCode: z.coerce.number(), 
     // approximationPercent: z.coerce.number().min(0).max(100),
+  });
+  
+  //Server Purposes
+  const scheduleFlagsSchema = z.object({
+    always: z.boolean(),
+    endOfMonth: z.boolean(),
+    firstPayroll: z.boolean(),
+    secondPayroll: z.boolean(),
+    thirdPayroll: z.boolean(),
+    forthPayroll: z.boolean(),
+  });
+  
+  export const payrollContributionSchema = z.object({
+    basisOfComputation: z.enum(basisOfComputationEnum.enumValues),
+  
+    basisValue: numericString.nullable(),
+    approximationPercent: z.coerce.number(),
+  
+    percentage: numericString.nullable(),
+    fixedAmount: numericString.nullable(),
+    minimum: numericString.nullable(),
+    maximum: numericString.nullable(),
+  
+    fixedEmployeeShare: numericString.nullable(),
+    fixedEmployerShare: numericString.nullable(),
+    fixedECShare: numericString.nullable(),
+
+    
+  
+    scheduleFlags: scheduleFlagsSchema,
+    flags: employeeContributionFlagsInputSchema.partial().optional(),
   });
 
 export const selectEmployeeContributionGroupSchema =
@@ -15,35 +55,6 @@ export const selectEmployeeContributionGroupSchema =
 
 export type InsertEmployeeContributionGroup =
   z.infer<typeof insertEmployeeContributionGroupSchema>;
-
-
-//Server Purposes
-export const payrollContributionSchema = z.object({
-  basisOfComputation: z.enum(basisOfComputationEnum.enumValues),
-
-  basisValue: z.coerce.number().nullable(),
-  approximationPercent: z.coerce.number(),
-
-  percentage: z.coerce.number().nullable(),
-  fixedAmount: z.coerce.number().nullable(),
-  minimum: z.coerce.number().nullable(),
-  maximum: z.coerce.number().nullable(),
-
-  fixedEmployeeShare: z.coerce.number(),
-  fixedEmployerShare: z.coerce.number(),
-  fixedECShare: z.coerce.number(),
-
-  scheduleFlags: z.object({
-    always: z.boolean(),
-    endOfMonth: z.boolean(),
-    firstPayroll: z.boolean(),
-    secondPayroll: z.boolean(),
-    thirdPayroll: z.boolean(),
-    forthPayroll: z.boolean().optional(),
-  }),
-
-  flags: employeeContributionFlagsInputSchema.partial().optional(),
-});
 
 export type PayrollContribution =
   z.infer<typeof payrollContributionSchema>;

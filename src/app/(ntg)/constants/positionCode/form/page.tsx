@@ -22,7 +22,7 @@ export default function PositionPage() {
   }, [loadPositions]);
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-4">
       <PositionCodeForm
         selectedPosition={selected}
         onResetSelection={() => setSelected(null)}

@@ -1,10 +1,15 @@
 "use client";
 
+import { generateUUID } from "@/lib/uuid";
 import { useFieldArray, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Form } from "@/components/ui/form";
 import { Button } from "@/components/ui/button";
-import { v4 as uuidv4 } from "uuid";
+import {
+  FormActions,
+  FormGrid,
+  PageHeader,
+} from "@/components/layout/page-layout";
 import { InputWithLabel } from "@/components/inputs/InputWithLabel";
 import { SelectWithLabel } from "@/components/inputs/SelectWithLabel";
 import { InputWithLabelForFiles } from "@/components/inputs/InputWithLabelForFiles";
@@ -31,20 +36,26 @@ import {
 } from "@/app/actions/employeeFileAction";
 import { useAction } from "next-safe-action/hooks";
 import Image from "next/image";
+import {
+  formatEmployeePickerLabel,
+  sortEmployeesByLastName,
+} from "@/utils/employeeDisplay";
 
 type Props = {
   employeeFolder?: SelectEmployeeFolderSchemaType;
   employees: {
     id: string;
     employeeNo: string;
+    employeeType?: string | null;
     firstName: string;
+    middleName?: string | null;
     lastName: string;
   }[];
 };
 
 export default function FileForm({ employeeFolder, employees }: Props) {
   const router = useRouter();
-  const generatedId = uuidv4();
+  const [generatedId] = useState(() => generateUUID());
   const searchParams = useSearchParams();
   const hasGroupId = searchParams.has("groupId");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -54,9 +65,9 @@ export default function FileForm({ employeeFolder, employees }: Props) {
     setPreviewFile(null);
   }
 
-  const employeeOptions = employees.map((emp) => ({
+  const employeeOptions = sortEmployeesByLastName(employees).map((emp) => ({
     id: emp.id,
-    name: `${emp.lastName}, ${emp.firstName} (${emp.employeeNo})`,
+    name: formatEmployeePickerLabel(emp),
   }));
 
   const emptyValues: InsertEmployeeFolderSchemaType = {
@@ -177,7 +188,7 @@ export default function FileForm({ employeeFolder, employees }: Props) {
         const uploaded = await uploadRes.json();
 
         await execute({
-          id: uuidv4(),
+          id: generateUUID(),
           groupId,
           fileName: file.fileName,
           description: file.description,
@@ -214,7 +225,7 @@ export default function FileForm({ employeeFolder, employees }: Props) {
 
     files.forEach((file) => {
       append({
-        id: uuidv4(),
+        id: generateUUID(),
         file,
         fileName: file.name,
         description: "",
@@ -225,22 +236,22 @@ export default function FileForm({ employeeFolder, employees }: Props) {
   }
 
   return (
-    <div className="flex flex-col gap-1 sm:px-8">
-      <div>
-        <h2 className="text-2xl font-bold">
-          {employeeFolder?.id ? "Edit" : "New"} Employee Folder{" "}
-          {employeeFolder?.id ? `#${employeeFolder.id}` : "Form"}
-        </h2>
-      </div>
+    <div className="space-y-4">
+      <PageHeader
+        title={`${employeeFolder?.id ? "Edit" : "New"} Employee Folder ${
+          employeeFolder?.id ? `#${employeeFolder.id}` : "Form"
+        }`}
+      />
       <Form {...form}>
         <form
           onSubmit={form.handleSubmit(submitForm, (errors) => {
             console.log("❌ Validation failed, errors:", errors);
           })}
-          className="flex flex-col md:flex-row gap-4 md:gap-8"
+          className="space-y-3"
         >
+          <FormGrid columns={3}>
           {/* Column 1 */}
-          <div className="flex flex-col gap-4 w-full max-w-xs">
+          <div className="flex w-full min-w-0 flex-col gap-3">
             <SelectWithLabel
               fieldTitle="Employee"
               nameInSchema="employeeId"
@@ -260,7 +271,7 @@ export default function FileForm({ employeeFolder, employees }: Props) {
           </div>
 
           {/* Column 2 */}
-          <div className="flex flex-col gap-4 w-full max-w-xs">
+          <div className="flex w-full min-w-0 flex-col gap-3">
             <InputWithLabel<InsertEmployeeFolderSchemaType>
               fieldTitle="Folder Name"
               nameInSchema="folderName"
@@ -295,7 +306,7 @@ export default function FileForm({ employeeFolder, employees }: Props) {
               disabled
             />
           </div> */}
-          <div className="flex flex-col gap-4 w-full max-w-xs">
+          <div className="flex w-full min-w-0 flex-col gap-3">
             {/* <InputWithLabel<InsertEmployeeFileSchemaType>
               fieldTitle="File Path"
               nameInSchema="filePath"
@@ -310,10 +321,9 @@ export default function FileForm({ employeeFolder, employees }: Props) {
               onChange={handleFileSelected}
               multiple
             />
-            <div className="flex gap-2">
+            <FormActions align="start" className="pt-0">
               <Button
                 type="submit"
-                className="w-3/4"
                 variant="default"
                 disabled={status === "executing"}
               >
@@ -339,9 +349,9 @@ export default function FileForm({ employeeFolder, employees }: Props) {
               >
                 Upload
               </Button>
-            </div>
+            </FormActions>
             {/* {form.getValues("filePath") && ( */}
-            <div className="flex gap-2 mt-2">
+            <div className="mt-1 flex flex-wrap gap-2">
               {/* <Button
                 type="button"
                 variant="secondary"
@@ -373,12 +383,13 @@ export default function FileForm({ employeeFolder, employees }: Props) {
             </div>
             {/* )} */}
           </div>
+          </FormGrid>
         </form>
 
         {fields.map((item, index) => (
           <div
             key={item.id}
-            className="flex items-center border rounded-lg p-4 w-full gap-4 mt-2"
+            className="mt-2 flex w-full flex-col gap-3 rounded-md border p-3 lg:flex-row lg:items-center"
           >
             {/* Preview */}
 
@@ -406,7 +417,7 @@ export default function FileForm({ employeeFolder, employees }: Props) {
                 control={form.control}
               />
             </div>
-            <div className="flex rounded-lg p-6 gap-2">
+            <div className="flex flex-wrap gap-2 lg:pl-2">
               {item.previewUrl && (
                 <Button
                   type="button"

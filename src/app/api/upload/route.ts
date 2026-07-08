@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
 import { writeFile, mkdir } from "fs/promises";
 import path from "path";
+import { getCurrentAuthContext } from "@/lib/auth/server";
 
 export async function POST(req: Request) {
   try {
+    const auth = await getCurrentAuthContext();
+    if (!auth || auth.role !== "ADMIN") {
+      return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+
     const formData = await req.formData();
     const file = formData.get("file") as File;
 

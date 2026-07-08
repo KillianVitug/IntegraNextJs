@@ -38,6 +38,10 @@ import { usePolling } from "@/hooks/usePolling";
 import { Button } from "@/components/ui/button";
 import Filter from "@/components/react-table/Filter";
 import React from "react";
+import {
+  formatEmployeeNoDisplay,
+  getEmployeeTypeDisplay,
+} from "@/utils/employeeDisplay";
 
 type Props = {
   data: EmployeeSearchFolderResultsType;
@@ -77,6 +81,7 @@ export default function EmployeeTable({ data }: Props) {
 
   const columnHeaderArray: Array<keyof RowType> = [
     "employeeNo",
+    "employeeType",
     "employeeName",
     "folderType",
     "folderName",
@@ -84,6 +89,11 @@ export default function EmployeeTable({ data }: Props) {
     "remarks",
     "createdAt",
   ];
+
+  const columnHeaderLabels: Partial<Record<keyof RowType, string>> = {
+    employeeNo: "Employee No",
+    employeeType: "Type",
+  };
 
   const columnHelper = createColumnHelper<RowType>();
 
@@ -98,7 +108,8 @@ export default function EmployeeTable({ data }: Props) {
             className="pl-1 w-full flex justify-between"
             onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
           >
-            {columnName[0].toUpperCase() + columnName.slice(1)}
+            {columnHeaderLabels[columnName] ??
+              (columnName[0].toUpperCase() + columnName.slice(1))}
 
             {column.getIsSorted() === "asc" && (
               <ArrowUp className="ml-2 h-4 w-4" />
@@ -115,9 +126,20 @@ export default function EmployeeTable({ data }: Props) {
           </Button>
         );
       },
-      // cell: ({ getValue }) => { //presentational edit cells
-      //     const value = getValue()
-      // }
+      cell: ({ getValue, row }) => {
+        if (columnName === "employeeNo") {
+          return formatEmployeeNoDisplay(getValue() as string | null);
+        }
+
+        if (columnName === "employeeType") {
+          return getEmployeeTypeDisplay({
+            employeeType: getValue() as string | null,
+            employeeNo: row.original.employeeNo,
+          });
+        }
+
+        return getValue();
+      },
     });
   });
 
@@ -202,7 +224,13 @@ export default function EmployeeTable({ data }: Props) {
                   className="cursor-pointer bg-muted/30 hover:bg-muted"
                   onClick={() => toggleGroup(folder.id)}
                 >
-                  <TableCell>{folder.employeeNo}</TableCell>
+                  <TableCell>{formatEmployeeNoDisplay(folder.employeeNo)}</TableCell>
+                  <TableCell>
+                    {getEmployeeTypeDisplay({
+                      employeeType: folder.employeeType,
+                      employeeNo: folder.employeeNo,
+                    })}
+                  </TableCell>
                   <TableCell>{folder.employeeName}</TableCell>
                   <TableCell>{folder.folderType}</TableCell>
                   <TableCell>{folder.folderName}</TableCell>
@@ -235,11 +263,13 @@ export default function EmployeeTable({ data }: Props) {
                     >
                       <TableCell>{file.fileName}</TableCell>
                       <TableCell></TableCell>
+                      <TableCell></TableCell>
                       <TableCell>{file.fileExtension}</TableCell>
                       <TableCell>{file.mimeType}</TableCell>
                       <TableCell>{file.description}</TableCell>
                       <TableCell>{file.remarks}</TableCell>
                       <TableCell>{file.createdAt?.toLocaleDateString()}</TableCell>
+                      <TableCell></TableCell>
                     </TableRow>
                   ))}
               </React.Fragment>

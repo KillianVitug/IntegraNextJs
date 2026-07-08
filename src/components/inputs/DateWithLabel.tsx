@@ -15,6 +15,8 @@ type Props<T extends FieldValues> = {
   control?: Control<T>;
   value?: string;
   onChange?: (val: string) => void;
+  className?: string;
+  containerClassName?: string;
 };
 
 export function DateWithLabel<T extends FieldValues>({
@@ -23,6 +25,8 @@ export function DateWithLabel<T extends FieldValues>({
   control,
   value,
   onChange,
+  className,
+  containerClassName,
 }: Props<T>) {
   const [open, setOpen] = useState(false);
 
@@ -30,8 +34,8 @@ export function DateWithLabel<T extends FieldValues>({
 
   if (control) {
     return (
-      <div className="flex flex-col gap-2">
-        <Label className="text-base" htmlFor={nameInSchema}>
+      <div className={cn("flex flex-col gap-1.5", containerClassName)}>
+        <Label className="text-sm font-medium" htmlFor={nameInSchema}>
           {fieldTitle}
         </Label>
         <Controller
@@ -43,7 +47,8 @@ export function DateWithLabel<T extends FieldValues>({
                 <Button
                   variant="outline"
                   className={cn(
-                    "w-full max-w-xs justify-start text-left font-normal",
+                    "w-full min-w-0 justify-start text-left font-normal",
+                    className,
                     !field.value && "text-muted-foreground"
                   )}
                 >
@@ -75,8 +80,8 @@ export function DateWithLabel<T extends FieldValues>({
 
   // Controlled version
   return (
-    <div className="flex flex-col gap-2">
-      <Label className="text-base" htmlFor={nameInSchema}>
+    <div className={cn("flex flex-col gap-1.5", containerClassName)}>
+      <Label className="text-sm font-medium" htmlFor={nameInSchema}>
         {fieldTitle}
       </Label>
       <Popover open={open} onOpenChange={setOpen}>
@@ -84,7 +89,8 @@ export function DateWithLabel<T extends FieldValues>({
           <Button
             variant="outline"
             className={cn(
-              "w-full max-w-xs justify-start text-left font-normal",
+              "w-full min-w-0 justify-start text-left font-normal",
+              className,
               !value && "text-muted-foreground"
             )}
           >

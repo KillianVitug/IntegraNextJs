@@ -15,6 +15,7 @@ import {
 import { InputWithLabel } from "@/components/inputs/InputWithLabel";
 import { SelectWithLabel } from "@/components/inputs/SelectWithLabel";
 import { DateWithLabel } from "@/components/inputs/DateWithLabel";
+import { FormGrid } from "@/components/layout/page-layout";
 
 import { InsertEmployeeSchemaType } from "@/zod-schemas/employee";
 
@@ -25,8 +26,8 @@ type Props = {
 export default function GeneralTab({ departments }: Props) {
   const { register, control } = useFormContext<InsertEmployeeSchemaType>();
   return (
-    <div className="p-4">
-      <div className="grid grid-cols-3 gap-3 mb-6">
+    <div className="py-3">
+      <FormGrid columns={3} className="mb-4">
         <DateWithLabel
           fieldTitle="Date Hired"
           nameInSchema="generalInfo.dateHired"
@@ -82,11 +83,9 @@ export default function GeneralTab({ departments }: Props) {
           nameInSchema="generalInfo.clearanceDate"
           control={control}
         />
-      </div>
-      <hr className="p-2"></hr>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Block 1: The first group of inputs */}
-        {/* We keep this as its own grid to manage internal column layout */}
+      </FormGrid>
+      <hr className="mb-4" />
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <div className="grid grid-cols-1 gap-3">
           <InputWithLabel
             fieldTitle="SSS No."
@@ -108,8 +107,6 @@ export default function GeneralTab({ departments }: Props) {
           />
         </div>
 
-        {/* Block 2: The second group of inputs/selects */}
-        {/* We keep this as its own grid to manage internal column layout */}
         <div className="grid grid-cols-1 gap-3">
           <SelectWithLabel
             fieldTitle="Tax Status"

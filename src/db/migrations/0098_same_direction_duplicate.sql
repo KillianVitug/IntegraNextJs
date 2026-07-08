@@ -1,0 +1,1 @@
+-- ALTER TYPE "public"."attendance_dtr_correction_type" ADD VALUE 'Same-Direction Duplicate';

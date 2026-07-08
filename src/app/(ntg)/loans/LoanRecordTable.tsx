@@ -7,12 +7,6 @@ import {
   flexRender,
   getCoreRowModel,
   useReactTable,
-  ColumnFiltersState,
-  SortingState,
-  getPaginationRowModel,
-  getFilteredRowModel,
-  getFacetedUniqueValues,
-  getSortedRowModel,
 } from "@tanstack/react-table";
 
 import {
@@ -26,47 +20,72 @@ import {
 
 import { /*CircleCheckIcon, CircleXIcon,*/ ArrowUpDown, ArrowDown, ArrowUp } from "lucide-react";
 
-import { useRouter, useSearchParams } from "next/navigation";
-import { useState, useMemo, useEffect } from "react";
 import { usePolling } from "@/hooks/usePolling";
 import { Button } from "@/components/ui/button";
 import Filter from "@/components/react-table/Filter";
-import { EmployeeLoanSearchResultsType } from "@/lib/queries/getEmployeeSearchResults";
+import { useServerTableUrlState } from "@/components/react-table/useServerTableUrlState";
+import type { getLoanRecordsTypes } from "@/lib/queries/getLoanRecords";
+import {
+  formatEmployeeNoDisplay,
+  getEmployeeTypeDisplay,
+} from "@/utils/employeeDisplay";
 
 type Props = {
-  data: EmployeeLoanSearchResultsType;
+  data: getLoanRecordsTypes;
+  total: number;
+  pageSize: number;
 };
 
-type RowType = EmployeeLoanSearchResultsType[0];
+type RowType = getLoanRecordsTypes[number];
+type LoanStatus = RowType["status"];
 
-export default function LoanRecordTable({ data }: Props) {
-  const router = useRouter();
+function getLoanStatusClasses(status: LoanStatus) {
+  if (status === "Paid" || status === "Paid With Reloan") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300";
+  }
 
-  const searchParams = useSearchParams();
+  if (status === "Active") {
+    return "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300";
+  }
 
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
+  return "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950/50 dark:text-rose-300";
+}
 
-  const [sorting, setSorting] = useState<SortingState>([
-    {
-        id: "employeeNo",
-        desc: false //false for ascending
-    }
-  ])
-
-  usePolling(searchParams.get("searchText"), 300000)
-
-  const pageIndex = useMemo(() => {
-    const page = searchParams.get("page")
-    return page ? parseInt(page) - 1 : 0
-}, [searchParams.get("page")]) // eslint-disable-line react-hooks/exhaustive-deps
-
+export default function LoanRecordTable({ data, total, pageSize }: Props) {
   const columnHeaderArray: Array<keyof RowType> = [
     "employeeNo",
+    "employeeType",
     "employeeName",
     "accountCode",
     "accountCodeDescription",
-    "loanReferenceNumber"
+    "loanReferenceNumber",
+    "status",
   ];
+
+  const {
+    router,
+    searchParams,
+    pageIndex,
+    sorting,
+    columnFilters,
+    getColumnFilterValue,
+    setColumnFilterValue,
+    onSortingChange,
+    setPageIndex,
+    resetSorting,
+    resetColumnFilters,
+  } = useServerTableUrlState({
+    defaultSort: { id: "employeeName", desc: false },
+    filterColumnIds: columnHeaderArray.map(String),
+  });
+
+  usePolling(searchParams.get("search") ?? searchParams.get("searchText"), 300000)
+
+  const columnHeaderLabels: Partial<Record<keyof RowType, string>> = {
+    employeeNo: "Employee No",
+    employeeType: "Type",
+    status: "Status",
+  };
 
   const columnHelper = createColumnHelper<RowType>();
 
@@ -81,7 +100,8 @@ export default function LoanRecordTable({ data }: Props) {
                 className="pl-1 w-full flex justify-between"
                 onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
             >
-                {columnName[0].toUpperCase() + columnName.slice(1)}
+                {columnHeaderLabels[columnName] ??
+                  (columnName[0].toUpperCase() + columnName.slice(1))}
 
                 {column.getIsSorted() === "asc" && (
                     <ArrowUp className="ml-2 h-4 w-4" />
@@ -97,11 +117,38 @@ export default function LoanRecordTable({ data }: Props) {
             </Button>
             )
         },
-      // cell: ({ getValue }) => { //presentational edit cells
-      //     const value = getValue()
-      // }
+      cell: ({ getValue, row }) => {
+        if (columnName === "employeeNo") {
+          return formatEmployeeNoDisplay(getValue() as string | null);
+        }
+
+        if (columnName === "employeeType") {
+          return getEmployeeTypeDisplay({
+            employeeType: getValue() as string | null,
+            employeeNo: row.original.employeeNo,
+          });
+        }
+
+        if (columnName === "status") {
+          const status = getValue() as LoanStatus;
+
+          return (
+            <span
+              className={`inline-flex rounded-full border px-2 py-1 text-xs font-medium ${getLoanStatusClasses(
+                status
+              )}`}
+            >
+              {status}
+            </span>
+          );
+        }
+
+        return getValue();
+      },
     });
   });
+
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
   const table = useReactTable({
     data,
@@ -111,28 +158,16 @@ export default function LoanRecordTable({ data }: Props) {
         columnFilters,
         pagination: {
           pageIndex,
-          pageSize: 10,
+          pageSize,
         },
     },
-    onColumnFiltersChange: setColumnFilters,
-    onSortingChange: setSorting,
+    pageCount,
+    manualPagination: true,
+    manualFiltering: true,
+    manualSorting: true,
+    onSortingChange,
     getCoreRowModel: getCoreRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
-    getFacetedUniqueValues: getFacetedUniqueValues(),
-    getSortedRowModel: getSortedRowModel(),
   });
-
-  useEffect(() => {
-    const currentPageIndex = table.getState().pagination.pageIndex
-    const pageCount = table.getPageCount()
-
-    if(pageCount <= currentPageIndex && currentPageIndex > 0) {
-      const params = new URLSearchParams(searchParams.toString())
-      params.set('page','1')
-      router.replace(`?${params.toString()}`, {scroll: false})
-    }
-  }, [table.getState().columnFilters]) // eslint-disable-line react-hooks/exhaustive-deps
 
 
   return (
@@ -157,8 +192,9 @@ export default function LoanRecordTable({ data }: Props) {
                         <div className="grid place-content-center">
                             <Filter
                               column={header.column}
-                              filteredRows={table.
-                              getFilteredRowModel().rows.map(row=> row.getValue(header.column.id))
+                              value={getColumnFilterValue(header.column.id)}
+                              onValueChange={(value) =>
+                                setColumnFilterValue(header.column.id, value)
                               }
                             />
                         </div>
@@ -195,13 +231,9 @@ export default function LoanRecordTable({ data }: Props) {
           <p className="whitespace-nowrap font-bold">
             {`Page ${
               table.getState().pagination.pageIndex + 1
-            } of ${Math.max(1, table.getPageCount())}`}
+            } of ${pageCount}`}
             &nbsp;&nbsp;
-            {`[${table.getFilteredRowModel().rows.length} ${
-              table.getFilteredRowModel().rows.length !== 1
-                ? "total results"
-                : "result"
-            }]`}
+            {`[${total} ${total !== 1 ? "total results" : "result"}]`}
           </p>
         </div>
         <div className="flex flex-row gap-1">
@@ -214,13 +246,13 @@ export default function LoanRecordTable({ data }: Props) {
           </Button>
           <Button
             variant="outline"
-            onClick={() => table.resetSorting()}
+            onClick={resetSorting}
           >
             Reset Sorting
           </Button>
           <Button
             variant="outline"
-            onClick={() => table.resetColumnFilters()}
+            onClick={resetColumnFilters}
           >
             Reset Filters
           </Button>
@@ -230,10 +262,7 @@ export default function LoanRecordTable({ data }: Props) {
             variant="outline"
             onClick={() => {
               const newIndex = table.getState().pagination.pageIndex - 1
-              table.setPageIndex(newIndex)
-              const params = new URLSearchParams(searchParams.toString())
-              params.set("page", (newIndex + 1).toString())
-              router.replace(`?${params.toString()}`, { scroll: false })
+              setPageIndex(newIndex)
           }}
             disabled={!table.getCanPreviousPage()}
           >
@@ -243,10 +272,7 @@ export default function LoanRecordTable({ data }: Props) {
             variant="outline"
             onClick={() => {
               const newIndex = table.getState().pagination.pageIndex + 1
-              table.setPageIndex(newIndex)
-              const params = new URLSearchParams(searchParams.toString())
-              params.set("page", (newIndex + 1).toString())
-              router.replace(`?${params.toString()}`, { scroll: false })
+              setPageIndex(newIndex)
           }}
             disabled={!table.getCanNextPage()}
           >

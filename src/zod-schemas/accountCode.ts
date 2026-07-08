@@ -1,45 +1,53 @@
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
-import { accountCode } from "@/db/schema";
+import { accountCode, accountTypeEnum } from "@/db/schema";
 import { z } from "zod";
 
-// Insert Schema (used when adding a new accountCode)
+const decimalStringUpTo4 = z.preprocess((value) => {
+  if (value == null || value === "") return null;
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") return value.replace(/,/g, "").trim();
+  return value;
+}, z.string()
+  .regex(/^(?:\d+\.?\d*|\.\d+)$/, "Must be a number")
+  .refine(
+    (value) => (value.split(".")[1]?.length ?? 0) <= 4,
+    "Must have at most 4 decimal places"
+  )
+  .transform((value) => (value.endsWith(".") ? value.slice(0, -1) : value))
+  .nullable());
+
 export const insertAccountCodeSchema = createInsertSchema(accountCode, {
-    id: z.coerce.number().optional(),
-    dailyRate: z.coerce.number().nullable().optional(),
-    monthlyRate: z.coerce.number().nullable().optional(),
-    createdAt: z.coerce.date().optional(),
-    updatedAt: z.coerce.date().optional(),
-})
+  id: z.coerce.number().optional(),
+  accountType: z.enum(accountTypeEnum.enumValues).nullable().optional(),
+  dailyRate: decimalStringUpTo4.optional(),
+  monthlyRate: decimalStringUpTo4.optional(),
+  createdAt: z.coerce.date().optional(),
+  updatedAt: z.coerce.date().optional(),
+});
 
-// Select Schema (used when retrieving a department from the database)
 export const selectAccountCodeSchema = createSelectSchema(accountCode, {
-    // 👇 convert DB decimals (string) into numbers for the client
-    id: z.coerce.number().optional(),
-    dailyRate: z.coerce.number().nullable(),
-    monthlyRate: z.coerce.number().nullable(),
-    createdAt: z.coerce.date().optional(),
-    updatedAt: z.coerce.date().optional(),
-  });
+  id: z.coerce.number().optional(),
+  accountType: z.enum(accountTypeEnum.enumValues).nullable(),
+  dailyRate: decimalStringUpTo4,
+  monthlyRate: decimalStringUpTo4,
+  createdAt: z.coerce.date().optional(),
+  updatedAt: z.coerce.date().optional(),
+});
 
-// ✅ Delete Schema (used when deleting a department)
 export const deleteAccountCodeSchema = z.object({
-    id: z
-      .number({
-        required_error: "Account Code ID is required for deletion",
-        invalid_type_error: "Account Code ID must be a number",
-      })
-      .positive("Account Code ID must be a positive number"),
-  });
+  id: z.coerce
+    .number()
+    .positive("Account Code ID must be a positive number"),
+});
 
-export const updateAccountCodeSchema = insertAccountCodeSchema.extend({
-    id: z.coerce.number({
-      required_error: "Account Code ID is required for update",
-    }),
-    
-    
-}).passthrough();
-  
-// Types
+export const updateAccountCodeSchema = insertAccountCodeSchema
+  .extend({
+    id: z.coerce
+      .number()
+      .positive("Account Code ID is required for update"),
+  })
+  .passthrough();
+
 export type InsertAccountCodeSchemaType = z.infer<typeof insertAccountCodeSchema>;
 export type UpdateAccountCodeSchemaType = z.infer<typeof updateAccountCodeSchema>;
 export type SelectAccountCodeSchemaType = z.infer<typeof selectAccountCodeSchema>;

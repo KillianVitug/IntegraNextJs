@@ -1,7 +1,7 @@
 import { InsertEmployeeSchemaType } from "@/zod-schemas/employee";
 
 export const defaultGeneralInfo = {
-    employeeId: undefined, 
+    // employeeId: undefined, 
     payrollMode: undefined,
     payrollTerms: undefined,
     category: undefined,
@@ -19,7 +19,7 @@ export const defaultGeneralInfo = {
 };
 
 export const defaultSalary = {
-    employeeId: undefined,
+    // employeeId: undefined,
     dailyRate: "0", 
     monthlyRate: "0", 
     monthlyAllowance: "0", 
@@ -27,16 +27,18 @@ export const defaultSalary = {
     cola: "0", 
     rateDivisor: "0",
     billingRate: "0", 
-    customPayrollCode: "",
+    ignoreDtrForMonthlyRate: false,
+    ignoreContributionDeduction: false,
+    customPayrollId: null,
     customPayrollDescription: "",
     slvlGroupId: "",
   };
   
 
 export const defaultOtherReferences = {
-    employeeId: undefined,
+    // employeeId: undefined,
     positionId: null,
-    bankCode: "",
+    bankCode: "Philippine National Bank - (PNB)"  as const,
     bankAccountNo: "",
     address: "",
     email:"",
@@ -50,7 +52,7 @@ export const defaultOtherReferences = {
 
 
 export const defaultTimekeeping = {
-    employeeId: undefined,
+    // employeeId: undefined,
     timekeepingId: "",
     shiftSchedule: null,
     checkInTime: null,
@@ -61,7 +63,7 @@ export const defaultTimekeeping = {
 };
 
 export const defaultEmployeeValues: InsertEmployeeSchemaType = {
-    employeeNo: "",
+    employeeType: "EMP",
     firstName: "",
     lastName: "",
     middleName: "",
