@@ -1,0 +1,18 @@
+{
+  "presets": [
+    [
+      "next/babel",
+      {
+        "preset-env": {
+          "bugfixes": true,
+          "targets": {
+            "chrome": "79",
+            "edge": "79",
+            "firefox": "66",
+            "safari": "13"
+          }
+        }
+      }
+    ]
+  ]
+}

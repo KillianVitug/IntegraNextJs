@@ -9,7 +9,7 @@
     "safari >= 13"
   ],
   "scripts": {
-    "dev": "next dev --turbopack",
+    "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint src --max-warnings=0",
@@ -19,6 +19,7 @@
     "verify:dtr-lwop": "tsx ./src/scripts/verifyDtrLwopGeneration.ts",
     "verify:rest-day-holiday-dtr": "tsx ./src/scripts/verifyRestDayHolidayDtr.ts",
     "verify:salary-normalization": "tsx ./src/scripts/verifySalaryNormalization.ts",
+    "verify:manager-firefox66": "tsx ./src/scripts/verifyManagerFirefox66Bundles.ts",
     "verify:leave-functionality": "tsx ./src/scripts/verifyLeaveFunctionality.ts",
     "backfill:slvl-groups": "tsx ./src/scripts/backfillSlvlGroupsByTenure.ts",
     "backfill:leave-day-details": "tsx ./src/scripts/backfillLeaveDayDetails.ts",

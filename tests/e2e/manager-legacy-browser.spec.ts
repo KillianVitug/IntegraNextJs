@@ -286,3 +286,60 @@ test.describe("manager leave request browser enhancements", () => {
     await expect(page.locator("#leave-days")).toHaveValue("1");
   });
 });
+
+test.describe("manager Firefox 66 runtime compatibility", () => {
+  test.skip(
+    !managerEmail || !managerPassword,
+    "Set PLAYWRIGHT_MANAGER_EMAIL and PLAYWRIGHT_MANAGER_PASSWORD to run manager Firefox 66 tests.",
+  );
+
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        get: () =>
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:66.0) Gecko/20100101 Firefox/66.0",
+      });
+
+      delete window.ResizeObserver;
+      delete window.queueMicrotask;
+
+      if (window.CSS) {
+        delete window.CSS.escape;
+      }
+    });
+
+    await loginAsManager(page);
+    await expect(page).toHaveURL(/\/managerHome(?:\?|$)/);
+  });
+
+  for (const route of ["/managerCalendar", "/managerSchedules"]) {
+    test(`${route} opens when Firefox 66 APIs are missing`, async ({ page }) => {
+      const failures: string[] = [];
+
+      page.on("pageerror", (error) => {
+        failures.push(error.message);
+      });
+      page.on("console", (message) => {
+        if (message.type() === "error") {
+          failures.push(message.text());
+        }
+      });
+
+      await page.goto(route, { waitUntil: "domcontentloaded" });
+
+      await expect(page.getByText("Something went wrong")).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /Try again/i })).toHaveCount(0);
+      await expect(
+        page.getByRole("heading", {
+          name:
+            route === "/managerCalendar"
+              ? /Manager Calendar/i
+              : /Manager Schedules/i,
+        }),
+      ).toBeVisible();
+
+      expect(failures).toEqual([]);
+    });
+  }
+});

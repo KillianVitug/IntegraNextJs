@@ -9,16 +9,26 @@ export default function GlobalError({
   reset: () => void;
 }) {
   useEffect(() => {
-    // Log the error to an error reporting service
-    console.error(error);
+    console.error("Application global error", {
+      digest: error.digest,
+      message: error.message,
+      stack: error.stack,
+    });
   }, [error]);
 
   return (
     // global-error must include html and body tags
     <html>
       <body>
-        <h2>Something went wrong!</h2>
-        <button onClick={() => reset()}>Try again</button>
+        <main style={{ padding: 24, textAlign: "center" }}>
+          <h2>Something went wrong!</h2>
+          {error.digest ? (
+            <p>
+              Error reference: <code>{error.digest}</code>
+            </p>
+          ) : null}
+          <button onClick={() => reset()}>Try again</button>
+        </main>
       </body>
     </html>
   );
