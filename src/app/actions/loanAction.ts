@@ -33,10 +33,13 @@ import { stripCommas } from "@/lib/number";
 import { actionClient } from "@/lib/safe-action";
 import { flattenValidationErrors } from "next-safe-action";
 import { ensureSemiMonthlyPayrollPeriods } from "@/lib/payroll/engine";
-import { fetchConfirmedHolidayRowsForRange } from "@/lib/holidays";
 import {
+  assertLoanInstallmentPlanRepays,
+  calculateLoanBalanceAfterPayments,
   generateLoanInstallmentPlan,
+  type LoanPaymentTerms,
 } from "@/lib/payroll/loan";
+import { fetchLoanScheduleHolidays } from "@/lib/payroll/loanHolidays";
 import { getNextSemiMonthlyCode, parsePayrollCode } from "@/lib/payroll/calendar";
 import { formatEmployeeNoDisplay } from "@/utils/employeeDisplay";
 import { employeeCodeSql } from "@/lib/employeeCodeSql";
@@ -45,13 +48,6 @@ import { and, asc, desc, eq, ilike, inArray, isNull, ne, or, sql } from "drizzle
 const LOAN_HISTORY_PAGE_SIZE = 10;
 const PAID_WITH_RELOAN_STATUS = "Paid With Reloan";
 const LOAN_EMPLOYEE_SEARCH_LIMIT = 20;
-
-type LoanPaymentTerms =
-  | "Always"
-  | "First Payroll"
-  | "Second Payroll"
-  | "Third Payroll"
-  | "Fourth Payroll";
 
 type PayrollPeriodLookup = {
   id: string;
@@ -384,10 +380,6 @@ export async function getLoanReferencePreview(args: {
   });
 }
 
-function toLoanPaymentTerms(value: string): LoanPaymentTerms {
-  return value as LoanPaymentTerms;
-}
-
 function getLastScheduleAnchor<T extends { payrollCode: string; installmentNo: number; status: string }>(
   installments: T[]
 ) {
@@ -534,6 +526,12 @@ async function createLoanRecord(args: {
       args.amortizationAmount > 0 ? args.amortizationAmount : args.payableAmount,
     holidays: args.holidays,
   });
+  assertLoanInstallmentPlanRepays({
+    installments,
+    payableAmount: args.payableAmount,
+    amortization:
+      args.amortizationAmount > 0 ? args.amortizationAmount : args.payableAmount,
+  });
 
   const payrollCodes = installments.map((installment) => installment.payrollCode);
   await ensurePayrollPeriodsForCodes(payrollCodes);
@@ -633,7 +631,10 @@ async function updateLoanRecord(args: {
     .where(eq(loanPayments.loanId, args.loanId));
 
   const totalPaid = roundMoney(toAmount(paymentAggregate?.totalPaid));
-  const recalculatedBalance = roundMoney(Math.max(0, args.payableAmount - totalPaid));
+  const recalculatedBalance = calculateLoanBalanceAfterPayments({
+    payableAmount: args.payableAmount,
+    totalPaid,
+  });
   const termMonths = normalizeTermMonths(args.parsedInput.termMonths);
   const amortizationAmount = roundMoney(toAmount(args.normalizedAmortization));
   const normalizedAmortization = toDecimalString(args.normalizedAmortization);
@@ -706,6 +707,13 @@ async function updateLoanRecord(args: {
             holidays: args.holidays,
           })
         : [];
+    if (recalculatedBalance > 0) {
+      assertLoanInstallmentPlanRepays({
+        installments: regeneratedInstallments,
+        payableAmount: recalculatedBalance,
+        amortization: amortizationAmount > 0 ? amortizationAmount : recalculatedBalance,
+      });
+    }
 
     const newPayrollCodes = regeneratedInstallments.map(
       (installment) => installment.payrollCode
@@ -1033,7 +1041,7 @@ export async function getEmployeeLoanSchedule(
     .from(loanInstallments)
     .where(eq(loanInstallments.loanId, loanId))
     .orderBy(asc(loanInstallments.installmentNo), asc(loanInstallments.dueDate))
-    .limit(60); // 5 years of semi-monthly installments; enough for all near-term schedule needs
+    .limit(240); // 120 months of semi-monthly installments, matching the max loan term.
 
   return employeeLoanScheduleSchema.parse(rows);
 }
@@ -1106,11 +1114,6 @@ export const skipLoanInstallmentAction = actionClient
     try {
       const actor = await requireAdminActor();
 
-      const holidays = await fetchConfirmedHolidayRowsForRange(
-        "2000-01-01",
-        "2100-12-31"
-      );
-
       const result = await db.transaction(async (tx) => {
         const loan = await tx.query.employeesLoans.findFirst({
           where: eq(employeesLoans.id, parsedInput.loanId),
@@ -1153,9 +1156,10 @@ export const skipLoanInstallmentAction = actionClient
           .from(loanPayments)
           .where(eq(loanPayments.loanId, loan.id));
 
-        const currentBalance = roundMoney(
-          Math.max(0, toAmount(loan.payableLoan) - toAmount(paymentAggregate?.totalPaid))
-        );
+        const currentBalance = calculateLoanBalanceAfterPayments({
+          payableAmount: toAmount(loan.payableLoan),
+          totalPaid: toAmount(paymentAggregate?.totalPaid),
+        });
 
         if (currentBalance <= 0) {
           throw new Error("This loan has no remaining balance to reschedule.");
@@ -1173,6 +1177,9 @@ export const skipLoanInstallmentAction = actionClient
         const startPayrollCode = getNextSemiMonthlyCode(
           installmentToSkip.payrollCode
         );
+        const holidays = startPayrollCode
+          ? await fetchLoanScheduleHolidays(startPayrollCode)
+          : [];
         const regeneratedInstallments =
           startPayrollCode && currentBalance > 0
             ? generateLoanInstallmentPlan({
@@ -1184,6 +1191,14 @@ export const skipLoanInstallmentAction = actionClient
                 holidays,
               })
             : [];
+        if (currentBalance > 0) {
+          assertLoanInstallmentPlanRepays({
+            installments: regeneratedInstallments,
+            payableAmount: currentBalance,
+            amortization:
+              amortizationAmount > 0 ? amortizationAmount : currentBalance,
+          });
+        }
 
         const oldPayrollCodes = futureRegenerableInstallments.map(
           (installment: { payrollCode: string }) => installment.payrollCode
@@ -1320,16 +1335,15 @@ export const saveEmployeeLoanAction = actionClient
         const payableAmount = roundMoney(toAmount(normalizedPayableLoan));
         const termMonths = normalizeTermMonths(parsedInput.termMonths);
         const amortizationAmount = roundMoney(toAmount(normalizedAmortization));
-        const paymentTerms = toLoanPaymentTerms("Always");
+        const paymentTerms: LoanPaymentTerms = "Always";
 
         const parsedPayrollCode = parsePayrollCode(parsedInput.payrollDateDeduction);
         if (parsedPayrollCode) {
           await ensureSemiMonthlyPayrollPeriods(parsedPayrollCode.year);
         }
 
-        const holidays = await fetchConfirmedHolidayRowsForRange(
-          "2000-01-01",
-          "2100-12-31"
+        const holidays = await fetchLoanScheduleHolidays(
+          parsedInput.payrollDateDeduction
         );
 
         const result = await db.transaction(async (tx) => {

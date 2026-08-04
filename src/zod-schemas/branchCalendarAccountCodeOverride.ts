@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { shiftScheduleEnum } from "@/db/schema";
 
 const dateKeySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const nullableDateKeySchema = z.preprocess(
@@ -16,6 +17,34 @@ export const saveBranchCalendarAccountCodeOverrideSchema = z.object({
 export const clearBranchCalendarAccountCodeOverrideSchema = z.object({
   attendanceDate: dateKeySchema,
   departmentId: z.coerce.number().int().positive().nullable().optional(),
+});
+
+export const saveBranchCalendarScheduleOverrideSchema = z
+  .object({
+    attendanceDate: dateKeySchema,
+    employeeIds: z.array(z.string().uuid()).min(1),
+    mode: z.enum(["WORKING_SHIFT", "REST_DAY"]),
+    shiftTableId: z.coerce.number().int().positive().nullable().optional(),
+    shiftSchedule: z.enum(shiftScheduleEnum.enumValues).nullable().optional(),
+    graceMinutes: z.coerce.number().int().min(0).default(0),
+    isFlexible: z.coerce.boolean().default(false),
+  })
+  .superRefine((value, ctx) => {
+    if (value.mode === "WORKING_SHIFT" && !value.shiftTableId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["shiftTableId"],
+        message: "Select a shift table for working-shift overrides.",
+      });
+    }
+  });
+
+export const revertBranchCalendarScheduleOverrideSchema = z.object({
+  itemId: z.string().uuid(),
+});
+
+export const revertBranchCalendarScheduleOverridesSchema = z.object({
+  itemIds: z.array(z.string().uuid()).min(1),
 });
 
 export const saveBranchCalendarHolidayCheckDatesSchema = z
@@ -50,6 +79,18 @@ export type SaveBranchCalendarAccountCodeOverrideSchemaType = z.infer<
 
 export type ClearBranchCalendarAccountCodeOverrideSchemaType = z.infer<
   typeof clearBranchCalendarAccountCodeOverrideSchema
+>;
+
+export type SaveBranchCalendarScheduleOverrideSchemaType = z.infer<
+  typeof saveBranchCalendarScheduleOverrideSchema
+>;
+
+export type RevertBranchCalendarScheduleOverrideSchemaType = z.infer<
+  typeof revertBranchCalendarScheduleOverrideSchema
+>;
+
+export type RevertBranchCalendarScheduleOverridesSchemaType = z.infer<
+  typeof revertBranchCalendarScheduleOverridesSchema
 >;
 
 export type SaveBranchCalendarHolidayCheckDatesSchemaType = z.infer<

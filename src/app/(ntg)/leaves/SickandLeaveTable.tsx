@@ -25,10 +25,7 @@ import { usePolling } from "@/hooks/usePolling";
 import { Button } from "@/components/ui/button";
 import Filter from "@/components/react-table/Filter";
 import { useServerTableUrlState } from "@/components/react-table/useServerTableUrlState";
-import {
-  formatEmployeeNoDisplay,
-  getEmployeeTypeDisplay,
-} from "@/utils/employeeDisplay";
+import { formatEmployeeNoDisplay } from "@/utils/employeeDisplay";
 
 type Props = {
   data: SickAndLeaveResultsType;
@@ -48,12 +45,10 @@ type RowType = SickAndLeaveResultsType[0] & {
 export default function SickandLeaveTable({ data, total, pageSize }: Props) {
   const columnHeaderArray: Array<keyof RowType> = [
     "employeeNo",
-    "employeeType",
     "fullName",
     "dateHired",
     "yearsOfService",
     "monthsOfService",
-    "department",
     "sickLeave",
     "vacationLeave",
     "usedSickLeave",       
@@ -62,10 +57,8 @@ export default function SickandLeaveTable({ data, total, pageSize }: Props) {
 
   const serverBackedColumnIds: Array<keyof RowType> = [
     "employeeNo",
-    "employeeType",
     "fullName",
     "dateHired",
-    "department",
     "sickLeave",
     "vacationLeave",
   ];
@@ -127,7 +120,8 @@ export default function SickandLeaveTable({ data, total, pageSize }: Props) {
 
   const columnHeaderLabels: Partial<Record<keyof RowType, string>> = {
     employeeNo: "Employee No",
-    employeeType: "Type",
+    usedSickLeave: "Used/Encashed Sick Leave",
+    usedVacationLeave: "Used/Encashed Vacation Leave",
   };
 
   const columns = columnHeaderArray.map((columnName) => {
@@ -177,13 +171,6 @@ export default function SickandLeaveTable({ data, total, pageSize }: Props) {
       // List all columns you want to show as integer
       if (columnName === "employeeNo") {
         return formatEmployeeNoDisplay(value as string | null);
-      }
-
-      if (columnName === "employeeType") {
-        return getEmployeeTypeDisplay({
-          employeeType: value as string | null,
-          employeeNo: info.row.original.employeeNo,
-        });
       }
 
       if (

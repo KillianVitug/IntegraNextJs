@@ -9,12 +9,13 @@ import {
 } from "@/db/schema";
 import type { PayrollScheduledLoanDeductionView } from "@/app/(ntg)/payroll/types";
 import { recordAdminAuditEvent, recordPayrollRunEvent } from "@/lib/admin";
-import { fetchConfirmedHolidayRowsForRange } from "@/lib/holidays";
 import type { UpdatePayrollLoanInstallmentAmountSchemaType } from "@/zod-schemas/payrollExceptionRows";
 import {
+  assertLoanInstallmentPlanRepays,
   generateLoanInstallmentPlan,
   type LoanInstallmentSeed,
 } from "./loan";
+import { fetchLoanScheduleHolidays } from "./loanHolidays";
 import {
   getNextSemiMonthlyCode,
   parsePayrollCode,
@@ -264,10 +265,6 @@ export async function updateEmployeePayrollLoanInstallmentAmount(args: {
   payload: UpdatePayrollLoanInstallmentAmountSchemaType;
 }) {
   const scheduledAmount = roundMoney(args.payload.scheduledAmount);
-  const holidays = await fetchConfirmedHolidayRowsForRange(
-    "2000-01-01",
-    "2100-12-31"
-  );
 
   const result = await db.transaction(async (tx) => {
     const [selectedRow] = await tx
@@ -367,6 +364,9 @@ export async function updateEmployeePayrollLoanInstallmentAmount(args: {
       .filter((installment) => isEditableLoanInstallmentStatus(installment.status));
     const startPayrollCode = getNextSemiMonthlyCode(selectedRow.installment.payrollCode);
     const amortizationAmount = roundMoney(toAmount(selectedRow.loan.amortization));
+    const holidays = startPayrollCode
+      ? await fetchLoanScheduleHolidays(startPayrollCode)
+      : [];
     const regeneratedInstallments =
       balanceAfterTarget > 0 && startPayrollCode
         ? generateLoanInstallmentPlan({
@@ -378,6 +378,14 @@ export async function updateEmployeePayrollLoanInstallmentAmount(args: {
             holidays,
           })
         : [];
+    if (balanceAfterTarget > 0) {
+      assertLoanInstallmentPlanRepays({
+        installments: regeneratedInstallments,
+        payableAmount: balanceAfterTarget,
+        amortization:
+          amortizationAmount > 0 ? amortizationAmount : balanceAfterTarget,
+      });
+    }
 
     const affectedPayrollCodes = uniqueStrings([
       selectedRow.installment.payrollCode,

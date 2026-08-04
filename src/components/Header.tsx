@@ -57,6 +57,7 @@ export async function Header() {
             aria-label="Leave Menu"
             choices={[
               { title: "Used Leaves and Services", href: "/leaves" },
+              { title: "Leave Encashment", href: "/leaves?tab=encashment" },
               { title: "Branch Calendar", href: "/branchCalendar" },
               { title: "Create Leave Request", href: "/leaves/form" },
             ]}

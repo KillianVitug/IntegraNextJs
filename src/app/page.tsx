@@ -2,7 +2,12 @@ import { redirect } from "next/navigation";
 import { AuthPanel } from "@/components/auth/AuthPanel";
 import { getCurrentAuthContext, getRedirectForRole } from "@/lib/auth/server";
 
-export default async function Home() {
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ loginStatus?: string }>;
+}) {
+  const params = await searchParams;
   const auth = await getCurrentAuthContext();
 
   if (auth) {
@@ -40,7 +45,13 @@ export default async function Home() {
           </div>
         </section>
 
-        <AuthPanel />
+        <AuthPanel
+          loginMessage={
+            params.loginStatus === "invalid"
+              ? "Invalid email or password."
+              : null
+          }
+        />
       </main>
     </div>
   );

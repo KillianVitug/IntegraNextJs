@@ -15,6 +15,9 @@ import { Label } from "@/components/ui/label";
 
 type AuthView = "login" | "claim";
 
+const authInputClassName =
+  "border-slate-300 bg-white text-slate-950 placeholder:text-slate-400 focus:ring-slate-900 focus-visible:ring-slate-900";
+
 function SubmitButton({
   idleLabel,
   pendingLabel,
@@ -53,14 +56,18 @@ function Message({
   );
 }
 
-export function AuthPanel() {
+export function AuthPanel({
+  loginMessage = null,
+}: {
+  loginMessage?: string | null;
+}) {
   const [view, setView] = useState<AuthView>("login");
   const [passwordSetup, setPasswordSetup] = useState<{
     email: string;
     token: string;
   } | null>(null);
 
-  const [passwordLoginState, passwordLoginFormAction] = useActionState(
+  const [passwordLoginState] = useActionState(
     passwordLoginAction,
     initialAuthActionState,
   );
@@ -91,7 +98,7 @@ export function AuthPanel() {
   }, [registerEmployeeState.status]);
 
   return (
-    <section className="rounded-[2rem] border border-white/60 bg-white/95 p-6 shadow-2xl backdrop-blur md:p-8">
+    <section className="auth-panel rounded-[2rem] border border-white/60 bg-white/95 p-6 text-slate-950 shadow-2xl backdrop-blur md:p-8">
       <div className="space-y-5">
         <div className="space-y-2">
           <p className="text-sm font-medium uppercase tracking-[0.28em] text-slate-500">
@@ -160,6 +167,7 @@ export function AuthPanel() {
                   id="new-password"
                   name="password"
                   type="password"
+                  className={authInputClassName}
                   placeholder="At least 5 characters"
                   minLength={5}
                   required
@@ -176,6 +184,7 @@ export function AuthPanel() {
                   id="confirm-password"
                   name="confirmPassword"
                   type="password"
+                  className={authInputClassName}
                   placeholder="Repeat the password"
                   minLength={5}
                   required
@@ -198,13 +207,14 @@ export function AuthPanel() {
           </div>
         ) : view === "login" ? (
           <div className="space-y-5">
-            <form action={passwordLoginFormAction} className="space-y-4">
+            <form action="/auth/login" method="post" className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="login-email">Email</Label>
                 <Input
                   id="login-email"
                   name="email"
                   type="email"
+                  className={authInputClassName}
                   placeholder="name@company.com"
                   required
                 />
@@ -220,13 +230,14 @@ export function AuthPanel() {
                   id="login-password"
                   name="password"
                   type="password"
+                  className={authInputClassName}
                   placeholder="Enter your password"
                   required
                 />
               </div>
               <Message
-                status={passwordLoginState.status}
-                message={passwordLoginState.message}
+                status={loginMessage ? "error" : passwordLoginState.status}
+                message={loginMessage ?? passwordLoginState.message}
               />
               <SubmitButton idleLabel="Login" pendingLabel="Signing in..." />
             </form>
@@ -238,6 +249,7 @@ export function AuthPanel() {
                   id="forgot-email"
                   name="email"
                   type="email"
+                  className={authInputClassName}
                   placeholder="name@company.com"
                   required
                 />
@@ -275,6 +287,7 @@ export function AuthPanel() {
                   id="employee-register-email"
                   name="email"
                   type="email"
+                  className={authInputClassName}
                   placeholder="name@company.com"
                   required
                 />
@@ -290,6 +303,7 @@ export function AuthPanel() {
                   id="employee-register-password"
                   name="password"
                   type="password"
+                  className={authInputClassName}
                   placeholder="At least 5 characters"
                   required
                 />
@@ -307,6 +321,7 @@ export function AuthPanel() {
                   id="employee-register-confirm-password"
                   name="confirmPassword"
                   type="password"
+                  className={authInputClassName}
                   placeholder="Repeat the password"
                   required
                 />

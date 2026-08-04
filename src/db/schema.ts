@@ -1094,7 +1094,15 @@ export const employeesLoans = pgTable(
       .$onUpdate(() => new Date()),
     deletedAt: timestamp("deleted_at"),
   },
-  (table) => [index("idx_employee_id").on(table.employeeId)]
+  (table) => [
+    index("idx_employee_id").on(table.employeeId),
+    index("idx_employees_loans_employee_account_status_deleted").on(
+      table.employeeId,
+      table.accountCodeId,
+      table.status,
+      table.deletedAt
+    ),
+  ]
 );
 
 //EMPLYOEE LOAN RELATION
@@ -1555,6 +1563,110 @@ export const employeeShiftAssignments = pgTable(
       table.effectiveTo
     ),
     index("idx_shift_assignment_active").on(table.employeeId, table.effectiveFrom).where(sql`${table.effectiveTo} is null`),
+  ]
+);
+
+export type BranchCalendarScheduleOverrideAssignmentSnapshot = {
+  id: number;
+  employeeId: string;
+  shiftTableId: number | null;
+  shiftName: string;
+  shiftCode: string | null;
+  shiftSchedule: string | null;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  checkInTime: string;
+  checkOutTime: string;
+  breakMinutes: number;
+  paidBreakMinutes: number;
+  graceMinutes: number;
+  restDay: string | null;
+  hoursPerDay: string;
+  isFlexible: boolean;
+};
+
+export const branchCalendarScheduleOverrideBatches = pgTable(
+  "branch_calendar_schedule_override_batches",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    attendanceDate: date("attendance_date").notNull(),
+    mode: varchar("mode", { length: 40 }).notNull(),
+    shiftTableId: integer("shift_table_id").references(() => shiftTables.id, {
+      onDelete: "set null",
+    }),
+    createdByUserId: uuid("created_by_user_id").references(() => authAccounts.id, {
+      onDelete: "set null",
+    }),
+    revertedAt: timestamp("reverted_at"),
+    revertedByUserId: uuid("reverted_by_user_id").references(() => authAccounts.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("idx_branch_calendar_schedule_override_batch_date").on(
+      table.attendanceDate
+    ),
+    index("idx_branch_calendar_schedule_override_batch_created_by").on(
+      table.createdByUserId
+    ),
+  ]
+);
+
+export const branchCalendarScheduleOverrideItems = pgTable(
+  "branch_calendar_schedule_override_items",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => branchCalendarScheduleOverrideBatches.id, {
+        onDelete: "cascade",
+      }),
+    employeeId: uuid("employee_id")
+      .notNull()
+      .references(() => employees.id, { onDelete: "cascade" }),
+    attendanceDate: date("attendance_date").notNull(),
+    mutationType: varchar("mutation_type", { length: 40 }).notNull(),
+    originalAssignmentId: integer("original_assignment_id"),
+    appliedAssignmentId: integer("applied_assignment_id").notNull(),
+    retainedAssignmentId: integer("retained_assignment_id"),
+    afterFragmentAssignmentId: integer("after_fragment_assignment_id"),
+    staleStartDate: date("stale_start_date").notNull(),
+    staleEndDate: date("stale_end_date"),
+    previousAssignmentSnapshot:
+      jsonb("previous_assignment_snapshot").$type<BranchCalendarScheduleOverrideAssignmentSnapshot | null>(),
+    appliedAssignmentSnapshot:
+      jsonb("applied_assignment_snapshot").$type<BranchCalendarScheduleOverrideAssignmentSnapshot>().notNull(),
+    retainedAssignmentSnapshot:
+      jsonb("retained_assignment_snapshot").$type<BranchCalendarScheduleOverrideAssignmentSnapshot | null>(),
+    afterFragmentAssignmentSnapshot:
+      jsonb("after_fragment_assignment_snapshot").$type<BranchCalendarScheduleOverrideAssignmentSnapshot | null>(),
+    revertedAt: timestamp("reverted_at"),
+    revertedByUserId: uuid("reverted_by_user_id").references(() => authAccounts.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("idx_branch_calendar_schedule_override_item_batch").on(table.batchId),
+    index("idx_branch_calendar_schedule_override_item_employee_date").on(
+      table.employeeId,
+      table.attendanceDate
+    ),
+    index("idx_branch_calendar_schedule_override_item_applied").on(
+      table.appliedAssignmentId
+    ),
+    index("idx_branch_calendar_schedule_override_item_reverted").on(
+      table.revertedAt
+    ),
   ]
 );
 
@@ -2288,6 +2400,135 @@ export const employeePayrollExceptionRows = pgTable(
   ]
 );
 
+export type PayrollAccountCodeImportRowSnapshot = {
+  id: string;
+  payrollPeriodId: string;
+  employeeId: string;
+  attendanceDate: string;
+  exceptionType: string | null;
+  workedStatus: string | null;
+  dayType: string | null;
+  customPayrollCodeId: number | null;
+  accountCodeId: number | null;
+  accountCodeSnapshot: string;
+  accountTypeSnapshot: string | null;
+  accountDescriptionSnapshot: string | null;
+  accountMonth13thPaySnapshot: boolean;
+  accountNonTaxableSnapshot: boolean;
+  overtimeCategory: string | null;
+  quantityMinutes: number | null;
+  quantityDays: string | null;
+  amountOverride: string | null;
+  remarks: string | null;
+  dtrOverrideSource: string | null;
+  legacyOvertimeOverrideId: string | null;
+};
+
+export const payrollAccountCodeImportBatches = pgTable(
+  "payroll_account_code_import_batches",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    payrollPeriodId: uuid("payroll_period_id")
+      .notNull()
+      .references(() => payrollPeriods.id, { onDelete: "cascade" }),
+    sourceFileName: varchar("source_file_name", { length: 255 }).notNull(),
+    totalRows: integer("total_rows").notNull().default(0),
+    insertedRowCount: integer("inserted_row_count").notNull().default(0),
+    updatedRowCount: integer("updated_row_count").notNull().default(0),
+    skippedPeriodMismatchCount: integer("skipped_period_mismatch_count")
+      .notNull()
+      .default(0),
+    skippedInvalidRowCount: integer("skipped_invalid_row_count")
+      .notNull()
+      .default(0),
+    affectedEmployeeCount: integer("affected_employee_count").notNull().default(0),
+    createdByUserId: uuid("created_by_user_id").references(() => authAccounts.id, {
+      onDelete: "set null",
+    }),
+    revertedAt: timestamp("reverted_at"),
+    revertedByUserId: uuid("reverted_by_user_id").references(() => authAccounts.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("idx_payroll_account_code_import_batch_period").on(
+      table.payrollPeriodId
+    ),
+    index("idx_payroll_account_code_import_batch_reverted").on(table.revertedAt),
+    index("idx_payroll_account_code_import_batch_created_by").on(
+      table.createdByUserId
+    ),
+  ]
+);
+
+export const payrollAccountCodeImportItems = pgTable(
+  "payroll_account_code_import_items",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => payrollAccountCodeImportBatches.id, {
+        onDelete: "cascade",
+      }),
+    employeeId: uuid("employee_id")
+      .notNull()
+      .references(() => employees.id, { onDelete: "cascade" }),
+    appliedRowId: uuid("applied_row_id").notNull(),
+    mutationType: varchar("mutation_type", { length: 20 }).notNull(),
+    previousRowSnapshot:
+      jsonb("previous_row_snapshot").$type<PayrollAccountCodeImportRowSnapshot | null>(),
+    appliedRowSnapshot:
+      jsonb("applied_row_snapshot").$type<PayrollAccountCodeImportRowSnapshot>().notNull(),
+    revertedAt: timestamp("reverted_at"),
+    revertedByUserId: uuid("reverted_by_user_id").references(() => authAccounts.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("idx_payroll_account_code_import_item_batch").on(table.batchId),
+    index("idx_payroll_account_code_import_item_employee").on(table.employeeId),
+    index("idx_payroll_account_code_import_item_applied_row").on(
+      table.appliedRowId
+    ),
+    index("idx_payroll_account_code_import_item_reverted").on(table.revertedAt),
+  ]
+);
+
+export const payrollAccountCodeImportSkippedRows = pgTable(
+  "payroll_account_code_import_skipped_rows",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => payrollAccountCodeImportBatches.id, {
+        onDelete: "cascade",
+      }),
+    sourceLine: integer("source_line").notNull(),
+    payrollPeriodCode: varchar("payroll_period_code", { length: 80 }),
+    employeeNo: varchar("employee_no", { length: 80 }),
+    accountCode: varchar("account_code", { length: 80 }),
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_payroll_account_code_import_skipped_batch").on(table.batchId),
+    index("idx_payroll_account_code_import_skipped_source_line").on(
+      table.batchId,
+      table.sourceLine
+    ),
+  ]
+);
+
 export const tardinessRules = pgTable(
   "tardiness_rules",
   {
@@ -2433,6 +2674,15 @@ export const loanInstallments = pgTable(
     index("idx_loan_installment_payroll_code").on(table.payrollCode),
     index("idx_loan_installment_code_status").on(
       table.payrollCode,
+      table.status
+    ),
+    index("idx_loan_installment_code_status_loan").on(
+      table.payrollCode,
+      table.status,
+      table.loanId
+    ),
+    index("idx_loan_installment_period_status").on(
+      table.payrollPeriodId,
       table.status
     ),
   ]

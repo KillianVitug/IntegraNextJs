@@ -94,7 +94,6 @@ import { buildLeaveTypeMapByCode, resolveLeavePayStatus } from "@/lib/payroll/le
 import { DEFAULT_EMPLOYEE_TYPE } from "@/utils/employeeCode";
 import {
   applyAttendanceDtrEffectiveStatus,
-  ATTENDANCE_DTR_WORKED_MINUTES_PER_PRESENT_DAY,
   attendanceDtrDayTypeValues,
   attendanceDtrManualStatusValues,
   computeNetDtrWorkedMinutes,
@@ -123,7 +122,12 @@ import {
   type GeneratedDtrHolidayCheckDateRequirement,
 } from "@/lib/payroll/generatedDtrHolidays";
 import {
+  buildBranchCalendarOverrideRowsForGeneratedDtr,
+  buildBranchCalendarOverrideScopeMaps,
+} from "@/lib/payroll/branchCalendarAccountCodes";
+import {
   getEmployeePayrollExceptionRows,
+  getEmployeePayrollManualLeaveAccountCodeRows,
   getEmployeePayrollRecurringEntryRows,
   getPayrollExceptionAccountCodeOptions,
 } from "@/lib/payroll/payrollExceptionRows";
@@ -2577,6 +2581,7 @@ export async function revertAttendanceImportBatchAction(batchId: string) {
       payrollPeriodId: targetPeriod.payrollPeriodId,
       employeeIds: targetPeriod.employeeIds,
       refreshableExceptionRowIds: targetPeriod.refreshableExceptionRowIds,
+      refreshHeldDtrLines: true,
     });
   }
 
@@ -2715,6 +2720,8 @@ export async function refreshAttendancePeriodSummariesAction(payrollPeriodId: st
       staleRunCount,
       summaryCount: summaryComputations.length,
       pendingSuggestionCount: correctionSuggestionSync.pendingSuggestionCount,
+      generatedAccountCodeRowCount:
+        generatedDtrWorkedRows.generatedAccountCodeRowCount,
       refreshableExceptionRowIds:
         generatedDtrWorkedRows.refreshableExceptionRowIds,
     };
@@ -2740,6 +2747,8 @@ export async function refreshAttendancePeriodSummariesAction(payrollPeriodId: st
       rawLogCount: sourceData.rawLogs.length,
       summaryCount: summaryRefreshResult.summaryCount,
       pendingSuggestionCount: summaryRefreshResult.pendingSuggestionCount,
+      generatedAccountCodeRowCount:
+        summaryRefreshResult.generatedAccountCodeRowCount,
       staleRunCount,
     },
   });
@@ -2751,6 +2760,8 @@ export async function refreshAttendancePeriodSummariesAction(payrollPeriodId: st
     rawLogCount: sourceData.rawLogs.length,
     summaryCount: summaryRefreshResult.summaryCount,
     pendingSuggestionCount: summaryRefreshResult.pendingSuggestionCount,
+    generatedAccountCodeRowCount:
+      summaryRefreshResult.generatedAccountCodeRowCount,
     staleRunCount,
   };
 }
@@ -3310,28 +3321,28 @@ type HeldDtrOverrideSource = (typeof HELD_DTR_OVERRIDE_SOURCES)[number];
 
 const HELD_DTR_ACCOUNT_CODE_CONFIG = {
   DTR_HOLD_WORKED: {
-    code: "HOLD-REG",
+    code: "1-REG",
     accountType: "Regular Hours",
     description: "Held DTR Worked/Regular Hours",
     dailyRate: "1.0000",
     monthlyRate: "1.0000",
   },
   DTR_HOLD_TARDINESS: {
-    code: "HOLD-LATE",
+    code: "9-LATE",
     accountType: "Other Deduction",
     description: "Held DTR Late/Tardiness",
     dailyRate: null,
     monthlyRate: null,
   },
   DTR_HOLD_UNDERTIME: {
-    code: "HOLD-UT",
+    code: "6-UT",
     accountType: "Unpaid Leaves/Absences",
     description: "Held DTR Undertime/Absence",
     dailyRate: null,
     monthlyRate: null,
   },
   DTR_HOLD_REGULAR_OVERTIME: {
-    code: "HOLD-OT",
+    code: "2-OT",
     accountType: "Overtime",
     description: "Held DTR Regular Overtime",
     dailyRate: "1.2500",
@@ -3580,115 +3591,6 @@ function getEffectiveHolidayTypeForDate(args: {
   }
 
   return args.calendarHolidayTypeByDate.get(args.attendanceDate) ?? null;
-}
-
-function buildBranchCalendarOverrideScopeMaps(
-  rows: Array<typeof branchCalendarAccountCodeOverrides.$inferSelect>
-) {
-  return {
-    allDepartmentsByDate: new Map(
-      rows
-        .filter((row) => row.departmentId == null)
-        .map((row) => [row.attendanceDate, row] as const)
-    ),
-    departmentByDateScope: new Map(
-      rows
-        .filter((row) => row.departmentId != null)
-        .map(
-          (row) =>
-            [`${row.attendanceDate}:${row.departmentId}`, row] as const
-        )
-    ),
-  };
-}
-
-function getEffectiveBranchCalendarOverride(args: {
-  attendanceDate: string;
-  departmentId: number | null | undefined;
-  maps: ReturnType<typeof buildBranchCalendarOverrideScopeMaps>;
-}) {
-  const departmentOverride =
-    args.departmentId != null
-      ? args.maps.departmentByDateScope.get(
-          `${args.attendanceDate}:${args.departmentId}`
-        )
-      : null;
-
-  return (
-    departmentOverride ??
-    args.maps.allDepartmentsByDate.get(args.attendanceDate) ??
-    null
-  );
-}
-
-function getBranchCalendarRegularMinutes(
-  row: Pick<
-    typeof attendanceDailySummaries.$inferSelect,
-    | "workedMinutes"
-    | "regularMinutes"
-    | "lateMinutes"
-    | "undertimeMinutes"
-    | "isRestDay"
-  >
-) {
-  if (row.isRestDay || (row.workedMinutes <= 0 && row.regularMinutes <= 0)) {
-    return 0;
-  }
-
-  return Math.max(
-    0,
-    ATTENDANCE_DTR_WORKED_MINUTES_PER_PRESENT_DAY -
-      Math.max(0, Math.round(row.lateMinutes)) -
-      Math.max(0, Math.round(row.undertimeMinutes))
-  );
-}
-
-function buildBranchCalendarOverrideRowsForGeneratedDtr(args: {
-  rows: Array<typeof attendanceDailySummaries.$inferSelect>;
-  departmentId: number | null | undefined;
-  overrideMaps: ReturnType<typeof buildBranchCalendarOverrideScopeMaps>;
-  accountById: Map<number, GeneratedDtrAccountCodeRow>;
-  manualDayTypeByDate: Map<string, AttendanceDtrDayType>;
-  calendarHolidayTypeByDate: Map<string, OvertimeHolidayType>;
-}) {
-  const branchRows: GeneratedDtrBranchCalendarOverrideRow[] = [];
-
-  for (const row of args.rows) {
-    if (row.isRestDay) continue;
-    const holidayType = getEffectiveHolidayTypeForDate({
-      attendanceDate: row.attendanceDate,
-      manualDayTypeByDate: args.manualDayTypeByDate,
-      calendarHolidayTypeByDate: args.calendarHolidayTypeByDate,
-    });
-    if (holidayType) continue;
-
-    const override = getEffectiveBranchCalendarOverride({
-      attendanceDate: row.attendanceDate,
-      departmentId: args.departmentId,
-      maps: args.overrideMaps,
-    });
-    if (!override) continue;
-
-    const regularAccount = args.accountById.get(override.regularAccountCodeId);
-    const overtimeAccount = args.accountById.get(override.overtimeAccountCodeId);
-    if (!regularAccount || !overtimeAccount) {
-      continue;
-    }
-
-    const regularMinutes = getBranchCalendarRegularMinutes(row);
-    const overtimeMinutes = Math.max(0, Math.round(row.overtimeMinutes));
-    if (regularMinutes <= 0 && overtimeMinutes <= 0) continue;
-
-    branchRows.push({
-      attendanceDate: row.attendanceDate,
-      regularAccount,
-      overtimeAccount,
-      regularMinutes,
-      overtimeMinutes,
-    });
-  }
-
-  return branchRows;
 }
 
 function parseDateOnly(value: string) {
@@ -4600,8 +4502,12 @@ async function replaceGeneratedDtrExceptionRowsForEmployee(args: {
       departmentId: employeeGeneralInfoRow?.departmentId ?? null,
       overrideMaps: buildBranchCalendarOverrideScopeMaps(branchOverrideRows),
       accountById,
-      manualDayTypeByDate,
-      calendarHolidayTypeByDate,
+      isBranchCalendarDateEligible: (row) =>
+        !getEffectiveHolidayTypeForDate({
+          attendanceDate: row.attendanceDate,
+          manualDayTypeByDate,
+          calendarHolidayTypeByDate,
+        }),
     });
   const generatedRows = buildGeneratedDtrExceptionRows({
     payrollPeriodId: args.payrollPeriodId,
@@ -4854,8 +4760,12 @@ async function syncGeneratedDtrWorkedExceptionRows(args: {
         departmentId: departmentIdByEmployeeId.get(employeeId) ?? null,
         overrideMaps: branchOverrideMaps,
         accountById,
-        manualDayTypeByDate,
-        calendarHolidayTypeByDate,
+        isBranchCalendarDateEligible: (row) =>
+          !getEffectiveHolidayTypeForDate({
+            attendanceDate: row.attendanceDate,
+            manualDayTypeByDate,
+            calendarHolidayTypeByDate,
+          }),
       });
 
     return buildGeneratedDtrExceptionRows({
@@ -4927,6 +4837,7 @@ async function refreshManualPayrollAttendanceForEmployees(args: {
   payrollPeriodId: string;
   employeeIds: string[];
   refreshableExceptionRowIds?: string[];
+  refreshHeldDtrLines?: boolean;
 }) {
   const employeeIds = [...new Set(args.employeeIds)];
   let refreshedEntryCount = 0;
@@ -4943,6 +4854,7 @@ async function refreshManualPayrollAttendanceForEmployees(args: {
         employeeId,
         latestBaseline: latestManualBaseline,
         refreshableExceptionRowIds: args.refreshableExceptionRowIds,
+        refreshHeldDtrLines: args.refreshHeldDtrLines,
       });
 
     if (manualPayrollRefresh.refreshed) {
@@ -5518,10 +5430,16 @@ async function getPayrollExceptionWorkspaceForEmployee(args: {
     }),
     getPayrollExceptionAccountCodeOptions(),
   ]);
+  const leaveRows = await getEmployeePayrollManualLeaveAccountCodeRows({
+    payrollPeriodId: args.payrollPeriodId,
+    employeeId: args.employeeId,
+    accountCodeOptions,
+  });
 
   return {
     rows,
     recurringRows,
+    leaveRows,
     loanRows,
     accountCodeOptions,
   };
@@ -5830,9 +5748,15 @@ export async function saveAttendanceDtrPeriodOverridesWithAccountCodesAction(
     }),
     getPayrollExceptionAccountCodeOptions(),
   ]);
+  const leaveRows = await getEmployeePayrollManualLeaveAccountCodeRows({
+    payrollPeriodId: parsed.payrollPeriodId,
+    employeeId: parsed.employeeId,
+    accountCodeOptions,
+  });
   const payrollExceptionWorkspace: PayrollExceptionWorkspaceView = {
     rows,
     recurringRows,
+    leaveRows,
     loanRows,
     accountCodeOptions,
   };
@@ -6082,6 +6006,7 @@ export async function approveAttendanceDtrHoldRowsAction(input: unknown) {
       payrollPeriodId: affected.payrollPeriodId,
       employeeIds: [parsed.employeeId],
       refreshableExceptionRowIds: affected.refreshableExceptionRowIds,
+      refreshHeldDtrLines: true,
     });
   }
 
@@ -6230,6 +6155,7 @@ export async function resetAttendanceDtrHoldRowsAction(input: unknown) {
       payrollPeriodId: affected.payrollPeriodId,
       employeeIds: [parsed.employeeId],
       refreshableExceptionRowIds: affected.refreshableExceptionRowIds,
+      refreshHeldDtrLines: true,
     });
   }
 

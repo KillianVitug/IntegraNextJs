@@ -19,6 +19,9 @@ export const insertEmployeeLoanSchema = createInsertSchema(employeesLoans, {
     amountGranted: numericString("Amount Granted"),
     payrollDateDeduction: z.string().min(1, "Payroll Date Deduction is required"),
     loanDate: z.string().min(1, "Loan Date is required"),
+    paymentTerms: z.literal("Always", {
+      error: "Only Always payment terms are currently supported.",
+    }),
     termMonths: z.coerce
       .number()
       .int("Term must be a whole number of months")

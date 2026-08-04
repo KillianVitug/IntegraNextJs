@@ -121,6 +121,14 @@
 }
 
 @layer components {
+  .auth-panel input:-webkit-autofill,
+  .auth-panel input:-webkit-autofill:hover,
+  .auth-panel input:-webkit-autofill:focus {
+    -webkit-text-fill-color: #020617;
+    box-shadow: 0 0 0 1000px #ffffff inset;
+    caret-color: #020617;
+  }
+
   .app-sidebar-toggle:checked ~ .app-sidebar {
     width: 3.5rem;
   }

@@ -4,12 +4,17 @@ import { revalidatePath } from "next/cache";
 import { db, type DbClient } from "@/db";
 import { recordPayrollRunEvent } from "@/lib/admin";
 import {
+  customPayrollDefinitions,
+  department,
   employeeSalaryChangeEvents,
   employeeSalaryChanges,
   employees,
+  employeesGeneralInfo,
+  employeesOtherReferences,
   employeesSalary,
   payrollPeriods,
   payrollRuns,
+  position,
 } from "@/db/schema";
 import {
   buildResolvedSalaryByEmployeeId,
@@ -17,11 +22,16 @@ import {
   salaryRecordToSnapshot,
 } from "@/lib/payroll/salaryResolver";
 import {
+  bulkCancelSalaryChangesSchema,
   cancelSalaryChangeSchema,
+  createDailyRateSalaryChangesSchema,
+  createSalaryRateSalaryChangesSchema,
   createSalaryChangeSchema,
+  dailyRateSalaryAdjustmentRowSchema,
   makeBaseSalarySchema,
   resolvedSalaryReadSchema,
   salaryChangePeriodLookupSchema,
+  salaryChangeWorkspaceLookupSchema,
   salaryChangeFilterSchema,
   salaryChangeHistoryReadSchema,
   type SalaryChangeFilter,
@@ -32,10 +42,12 @@ import {
 import { requireAdminActor } from "@/lib/admin";
 import {
   and,
+  asc,
   desc,
   eq,
   gte,
   inArray,
+  isNull,
   lte,
   sql,
 } from "drizzle-orm";
@@ -368,6 +380,46 @@ async function markAffectedRunsStaleForBaseSalary(
   }
 }
 
+async function cancelSalaryChangeRecord(
+  tx: DbClient,
+  change: Pick<
+    typeof employeeSalaryChanges.$inferSelect,
+    "id" | "employeeId" | "payrollPeriodId" | "endPayrollPeriodId" | "mode" | "status"
+  >,
+  actorUserId: string,
+  reason: string
+) {
+  if (change.status !== "Active") {
+    throw new Error("Only active salary changes can be canceled.");
+  }
+
+  const affectedPeriods = await listAffectedPeriods(
+    tx,
+    change.payrollPeriodId,
+    change.mode,
+    change.endPayrollPeriodId
+  );
+  await lockSalaryContext(tx, change.employeeId, change.payrollPeriodId, change.mode);
+  await markAffectedRunsStale(tx, affectedPeriods, actorUserId);
+
+  await tx
+    .update(employeeSalaryChanges)
+    .set({
+      status: "Canceled",
+      canceledAt: new Date(),
+      canceledByUserId: actorUserId,
+      cancelReason: reason,
+    })
+    .where(eq(employeeSalaryChanges.id, change.id));
+
+  await tx.insert(employeeSalaryChangeEvents).values({
+    changeId: change.id,
+    eventType: "Canceled",
+    actorUserId,
+    notes: reason,
+  });
+}
+
 async function lockSalaryContext(
   tx: DbClient,
   employeeId: string,
@@ -620,6 +672,384 @@ export async function createSalaryChange(input: unknown): Promise<{ changeId: nu
   return result;
 }
 
+export async function createDailyRateSalaryChanges(input: unknown): Promise<{
+  createdCount: number;
+  skippedUnchangedCount: number;
+  affectedPeriodCount: number;
+}> {
+  const actorUserId = await requireActorUserId();
+  const payload = createDailyRateSalaryChangesSchema.parse(input);
+  const employeeIds = payload.rows.map((row) => row.employeeId);
+  const uniqueEmployeeIds = new Set(employeeIds);
+
+  if (uniqueEmployeeIds.size !== employeeIds.length) {
+    throw new Error("Each selected employee can only appear once.");
+  }
+
+  const rowsByEmployeeId = new Map(
+    payload.rows.map((row) => [
+      row.employeeId,
+      {
+        employeeId: row.employeeId,
+        dailyRate: normalizeRateValue(row.dailyRate),
+      },
+    ])
+  );
+
+  const result = await db.transaction(async (tx) => {
+    const period = await tx.query.payrollPeriods.findFirst({
+      where: eq(payrollPeriods.id, payload.payrollPeriodId),
+    });
+
+    if (!period) {
+      throw new Error("Payroll period not found.");
+    }
+
+    const affectedPeriods = await listAffectedPeriods(
+      tx,
+      payload.payrollPeriodId,
+      "ForwardEffective"
+    );
+
+    for (const employeeId of uniqueEmployeeIds) {
+      await lockSalaryContext(
+        tx,
+        employeeId,
+        payload.payrollPeriodId,
+        "ForwardEffective"
+      );
+    }
+
+    await markAffectedRunsStale(tx, affectedPeriods, actorUserId);
+
+    const selectedEmployees = await tx.query.employees.findMany({
+      where: and(
+        inArray(employees.id, employeeIds),
+        eq(employees.employeeType, "EMP"),
+        isNull(employees.deletedAt)
+      ),
+      with: {
+        salary: true,
+      },
+    });
+
+    if (selectedEmployees.length !== uniqueEmployeeIds.size) {
+      throw new Error("One or more selected employees were not found, inactive, or admin.");
+    }
+
+    const resolvedByEmployeeId = await buildResolvedSalaryByEmployeeId({
+      employees: selectedEmployees.map((employee) => ({
+        id: employee.id,
+        salary: employee.salary,
+      })),
+      period,
+      database: tx,
+    });
+
+    let createdCount = 0;
+    let skippedUnchangedCount = 0;
+
+    for (const employee of selectedEmployees) {
+      const row = rowsByEmployeeId.get(employee.id);
+      const resolved = resolvedByEmployeeId.get(employee.id);
+
+      if (!row || !resolved) continue;
+
+      const beforeSnapshot = normalizeSnapshot(
+        salaryRecordToSnapshot(resolved.salary)
+      );
+      const afterSnapshot: SalarySnapshot = {
+        ...beforeSnapshot,
+        dailyRate: row.dailyRate,
+      };
+
+      if (snapshotsEqual(beforeSnapshot, afterSnapshot)) {
+        skippedUnchangedCount += 1;
+        continue;
+      }
+
+      const activeSameMode = await tx
+        .select({ id: employeeSalaryChanges.id })
+        .from(employeeSalaryChanges)
+        .where(
+          and(
+            eq(employeeSalaryChanges.employeeId, employee.id),
+            eq(employeeSalaryChanges.payrollPeriodId, payload.payrollPeriodId),
+            eq(employeeSalaryChanges.mode, "ForwardEffective"),
+            eq(employeeSalaryChanges.status, "Active")
+          )
+        );
+
+      const [createdChange] = await tx
+        .insert(employeeSalaryChanges)
+        .values({
+          employeeId: employee.id,
+          payrollPeriodId: payload.payrollPeriodId,
+          endPayrollPeriodId: null,
+          mode: "ForwardEffective",
+          status: "Active",
+          reason: payload.reason,
+          notes: payload.notes ?? null,
+          createdByUserId: actorUserId,
+          beforeDailyRate: beforeSnapshot.dailyRate,
+          beforeMonthlyRate: beforeSnapshot.monthlyRate,
+          beforeMonthlyAllowance: beforeSnapshot.monthlyAllowance,
+          beforeDailyAllowance: beforeSnapshot.dailyAllowance,
+          beforeCola: beforeSnapshot.cola,
+          beforeRateDivisor: beforeSnapshot.rateDivisor,
+          beforeBillingRate: beforeSnapshot.billingRate,
+          afterDailyRate: afterSnapshot.dailyRate,
+          afterMonthlyRate: afterSnapshot.monthlyRate,
+          afterMonthlyAllowance: afterSnapshot.monthlyAllowance,
+          afterDailyAllowance: afterSnapshot.dailyAllowance,
+          afterCola: afterSnapshot.cola,
+          afterRateDivisor: afterSnapshot.rateDivisor,
+          afterBillingRate: afterSnapshot.billingRate,
+        })
+        .returning();
+
+      await tx.insert(employeeSalaryChangeEvents).values({
+        changeId: createdChange.id,
+        eventType: "Created",
+        actorUserId,
+        notes: payload.reason,
+      });
+
+      if (activeSameMode.length > 0) {
+        const supersededIds = activeSameMode.map((change) => change.id);
+
+        await tx
+          .update(employeeSalaryChanges)
+          .set({
+            status: "Superseded",
+            supersededAt: new Date(),
+            supersededByChangeId: createdChange.id,
+          })
+          .where(inArray(employeeSalaryChanges.id, supersededIds));
+
+        await tx.insert(employeeSalaryChangeEvents).values(
+          supersededIds.map((changeId) => ({
+            changeId,
+            eventType: "Superseded" as const,
+            actorUserId,
+            notes: `Superseded by salary change #${createdChange.id}`,
+          }))
+        );
+      }
+
+      createdCount += 1;
+    }
+
+    if (createdCount === 0) {
+      throw new Error("No daily rates changed.");
+    }
+
+    return {
+      createdCount,
+      skippedUnchangedCount,
+      affectedPeriodCount: affectedPeriods.length,
+    };
+  });
+
+  revalidatePath("/salaryAdjustment");
+  revalidatePath("/payroll");
+  return result;
+}
+
+export async function createSalaryRateSalaryChanges(input: unknown): Promise<{
+  createdCount: number;
+  skippedUnchangedCount: number;
+  affectedPeriodCount: number;
+}> {
+  const actorUserId = await requireActorUserId();
+  const payload = createSalaryRateSalaryChangesSchema.parse(input);
+  const employeeIds = payload.rows.map((row) => row.employeeId);
+  const uniqueEmployeeIds = new Set(employeeIds);
+
+  if (uniqueEmployeeIds.size !== employeeIds.length) {
+    throw new Error("Each selected employee can only appear once.");
+  }
+
+  const rowsByEmployeeId = new Map(
+    payload.rows.map((row) => [
+      row.employeeId,
+      {
+        employeeId: row.employeeId,
+        rate: normalizeRateValue(row.rate),
+      },
+    ])
+  );
+
+  const result = await db.transaction(async (tx) => {
+    const period = await tx.query.payrollPeriods.findFirst({
+      where: eq(payrollPeriods.id, payload.payrollPeriodId),
+    });
+
+    if (!period) {
+      throw new Error("Payroll period not found.");
+    }
+
+    const affectedPeriods = await listAffectedPeriods(
+      tx,
+      payload.payrollPeriodId,
+      "ForwardEffective"
+    );
+
+    for (const employeeId of uniqueEmployeeIds) {
+      await lockSalaryContext(
+        tx,
+        employeeId,
+        payload.payrollPeriodId,
+        "ForwardEffective"
+      );
+    }
+
+    await markAffectedRunsStale(tx, affectedPeriods, actorUserId);
+
+    const selectedEmployees = await tx.query.employees.findMany({
+      where: and(
+        inArray(employees.id, employeeIds),
+        eq(employees.employeeType, "EMP"),
+        isNull(employees.deletedAt)
+      ),
+      with: {
+        salary: true,
+      },
+    });
+
+    if (selectedEmployees.length !== uniqueEmployeeIds.size) {
+      throw new Error("One or more selected employees were not found, inactive, or admin.");
+    }
+
+    const resolvedByEmployeeId = await buildResolvedSalaryByEmployeeId({
+      employees: selectedEmployees.map((employee) => ({
+        id: employee.id,
+        salary: employee.salary,
+      })),
+      period,
+      database: tx,
+    });
+
+    let createdCount = 0;
+    let skippedUnchangedCount = 0;
+
+    for (const employee of selectedEmployees) {
+      const row = rowsByEmployeeId.get(employee.id);
+      const resolved = resolvedByEmployeeId.get(employee.id);
+
+      if (!row || !resolved) continue;
+
+      const beforeSnapshot = normalizeSnapshot(
+        salaryRecordToSnapshot(resolved.salary)
+      );
+      const afterSnapshot: SalarySnapshot =
+        payload.salaryRateType === "MonthlyRate"
+          ? {
+              ...beforeSnapshot,
+              monthlyRate: row.rate,
+            }
+          : {
+              ...beforeSnapshot,
+              dailyRate: row.rate,
+            };
+
+      if (snapshotsEqual(beforeSnapshot, afterSnapshot)) {
+        skippedUnchangedCount += 1;
+        continue;
+      }
+
+      const activeSameMode = await tx
+        .select({ id: employeeSalaryChanges.id })
+        .from(employeeSalaryChanges)
+        .where(
+          and(
+            eq(employeeSalaryChanges.employeeId, employee.id),
+            eq(employeeSalaryChanges.payrollPeriodId, payload.payrollPeriodId),
+            eq(employeeSalaryChanges.mode, "ForwardEffective"),
+            eq(employeeSalaryChanges.status, "Active")
+          )
+        );
+
+      const [createdChange] = await tx
+        .insert(employeeSalaryChanges)
+        .values({
+          employeeId: employee.id,
+          payrollPeriodId: payload.payrollPeriodId,
+          endPayrollPeriodId: null,
+          mode: "ForwardEffective",
+          status: "Active",
+          reason: payload.reason,
+          notes: payload.notes ?? null,
+          createdByUserId: actorUserId,
+          beforeDailyRate: beforeSnapshot.dailyRate,
+          beforeMonthlyRate: beforeSnapshot.monthlyRate,
+          beforeMonthlyAllowance: beforeSnapshot.monthlyAllowance,
+          beforeDailyAllowance: beforeSnapshot.dailyAllowance,
+          beforeCola: beforeSnapshot.cola,
+          beforeRateDivisor: beforeSnapshot.rateDivisor,
+          beforeBillingRate: beforeSnapshot.billingRate,
+          afterDailyRate: afterSnapshot.dailyRate,
+          afterMonthlyRate: afterSnapshot.monthlyRate,
+          afterMonthlyAllowance: afterSnapshot.monthlyAllowance,
+          afterDailyAllowance: afterSnapshot.dailyAllowance,
+          afterCola: afterSnapshot.cola,
+          afterRateDivisor: afterSnapshot.rateDivisor,
+          afterBillingRate: afterSnapshot.billingRate,
+        })
+        .returning();
+
+      await tx.insert(employeeSalaryChangeEvents).values({
+        changeId: createdChange.id,
+        eventType: "Created",
+        actorUserId,
+        notes: payload.reason,
+      });
+
+      if (activeSameMode.length > 0) {
+        const supersededIds = activeSameMode.map((change) => change.id);
+
+        await tx
+          .update(employeeSalaryChanges)
+          .set({
+            status: "Superseded",
+            supersededAt: new Date(),
+            supersededByChangeId: createdChange.id,
+          })
+          .where(inArray(employeeSalaryChanges.id, supersededIds));
+
+        await tx.insert(employeeSalaryChangeEvents).values(
+          supersededIds.map((changeId) => ({
+            changeId,
+            eventType: "Superseded" as const,
+            actorUserId,
+            notes: `Superseded by salary change #${createdChange.id}`,
+          }))
+        );
+      }
+
+      createdCount += 1;
+    }
+
+    if (createdCount === 0) {
+      throw new Error(
+        payload.salaryRateType === "MonthlyRate"
+          ? "No monthly rates changed."
+          : "No daily rates changed."
+      );
+    }
+
+    return {
+      createdCount,
+      skippedUnchangedCount,
+      affectedPeriodCount: affectedPeriods.length,
+    };
+  });
+
+  revalidatePath("/salaryAdjustment");
+  revalidatePath("/payroll");
+  return result;
+}
+
 export async function cancelSalaryChange(input: unknown) {
   const actorUserId = await requireActorUserId();
   const payload = cancelSalaryChangeSchema.parse(input);
@@ -636,39 +1066,46 @@ export async function cancelSalaryChange(input: unknown) {
       throw new Error("Salary change not found.");
     }
 
-    if (change.status !== "Active") {
-      throw new Error("Only active salary changes can be canceled.");
-    }
-
-    const affectedPeriods = await listAffectedPeriods(
-      tx,
-      change.payrollPeriodId,
-      change.mode,
-      change.endPayrollPeriodId
-    );
-    await lockSalaryContext(tx, change.employeeId, change.payrollPeriodId, change.mode);
-    await markAffectedRunsStale(tx, affectedPeriods, actorUserId);
-
-    await tx
-      .update(employeeSalaryChanges)
-      .set({
-        status: "Canceled",
-        canceledAt: new Date(),
-        canceledByUserId: actorUserId,
-        cancelReason: payload.reason,
-      })
-      .where(eq(employeeSalaryChanges.id, change.id));
-
-    await tx.insert(employeeSalaryChangeEvents).values({
-      changeId: change.id,
-      eventType: "Canceled",
-      actorUserId,
-      notes: payload.reason,
-    });
+    await cancelSalaryChangeRecord(tx, change, actorUserId, payload.reason);
 
     return { success: true };
   });
   revalidatePath("/salaryAdjustment");
+  revalidatePath("/payroll");
+  return result;
+}
+
+export async function bulkCancelSalaryChanges(input: unknown) {
+  const actorUserId = await requireActorUserId();
+  const payload = bulkCancelSalaryChangesSchema.parse(input);
+  const changeIds = Array.from(new Set(payload.changeIds));
+
+  const result = await db.transaction(async (tx) => {
+    const changes = await tx.query.employeeSalaryChanges.findMany({
+      where: inArray(employeeSalaryChanges.id, changeIds),
+      with: {
+        payrollPeriod: true,
+      },
+    });
+
+    if (changes.length !== changeIds.length) {
+      throw new Error("One or more salary changes were not found.");
+    }
+
+    const changesById = new Map(changes.map((change) => [change.id, change]));
+    for (const changeId of changeIds) {
+      const change = changesById.get(changeId);
+      if (!change) {
+        throw new Error("One or more salary changes were not found.");
+      }
+      await cancelSalaryChangeRecord(tx, change, actorUserId, payload.reason);
+    }
+
+    return { voidedCount: changes.length };
+  });
+
+  revalidatePath("/salaryAdjustment");
+  revalidatePath("/payroll");
   return result;
 }
 
@@ -835,6 +1272,93 @@ export async function getResolvedSalaryForPeriod(input: unknown) {
   });
 }
 
+export async function listDailyRateSalaryAdjustmentRows(input: unknown) {
+  await requireActorUserId();
+  const payload = salaryChangeWorkspaceLookupSchema.parse(input);
+
+  const period = await db.query.payrollPeriods.findFirst({
+    where: eq(payrollPeriods.id, payload.payrollPeriodId),
+  });
+
+  if (!period) {
+    throw new Error("Payroll period not found.");
+  }
+
+  const activeEmployees = await db.query.employees.findMany({
+    where: and(eq(employees.employeeType, "EMP"), isNull(employees.deletedAt)),
+    with: {
+      salary: true,
+    },
+    orderBy: [
+      asc(employees.lastName),
+      asc(employees.firstName),
+      asc(employees.middleName),
+      asc(employees.employeeNo),
+      asc(employees.id),
+    ],
+  });
+
+  const resolvedByEmployeeId = await buildResolvedSalaryByEmployeeId({
+    employees: activeEmployees.map((employee) => ({
+      id: employee.id,
+      salary: employee.salary,
+    })),
+    period,
+  });
+
+  return activeEmployees.map((employee) => {
+    const resolved = resolvedByEmployeeId.get(employee.id);
+    const previousSalary = normalizeSnapshot(salaryRecordToSnapshot(resolved?.salary));
+
+    return dailyRateSalaryAdjustmentRowSchema.parse({
+      employeeId: employee.id,
+      previousDailyRate: previousSalary.dailyRate,
+      previousMonthlyRate: previousSalary.monthlyRate,
+    });
+  });
+}
+
+export async function listSalaryAdjustmentEmployees() {
+  await requireActorUserId();
+
+  return db
+    .select({
+      id: employees.id,
+      employeeNo: employees.employeeNo,
+      employeeType: employees.employeeType,
+      firstName: employees.firstName,
+      middleName: employees.middleName,
+      lastName: employees.lastName,
+      department: department.name,
+      position: position.name,
+      customPayrollCode: customPayrollDefinitions.code,
+    })
+    .from(employees)
+    .leftJoin(
+      employeesGeneralInfo,
+      eq(employees.id, employeesGeneralInfo.employeeId)
+    )
+    .leftJoin(
+      employeesOtherReferences,
+      eq(employees.id, employeesOtherReferences.employeeId)
+    )
+    .leftJoin(employeesSalary, eq(employees.id, employeesSalary.employeeId))
+    .leftJoin(department, eq(employeesGeneralInfo.departmentId, department.id))
+    .leftJoin(position, eq(employeesOtherReferences.positionId, position.id))
+    .leftJoin(
+      customPayrollDefinitions,
+      eq(employeesSalary.customPayrollId, customPayrollDefinitions.id)
+    )
+    .where(and(eq(employees.employeeType, "EMP"), isNull(employees.deletedAt)))
+    .orderBy(
+      asc(employees.lastName),
+      asc(employees.firstName),
+      asc(employees.middleName),
+      asc(employees.employeeNo),
+      asc(employees.id)
+    );
+}
+
 export async function listSalaryChanges(input: unknown = {}) {
   await requireActorUserId();
   const filters = salaryChangeFilterSchema.parse(input) as SalaryChangeFilter;
@@ -959,6 +1483,7 @@ export async function listSalaryAdjustmentPeriods(year: number) {
       code: payrollPeriods.code,
       payrollTerms: payrollPeriods.payrollTerms,
       year: payrollPeriods.year,
+      month: payrollPeriods.month,
       startDate: payrollPeriods.startDate,
       endDate: payrollPeriods.endDate,
       adjustedPayDate: payrollPeriods.adjustedPayDate,
@@ -986,7 +1511,9 @@ export async function getSalaryChangeWorkspaceSnapshot(args: {
 
   const employeesForWorkspace = await db.query.employees.findMany({
     where: and(
-      inArray(employees.id, args.employeeIds)
+      inArray(employees.id, args.employeeIds),
+      eq(employees.employeeType, "EMP"),
+      isNull(employees.deletedAt)
     ),
     with: {
       salary: true,
@@ -1003,3 +1530,6 @@ export async function getSalaryChangeWorkspaceSnapshot(args: {
 }
 
 export type SalaryChangeHistoryResultsType = Awaited<ReturnType<typeof listSalaryChanges>>;
+export type SalaryAdjustmentEmployeesResultsType = Awaited<
+  ReturnType<typeof listSalaryAdjustmentEmployees>
+>;

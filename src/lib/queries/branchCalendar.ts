@@ -6,6 +6,8 @@ import { db } from "@/db";
 import {
   accountCode,
   branchCalendarAccountCodeOverrides,
+  branchCalendarScheduleOverrideBatches,
+  branchCalendarScheduleOverrideItems,
   department,
   employeeLeaveRecordDays,
   employeeShiftAssignments,
@@ -21,6 +23,7 @@ import {
   isResolvedScheduleRestDay,
   resolveEmployeeScheduleForDate,
 } from "@/lib/payroll/scheduleResolver";
+import { fetchShiftTables } from "@/lib/queries/fetchLookupData";
 
 const branchCalendarMonthSchema = z.object({
   year: z.coerce.number().int().min(1900).max(2100),
@@ -131,7 +134,13 @@ export async function getBranchCalendarMonth(input: unknown) {
     ? departmentId
     : null;
 
-  const [employeeRows, holidayRows, accountCodeRows, overrideRows] =
+  const [
+    employeeRows,
+    holidayRows,
+    accountCodeRows,
+    overrideRows,
+    shiftTableOptions,
+  ] =
     await Promise.all([
     db
       .select({
@@ -245,6 +254,7 @@ export async function getBranchCalendarMonth(input: unknown) {
             : isNull(branchCalendarAccountCodeOverrides.departmentId),
         ),
       ),
+    fetchShiftTables(),
   ]);
 
   const accountCodeOptions = accountCodeRows.map((row) => ({
@@ -391,6 +401,7 @@ export async function getBranchCalendarMonth(input: unknown) {
       endDate,
       selectedDepartmentId,
       departments,
+      shiftTableOptions,
       regularAccountCodeOptions: accountCodeOptions,
       overtimeAccountCodeOptions: accountCodeOptions,
       employeeCount: 0,
@@ -411,7 +422,12 @@ export async function getBranchCalendarMonth(input: unknown) {
     };
   }
 
-  const [shiftAssignments, weeklyPatterns, approvedLeaveDays] = await Promise.all([
+  const [
+    shiftAssignments,
+    weeklyPatterns,
+    approvedLeaveDays,
+    revertableOverrideRows,
+  ] = await Promise.all([
     db
       .select()
       .from(employeeShiftAssignments)
@@ -472,6 +488,31 @@ export async function getBranchCalendarMonth(input: unknown) {
         asc(employeeLeaveRecordDays.leaveDate),
         asc(employeesLeaveRecords.employeeId),
       ),
+    db
+      .select({
+        itemId: branchCalendarScheduleOverrideItems.id,
+        employeeId: branchCalendarScheduleOverrideItems.employeeId,
+        attendanceDate: branchCalendarScheduleOverrideItems.attendanceDate,
+        appliedAssignmentId:
+          branchCalendarScheduleOverrideItems.appliedAssignmentId,
+      })
+      .from(branchCalendarScheduleOverrideItems)
+      .innerJoin(
+        branchCalendarScheduleOverrideBatches,
+        eq(
+          branchCalendarScheduleOverrideItems.batchId,
+          branchCalendarScheduleOverrideBatches.id,
+        ),
+      )
+      .where(
+        and(
+          inArray(branchCalendarScheduleOverrideItems.employeeId, employeeIds),
+          gte(branchCalendarScheduleOverrideItems.attendanceDate, startDate),
+          lte(branchCalendarScheduleOverrideItems.attendanceDate, endDate),
+          isNull(branchCalendarScheduleOverrideItems.revertedAt),
+          isNull(branchCalendarScheduleOverrideBatches.revertedAt),
+        ),
+      ),
   ]);
 
   const assignmentsByEmployeeId = new Map<string, typeof shiftAssignments>();
@@ -498,6 +539,13 @@ export async function getBranchCalendarMonth(input: unknown) {
     current.push(leaveDay);
     approvedLeavesByEmployeeDate.set(key, current);
   }
+
+  const revertItemByEmployeeDateAssignment = new Map(
+    revertableOverrideRows.map((row) => [
+      `${row.employeeId}:${row.attendanceDate}:${row.appliedAssignmentId}`,
+      row.itemId,
+    ]),
+  );
 
   const days = dateKeys.map((date, index) => {
     const employeesForDay = employeeRows.map((employee) => {
@@ -543,6 +591,11 @@ export async function getBranchCalendarMonth(input: unknown) {
         isRestDay,
         overrideEffectiveFrom: override?.effectiveFrom ?? null,
         overrideEffectiveTo: override?.effectiveTo ?? null,
+        revertScheduleOverrideItemId: override
+          ? revertItemByEmployeeDateAssignment.get(
+              `${employee.id}:${date}:${override.id}`,
+            ) ?? null
+          : null,
         hasApprovedLeave: approvedLeaves.length > 0,
         approvedLeaves,
       };
@@ -581,6 +634,7 @@ export async function getBranchCalendarMonth(input: unknown) {
     endDate,
     selectedDepartmentId,
     departments,
+    shiftTableOptions,
     regularAccountCodeOptions: accountCodeOptions,
     overtimeAccountCodeOptions: accountCodeOptions,
     employeeCount: employeeRows.length,

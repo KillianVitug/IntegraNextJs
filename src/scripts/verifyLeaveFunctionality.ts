@@ -3,6 +3,11 @@ import {
   getMappedLeavePayrollAccountCode,
   normalizeLeavePayrollAccountKey,
 } from "@/lib/payroll/leaveAccountCodes";
+import {
+  APPROVED_PAID_LEAVE_SOURCE_LABEL,
+  buildApprovedPaidLeaveAccountCodeRows,
+  buildManualPayrollLeaveAccountCodeRows,
+} from "@/lib/payroll/manualLeaveAccountCodeRows";
 import { getManualPayrollBucketFromAccountCodeOrType } from "@/lib/payroll/manualPayrollBuckets";
 
 type DayPart = "FullDay" | "AM" | "PM";
@@ -111,6 +116,159 @@ assert.equal(
   }),
   "otherIncome"
 );
+
+const manualLeaveRows = buildManualPayrollLeaveAccountCodeRows({
+  accountCodeOptions: [
+    {
+      id: 1,
+      code: "5-200",
+      accountType: "Paid Leaves",
+      description: "Company Sick Leave",
+      month13thPay: true,
+      nonTaxable: false,
+    },
+    {
+      id: 2,
+      code: "OT-REG",
+      accountType: "Overtime",
+      description: "Regular OT",
+      month13thPay: true,
+      nonTaxable: false,
+    },
+    {
+      id: 3,
+      code: "U-LEAVE",
+      accountType: "Unpaid Leaves/Absences",
+      description: "Unpaid Leave",
+      month13thPay: false,
+      nonTaxable: true,
+    },
+    {
+      id: 4,
+      code: "9-999",
+      accountType: "Paid Leaves",
+      description: "Custom Paid Leave",
+      month13thPay: true,
+      nonTaxable: false,
+    },
+  ],
+  lines: [
+    {
+      id: "leave-line-1",
+      accountCodeId: 1,
+      code: "5-200",
+      description: "Paid Leave Compensation - Company Sick Leave",
+      hours: 8,
+      minutes: 0,
+      amount: "500.00",
+      sourceTable: "employees_leave_records",
+      sortOrder: 0,
+    },
+    {
+      id: "ot-line-1",
+      accountCodeId: 2,
+      code: "OT-REG",
+      description: "Regular OT",
+      hours: 1,
+      minutes: 0,
+      amount: "100.00",
+      sourceTable: "attendance_daily_summaries",
+      sortOrder: 1,
+    },
+    {
+      id: "leave-line-2",
+      accountCodeId: 2,
+      code: "OT-REG",
+      description: "Non-leave paid line",
+      hours: 1,
+      minutes: 0,
+      amount: "100.00",
+      sourceTable: "employees_leave_records",
+      sortOrder: 2,
+    },
+  ],
+});
+
+assert.equal(manualLeaveRows.length, 1);
+assert.equal(manualLeaveRows[0]?.accountCodeSnapshot, "5-200");
+assert.equal(manualLeaveRows[0]?.accountTypeSnapshot, "Paid Leaves");
+assert.equal(manualLeaveRows[0]?.hours, 8);
+assert.equal(manualLeaveRows[0]?.amount, "500.00");
+assert.equal(manualLeaveRows[0]?.sourceLabel, "Manual Payroll leave");
+
+const approvedPaidLeaveRows = buildApprovedPaidLeaveAccountCodeRows({
+  accountCodeOptions: [
+    {
+      id: 1,
+      code: "5-204",
+      accountType: "Paid Leaves",
+      description: "Company Vacation Leave",
+      month13thPay: true,
+      nonTaxable: false,
+    },
+    {
+      id: 2,
+      code: "9-999",
+      accountType: "Paid Leaves",
+      description: "Custom Paid Leave",
+      month13thPay: true,
+      nonTaxable: false,
+    },
+    {
+      id: 3,
+      code: "U-LEAVE",
+      accountType: "Unpaid Leaves/Absences",
+      description: "Unpaid Leave",
+      month13thPay: false,
+      nonTaxable: true,
+    },
+  ],
+  lines: [
+    {
+      accountCodeId: 1,
+      code: "5-204",
+      description: "Paid Leave (Audit Only) - Company Vacation Leave",
+      hours: 8,
+      minutes: 0,
+      amount: "0.00",
+      sourceTable: "employees_leave_records",
+      sortOrder: 0,
+    },
+    {
+      accountCodeId: 2,
+      code: "9-999",
+      description: "Paid Leave Compensation - Custom Paid Leave",
+      hours: 4,
+      minutes: 0,
+      amount: "250.00",
+      sourceTable: "employees_leave_records",
+      sortOrder: 1,
+    },
+    {
+      accountCodeId: 3,
+      code: "U-LEAVE",
+      description: "Unpaid Leave",
+      hours: 8,
+      minutes: 0,
+      amount: "0.00",
+      sourceTable: "employees_leave_records",
+      sortOrder: 2,
+    },
+  ],
+});
+
+assert.equal(approvedPaidLeaveRows.length, 2);
+assert.equal(approvedPaidLeaveRows[0]?.id, "approved-leave:0");
+assert.equal(approvedPaidLeaveRows[0]?.accountCodeSnapshot, "5-204");
+assert.equal(approvedPaidLeaveRows[0]?.amount, "0.00");
+assert.equal(approvedPaidLeaveRows[0]?.sourceLabel, APPROVED_PAID_LEAVE_SOURCE_LABEL);
+assert.equal(
+  approvedPaidLeaveRows[0]?.sourceRemark,
+  "Approved paid leave: Paid Leave (Audit Only) - Company Vacation Leave"
+);
+assert.equal(approvedPaidLeaveRows[1]?.accountCodeSnapshot, "9-999");
+assert.equal(approvedPaidLeaveRows[1]?.amount, "250.00");
+assert.equal(approvedPaidLeaveRows[1]?.hours, 4);
 
 assert.equal(getLeaveQuantityForDayPart("FullDay"), 1);
 assert.equal(getLeaveQuantityForDayPart("AM"), 0.5);

@@ -1,5 +1,5 @@
-import { getActiveEmployees } from "@/app/actions/employeeAction";
 import {
+  listSalaryAdjustmentEmployees,
   listSalaryAdjustmentPeriods,
   listSalaryChanges,
 } from "@/app/actions/salaryAdjustAction";
@@ -15,13 +15,13 @@ export default async function SalaryAdjustmentPage() {
   const [periods, salaryChanges, employees] = await Promise.all([
     listSalaryAdjustmentPeriods(year),
     listSalaryChanges({ year }),
-    getActiveEmployees(),
+    listSalaryAdjustmentEmployees(),
   ]);
 
   return (
     <SalaryAdjustTable
       initialData={salaryChanges}
-      initialEmployees={employees.data ?? []}
+      initialEmployees={employees}
       initialPeriods={periods}
       initialYear={year}
     />

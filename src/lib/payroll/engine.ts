@@ -22,6 +22,8 @@ import {
   loanPayments,
   overtimeRules,
   payrollPeriods,
+  payrollAccountCodeImportBatches,
+  payrollAccountCodeImportItems,
   payrollRunEmployees,
   payrollRunLines,
   payrollRuns,
@@ -36,11 +38,12 @@ import {
   isNull,
   lte,
   ne,
+  notInArray,
   or,
   sql,
 } from "drizzle-orm";
 import { eachDayOfInterval, format, isAfter, isBefore } from "date-fns";
-import { recordPayrollRunEvent } from "@/lib/admin";
+import { recordAdminAuditEvent, recordPayrollRunEvent } from "@/lib/admin";
 import { DEFAULT_EMPLOYEE_TYPE, formatEmployeeCode } from "@/utils/employeeCode";
 import {
   fetchConfirmedHolidayRowsForRange,
@@ -100,6 +103,7 @@ import {
 } from "./manualPayroll";
 import { getManualPayrollAccountRateMultiplier } from "./manualPayrollRate";
 import type { ManualPayrollBaselineSnapshot } from "./manualPayroll";
+import { applyLoanPaymentToBalance } from "./loan";
 
 function chunk<T>(items: T[], size: number) {
   const chunks: T[][] = [];
@@ -189,6 +193,15 @@ type EmployeePayrollComputation = {
 
 type PayrollRunTransitionStatus = "Reviewed" | "Approved" | "Posted" | "Void";
 export type PayrollComputationMode = "Daily Rate" | "Monthly Rate";
+
+const HELD_DTR_EXCEPTION_SOURCES: Array<
+  NonNullable<typeof employeePayrollExceptionRows.$inferSelect["dtrOverrideSource"]>
+> = [
+  "DTR_HOLD_WORKED",
+  "DTR_HOLD_TARDINESS",
+  "DTR_HOLD_UNDERTIME",
+  "DTR_HOLD_REGULAR_OVERTIME",
+];
 
 const DEFAULT_PAYROLL_EXCEPTION_HOLIDAY_DAY_TYPE: AttendanceDtrDayType =
   "Legal/Regular Holiday";
@@ -3191,9 +3204,10 @@ export async function transitionPayrollRunStatus(
           const loan = loanById.get(installment.loanId);
           if (!loan) continue;
 
-          const nextBalance = roundMoney(
-            Math.max(0, toAmount(loan.loanBalance) - toAmount(loanLine.amount))
-          );
+          const nextBalance = applyLoanPaymentToBalance({
+            currentBalance: toAmount(loan.loanBalance),
+            amountPaid: toAmount(loanLine.amount),
+          });
 
           installmentIdsToMark.push(installment.id);
 
@@ -3278,19 +3292,111 @@ export async function transitionPayrollRunStatus(
         : "Voided";
 
   return db.transaction(async (tx) => {
+    const now = new Date();
+
     await tx
       .update(payrollRuns)
       .set({
         status: nextStatus,
-        reviewedAt: nextStatus === "Reviewed" ? new Date() : run.reviewedAt,
+        reviewedAt: nextStatus === "Reviewed" ? now : run.reviewedAt,
         reviewedByUserId: nextStatus === "Reviewed" ? actorUserId : run.reviewedByUserId,
-        approvedAt: nextStatus === "Approved" ? new Date() : run.approvedAt,
+        approvedAt: nextStatus === "Approved" ? now : run.approvedAt,
         approvedByUserId: nextStatus === "Approved" ? actorUserId : run.approvedByUserId,
         voidedByUserId: nextStatus === "Void" ? actorUserId : run.voidedByUserId,
         voidReason: nextStatus === "Void" ? notes ?? null : run.voidReason,
-        updatedAt: new Date(),
+        updatedAt: now,
       })
       .where(eq(payrollRuns.id, payrollRunId));
+
+    if (nextStatus === "Void") {
+      const retainedHeldAccountCodeRows = await tx
+        .select({
+          id: employeePayrollExceptionRows.id,
+          employeeId: employeePayrollExceptionRows.employeeId,
+        })
+        .from(employeePayrollExceptionRows)
+        .where(
+          and(
+            eq(employeePayrollExceptionRows.payrollPeriodId, run.payrollPeriodId),
+            inArray(
+              employeePayrollExceptionRows.dtrOverrideSource,
+              HELD_DTR_EXCEPTION_SOURCES
+            )
+          )
+        );
+      const deletedAccountCodeRows = await tx
+        .delete(employeePayrollExceptionRows)
+        .where(
+          and(
+            eq(employeePayrollExceptionRows.payrollPeriodId, run.payrollPeriodId),
+            or(
+              isNull(employeePayrollExceptionRows.dtrOverrideSource),
+              notInArray(
+                employeePayrollExceptionRows.dtrOverrideSource,
+                HELD_DTR_EXCEPTION_SOURCES
+              )
+            )
+          )
+        )
+        .returning({
+          id: employeePayrollExceptionRows.id,
+          employeeId: employeePayrollExceptionRows.employeeId,
+        });
+      const affectedEmployeeIds = [
+        ...new Set(deletedAccountCodeRows.map((row) => row.employeeId)),
+      ];
+      const activeImportBatches = await tx
+        .select({ id: payrollAccountCodeImportBatches.id })
+        .from(payrollAccountCodeImportBatches)
+        .where(
+          and(
+            eq(payrollAccountCodeImportBatches.payrollPeriodId, run.payrollPeriodId),
+            isNull(payrollAccountCodeImportBatches.revertedAt)
+          )
+        );
+      const activeImportBatchIds = activeImportBatches.map((batch) => batch.id);
+
+      if (activeImportBatchIds.length > 0) {
+        await tx
+          .update(payrollAccountCodeImportItems)
+          .set({
+            revertedAt: now,
+            revertedByUserId: actorUserId,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              inArray(payrollAccountCodeImportItems.batchId, activeImportBatchIds),
+              isNull(payrollAccountCodeImportItems.revertedAt)
+            )
+          );
+        await tx
+          .update(payrollAccountCodeImportBatches)
+          .set({
+            revertedAt: now,
+            revertedByUserId: actorUserId,
+            updatedAt: now,
+          })
+          .where(inArray(payrollAccountCodeImportBatches.id, activeImportBatchIds));
+      }
+
+      await recordAdminAuditEvent({
+        actorUserId,
+        entityType: "employee_payroll_exception_rows",
+        entityId: `${run.payrollPeriodId}:void:${payrollRunId}`,
+        action: "payroll.exception_rows.cleared_for_voided_run",
+        details: {
+          payrollRunId,
+          payrollPeriodId: run.payrollPeriodId,
+          payrollPeriodCode: run.payrollPeriod?.code ?? null,
+          deletedNonHeldAccountCodeRowCount: deletedAccountCodeRows.length,
+          retainedHeldAccountCodeRowCount: retainedHeldAccountCodeRows.length,
+          affectedEmployeeCount: affectedEmployeeIds.length,
+          clearedImportBatchCount: activeImportBatchIds.length,
+        },
+        database: tx,
+      });
+    }
 
     await recordPayrollRunEvent({
       payrollRunId,

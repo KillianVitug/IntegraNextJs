@@ -370,6 +370,70 @@ export type PayrollLoanDeductionView = {
   sourceId: string | null;
 };
 
+export type PayrollReportType =
+  | "department"
+  | "netPay"
+  | "allowance"
+  | "deduction"
+  | "contribution"
+  | "accountCode";
+
+export type PayrollDepartmentReportRowView = {
+  key: string;
+  departmentId: number | null;
+  departmentName: string;
+  departmentCode: string | null;
+  employeeCount: number;
+  grossPay: number;
+  totalDeductions: number;
+  employeeContributions: number;
+  employerContributions: number;
+  netPay: number;
+};
+
+export type PayrollNetPayReportRowView = {
+  employeeId: string;
+  employeeNo: string;
+  employeeType: string | null;
+  employeeName: string;
+  departmentName: string | null;
+  departmentCode: string | null;
+  grossPay: string;
+  totalDeductions: string;
+  employeeContributions: string;
+  employerContributions: string;
+  netPay: string;
+};
+
+export type PayrollLineReportRowView = {
+  id: string;
+  employeeId: string;
+  employeeNo: string;
+  employeeType: string | null;
+  employeeName: string;
+  departmentName: string | null;
+  departmentCode: string | null;
+  lineType: string;
+  code: string;
+  description: string;
+  quantity: string | null;
+  rate: string | null;
+  amount: string;
+  taxable: boolean;
+  month13thEligible: boolean;
+  sourceTable: string | null;
+  sourceId: string | null;
+};
+
+export type PayrollAccountCodeReportOptionView = {
+  code: string;
+  description: string;
+  lineType: string;
+  employeeCount: number;
+  lineCount: number;
+  totalAmount: number;
+};
+
 export type PayrollAccountCodeEmployeeView = {
   employeeId: string;
   employeeNo: string;
@@ -454,6 +518,23 @@ export type PayrollRecurringEntryRowView = {
   sourceRemark: string;
 };
 
+export type PayrollManualLeaveAccountCodeRowView = {
+  id: string;
+  manualPayrollLineId: string | null;
+  accountCodeId: number;
+  accountCodeSnapshot: string;
+  accountTypeSnapshot: PayrollExceptionAccountType;
+  accountDescriptionSnapshot: string | null;
+  accountMonth13thPaySnapshot: boolean;
+  accountNonTaxableSnapshot: boolean;
+  hours: number;
+  minutes: number;
+  amount: string;
+  description: string | null;
+  sourceLabel: string;
+  sourceRemark: string;
+};
+
 export type PayrollScheduledLoanDeductionView = {
   installmentId: string;
   loanId: string;
@@ -474,6 +555,7 @@ export type PayrollScheduledLoanDeductionView = {
 export type PayrollExceptionWorkspaceView = {
   rows: PayrollExceptionRowView[];
   recurringRows: PayrollRecurringEntryRowView[];
+  leaveRows: PayrollManualLeaveAccountCodeRowView[];
   loanRows: PayrollScheduledLoanDeductionView[];
   accountCodeOptions: PayrollExceptionAccountCodeOptionView[];
 };

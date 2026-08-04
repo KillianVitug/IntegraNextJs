@@ -14,7 +14,11 @@ export async function getPayrollRegister(runId: string) {
     where: eq(payrollRuns.id, runId),
     with: {
       payrollPeriod: true,
-      employees: true,
+      employees: {
+        with: {
+          lines: true,
+        },
+      },
     },
   });
 }

@@ -20,7 +20,7 @@ import {
   manualPayrollEntries,
   manualPayrollEntryLines,
 } from "@/db/schema";
-import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { recordPayrollRunEvent, requireAdminActor } from "@/lib/admin";
 import { requireEmployee } from "@/lib/auth/server";
@@ -40,6 +40,7 @@ import {
   type LeaveBalanceSummaryItem,
   type LeaveDayPart,
 } from "@/lib/payroll/leave";
+import { resolveEmployeeSalaryForPeriod } from "@/lib/payroll/salaryResolver";
 import { formatEmployeeCode } from "@/utils/employeeCode";
 
 type LeaveStatus = (typeof leaveStatusEnum.enumValues)[number];
@@ -77,6 +78,54 @@ export type EmployeeServiceSummary = {
 
 type LeaveRecordForPayrollImpact = typeof employeesLeaveRecords.$inferSelect & {
   leaveTypeLookup: typeof leaveTypes.$inferSelect | null;
+};
+
+type LeaveEncashmentTypeCode = "SL" | "VL";
+
+type LeaveEncashmentSnapshotItem = {
+  code: LeaveEncashmentTypeCode;
+  name: string;
+  entitled: number;
+  used: number;
+  encashed: number;
+  balance: number;
+  encashmentEnabled: boolean;
+  amount: number;
+};
+
+export type LeaveEncashmentSnapshot = {
+  leaveYear: number;
+  payrollPeriod: {
+    id: string;
+    code: string;
+    year: number;
+    startDate: string;
+    endDate: string;
+    adjustedPayDate: string;
+    status: string;
+  };
+  dailyRate: number;
+  latestRunStatus: string | null;
+  blockReason: string | null;
+  balances: Record<LeaveEncashmentTypeCode, LeaveEncashmentSnapshotItem>;
+};
+
+export type LeaveEncashmentListItem = {
+  id: string;
+  leaveType: string;
+  leaveTypeName: string;
+  payrollPeriodCode: string;
+  payrollPeriodStartDate: string;
+  payrollPeriodEndDate: string;
+  adjustedPayDate: string;
+  quantity: number;
+  rate: number;
+  amount: number;
+  status: typeof leaveEncashments.$inferSelect["status"];
+  leaveYear: number;
+  createdAt: string;
+  approvedAt: string | null;
+  decisionNote: string | null;
 };
 
 type LeavePayrollImpact = {
@@ -117,6 +166,12 @@ function toAmount(value: string | number | null | undefined) {
 
 function getYear(dateKey: string) {
   return Number(dateKey.slice(0, 4));
+}
+
+function normalizeLeaveYear(value: number | null | undefined, fallback: number) {
+  return Number.isInteger(value) && value! >= 1900 && value! <= 2100
+    ? value!
+    : fallback;
 }
 
 async function getEmployeeFromSession() {
@@ -978,6 +1033,234 @@ export async function getLeaveBalanceSummary(employeeId: string, year: number) {
   }
 }
 
+export async function listLeaveEncashmentPayrollPeriods(year: number) {
+  try {
+    await requireAdminActor();
+
+    const rows = await db
+      .select({
+        id: payrollPeriods.id,
+        code: payrollPeriods.code,
+        year: payrollPeriods.year,
+        startDate: payrollPeriods.startDate,
+        endDate: payrollPeriods.endDate,
+        adjustedPayDate: payrollPeriods.adjustedPayDate,
+        status: payrollPeriods.status,
+      })
+      .from(payrollPeriods)
+      .where(eq(payrollPeriods.year, year))
+      .orderBy(asc(payrollPeriods.startDate));
+
+    return { data: rows, error: null };
+  } catch (error) {
+    console.error("Error fetching leave encashment payroll periods:", error);
+    return {
+      data: null,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to fetch payroll periods",
+    };
+  }
+}
+
+function getLeaveEncashmentBlockReason(args: {
+  payrollPeriodStatus: string;
+  latestRunStatus: string | null;
+  dailyRate: number;
+}) {
+  if (args.payrollPeriodStatus !== "Open") {
+    return "Leave encashment can only be applied to open payroll periods.";
+  }
+
+  if (args.latestRunStatus === "Approved" || args.latestRunStatus === "Posted") {
+    return `Payroll changes are blocked because the latest payroll run is ${args.latestRunStatus}.`;
+  }
+
+  if (args.dailyRate <= 0) {
+    return "Employee daily rate is missing or zero for this payroll period.";
+  }
+
+  return null;
+}
+
+async function getLatestPayrollRunStatusForPeriod(
+  payrollPeriodId: string,
+  database: DbClient = db
+) {
+  const latestRun = await database.query.payrollRuns.findFirst({
+    where: eq(payrollRuns.payrollPeriodId, payrollPeriodId),
+    orderBy: [desc(payrollRuns.createdAt)],
+  });
+
+  return latestRun?.status ?? null;
+}
+
+async function buildLeaveEncashmentSnapshot(args: {
+  employeeId: string;
+  payrollPeriodId: string;
+  leaveYear?: number;
+  database?: DbClient;
+}): Promise<LeaveEncashmentSnapshot> {
+  const database = args.database ?? db;
+  const payrollPeriod = await database.query.payrollPeriods.findFirst({
+    where: eq(payrollPeriods.id, args.payrollPeriodId),
+  });
+
+  if (!payrollPeriod) {
+    throw new Error("Payroll period not found.");
+  }
+  const leaveYear = normalizeLeaveYear(
+    args.leaveYear,
+    getYear(payrollPeriod.startDate)
+  );
+
+  const [balanceSummary, resolvedSalary, latestRunStatus] = await Promise.all([
+    getEmployeeLeaveBalanceSummary(
+      args.employeeId,
+      leaveYear,
+      database
+    ),
+    resolveEmployeeSalaryForPeriod(args.employeeId, payrollPeriod.id, database),
+    getLatestPayrollRunStatusForPeriod(payrollPeriod.id, database),
+  ]);
+
+  const dailyRate = toAmount(resolvedSalary.salary.dailyRate);
+  const balances = {} as Record<LeaveEncashmentTypeCode, LeaveEncashmentSnapshotItem>;
+
+  for (const code of ["SL", "VL"] as const) {
+    const balanceRow = getUsageFromSummary(balanceSummary, code);
+    const leaveType = await requireExistingLeaveType(code, database);
+    const policy = await getLeavePolicyForType(leaveType.id, database);
+    const balance = Math.max(0, balanceRow?.balance ?? 0);
+
+    balances[code] = {
+      code,
+      name: leaveType.name,
+      entitled: balanceRow?.entitled ?? 0,
+      used: balanceRow?.used ?? 0,
+      encashed: balanceRow?.encashed ?? 0,
+      balance,
+      encashmentEnabled: policy.encashmentEnabled,
+      amount: balance * dailyRate,
+    };
+  }
+
+  return {
+    leaveYear,
+    payrollPeriod: {
+      id: payrollPeriod.id,
+      code: payrollPeriod.code,
+      year: payrollPeriod.year,
+      startDate: payrollPeriod.startDate,
+      endDate: payrollPeriod.endDate,
+      adjustedPayDate: payrollPeriod.adjustedPayDate,
+      status: payrollPeriod.status,
+    },
+    dailyRate,
+    latestRunStatus,
+    blockReason: getLeaveEncashmentBlockReason({
+      payrollPeriodStatus: payrollPeriod.status,
+      latestRunStatus,
+      dailyRate,
+    }),
+    balances,
+  };
+}
+
+export async function getLeaveEncashmentSnapshot(args: {
+  employeeId: string;
+  payrollPeriodId: string;
+  leaveYear?: number;
+}) {
+  try {
+    await requireAdminActor();
+    const snapshot = await buildLeaveEncashmentSnapshot(args);
+    return { data: snapshot, error: null };
+  } catch (error) {
+    console.error("Error fetching leave encashment snapshot:", error);
+    return {
+      data: null,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to fetch leave encashment details",
+    };
+  }
+}
+
+export async function listLeaveEncashmentsForEmployee(args: {
+  employeeId: string;
+  leaveYear: number;
+}) {
+  try {
+    await requireAdminActor();
+    const leaveYear = normalizeLeaveYear(args.leaveYear, new Date().getFullYear());
+
+    const rows = await db
+      .select({
+        id: leaveEncashments.id,
+        leaveType: leaveTypes.code,
+        leaveTypeName: leaveTypes.name,
+        payrollPeriodCode: payrollPeriods.code,
+        payrollPeriodStartDate: payrollPeriods.startDate,
+        payrollPeriodEndDate: payrollPeriods.endDate,
+        adjustedPayDate: payrollPeriods.adjustedPayDate,
+        quantity: leaveEncashments.quantity,
+        rate: leaveEncashments.rate,
+        amount: leaveEncashments.amount,
+        status: leaveEncashments.status,
+        leaveYear: leaveBalanceLedger.periodYear,
+        createdAt: leaveEncashments.createdAt,
+        approvedAt: leaveEncashments.approvedAt,
+        decisionNote: leaveEncashments.decisionNote,
+      })
+      .from(leaveEncashments)
+      .innerJoin(leaveTypes, eq(leaveEncashments.leaveTypeId, leaveTypes.id))
+      .innerJoin(
+        payrollPeriods,
+        eq(leaveEncashments.payrollPeriodId, payrollPeriods.id)
+      )
+      .innerJoin(
+        leaveBalanceLedger,
+        and(
+          eq(leaveBalanceLedger.sourceTable, "leave_encashments"),
+          eq(leaveBalanceLedger.transactionType, "Encashment"),
+          sql`${leaveBalanceLedger.sourceId} = ${leaveEncashments.id}::text`
+        )
+      )
+      .where(
+        and(
+          eq(leaveEncashments.employeeId, args.employeeId),
+          eq(leaveBalanceLedger.periodYear, leaveYear)
+        )
+      )
+      .orderBy(desc(leaveEncashments.createdAt));
+
+    return {
+      data: rows.map((row) => ({
+        ...row,
+        quantity: toAmount(row.quantity),
+        rate: toAmount(row.rate),
+        amount: toAmount(row.amount),
+        leaveYear: row.leaveYear ?? leaveYear,
+        createdAt: row.createdAt.toISOString(),
+        approvedAt: row.approvedAt?.toISOString() ?? null,
+      })) satisfies LeaveEncashmentListItem[],
+      error: null,
+    };
+  } catch (error) {
+    console.error("Error fetching leave encashments:", error);
+    return {
+      data: null,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to fetch leave encashments",
+    };
+  }
+}
+
 export async function getEmployeeLeaveUsageByYear(year: number) {
   try {
     const employee = await getEmployeeFromSession();
@@ -1360,10 +1643,227 @@ async function appendEncashmentManualPayrollLine(args: {
   return entryId!;
 }
 
+async function assertPayrollPeriodCanReceiveEncashment(args: {
+  tx: DbClient;
+  payrollPeriodId: string;
+}) {
+  const payrollPeriod = await args.tx.query.payrollPeriods.findFirst({
+    where: eq(payrollPeriods.id, args.payrollPeriodId),
+  });
+
+  if (!payrollPeriod) {
+    throw new Error("Payroll period not found.");
+  }
+
+  const latestRunStatus = await getLatestPayrollRunStatusForPeriod(
+    payrollPeriod.id,
+    args.tx
+  );
+  const blockReason = getLeaveEncashmentBlockReason({
+    payrollPeriodStatus: payrollPeriod.status,
+    latestRunStatus,
+    dailyRate: 1,
+  });
+
+  if (blockReason) {
+    throw new Error(blockReason);
+  }
+
+  return payrollPeriod;
+}
+
+async function removeEncashmentManualPayrollLine(args: {
+  tx: DbClient;
+  actorUserId: string;
+  manualPayrollEntryId: string | null;
+  encashmentId: string;
+}) {
+  if (!args.manualPayrollEntryId) return;
+
+  const entry = await args.tx.query.manualPayrollEntries.findFirst({
+    where: eq(manualPayrollEntries.id, args.manualPayrollEntryId),
+    with: {
+      lines: true,
+    },
+  });
+
+  if (!entry) return;
+
+  const linesToRemove = entry.lines.filter(
+    (line) =>
+      line.sourceTable === "leave_encashments" &&
+      line.sourceId === args.encashmentId
+  );
+
+  if (linesToRemove.length === 0) return;
+
+  const remainingLines = entry.lines.filter(
+    (line) => !linesToRemove.some((removed) => removed.id === line.id)
+  );
+
+  await args.tx
+    .delete(manualPayrollEntryLines)
+    .where(
+      inArray(
+        manualPayrollEntryLines.id,
+        linesToRemove.map((line) => line.id)
+      )
+    );
+
+  const entryCreatedOnlyForEncashment =
+    remainingLines.length === 0 &&
+    entry.remarks === "Created from leave encashment." &&
+    toAmount(entry.regularPay) === 0 &&
+    toAmount(entry.totalDeductions) === 0 &&
+    toAmount(entry.employeeContributions) === 0 &&
+    toAmount(entry.employerContributions) === 0;
+
+  if (entryCreatedOnlyForEncashment) {
+    await args.tx
+      .delete(manualPayrollEntries)
+      .where(eq(manualPayrollEntries.id, entry.id));
+    return;
+  }
+
+  const removedGross = linesToRemove.reduce(
+    (total, line) => total + toAmount(line.amount),
+    0
+  );
+  const removedTaxable = linesToRemove.reduce(
+    (total, line) => total + (line.taxable ? toAmount(line.amount) : 0),
+    0
+  );
+  const removedNonTaxable = linesToRemove.reduce(
+    (total, line) => total + (line.nonTaxable ? toAmount(line.amount) : 0),
+    0
+  );
+
+  await args.tx
+    .update(manualPayrollEntries)
+    .set({
+      grossPay: money(toAmount(entry.grossPay) - removedGross),
+      taxablePay: money(toAmount(entry.taxablePay) - removedTaxable),
+      nonTaxablePay: money(toAmount(entry.nonTaxablePay) - removedNonTaxable),
+      netPay: money(toAmount(entry.netPay) - removedGross),
+      updatedByUserId: args.actorUserId,
+      updatedAt: new Date(),
+    })
+    .where(eq(manualPayrollEntries.id, entry.id));
+}
+
+async function insertApprovedLeaveEncashment(args: {
+  tx: DbClient;
+  actorUserId: string;
+  employeeId: string;
+  leaveType: typeof leaveTypes.$inferSelect;
+  policy: Awaited<ReturnType<typeof getLeavePolicyForType>>;
+  payrollPeriod: typeof payrollPeriods.$inferSelect;
+  leaveYear?: number;
+  quantity: number;
+  rate: number;
+  decisionNote?: string | null;
+}) {
+  if (!args.policy.encashmentEnabled) {
+    throw new Error("Leave encashment is not enabled for this leave type.");
+  }
+
+  if (args.quantity <= 0 || args.rate <= 0) {
+    throw new Error("Encashment quantity and rate must be greater than zero.");
+  }
+
+  const year = normalizeLeaveYear(
+    args.leaveYear,
+    getYear(args.payrollPeriod.startDate)
+  );
+  await lockLeaveBalance({
+    employeeId: args.employeeId,
+    leaveTypeId: args.leaveType.id,
+    year,
+    database: args.tx,
+  });
+  const balanceBefore = await getLeaveBalance(
+    args.employeeId,
+    args.leaveType.id,
+    year,
+    args.tx
+  );
+  const projectedBalance = balanceBefore - args.quantity;
+
+  if (projectedBalance < -0.0001) {
+    throw new Error(
+      `Insufficient ${args.leaveType.code} balance for encashment. Available: ${balanceBefore.toFixed(
+        2
+      )}, requested: ${args.quantity.toFixed(2)}.`
+    );
+  }
+
+  const amount = args.quantity * args.rate;
+  const [createdEncashment] = await args.tx
+    .insert(leaveEncashments)
+    .values({
+      employeeId: args.employeeId,
+      leaveTypeId: args.leaveType.id,
+      payrollPeriodId: args.payrollPeriod.id,
+      quantity: money(args.quantity),
+      rate: money(args.rate),
+      amount: money(amount),
+      status: "Approved",
+      taxable: args.policy.encashmentTaxable,
+      month13thEligible: args.policy.encashmentMonth13thEligible,
+      accountCodeId:
+        args.policy.encashmentAccountCodeId ?? args.leaveType.accountCodeId,
+      requestedByUserId: args.actorUserId,
+      approvedByUserId: args.actorUserId,
+      approvedAt: new Date(),
+      decisionNote: args.decisionNote,
+      balanceBefore: money(balanceBefore),
+      projectedBalance: money(projectedBalance),
+    })
+    .returning();
+
+  await args.tx.insert(leaveBalanceLedger).values({
+    employeeId: args.employeeId,
+    leaveTypeId: args.leaveType.id,
+    entryDate: args.payrollPeriod.endDate,
+    transactionType: "Encashment",
+    quantity: money(-args.quantity),
+    balanceAfter: money(projectedBalance),
+    periodYear: year,
+    idempotencyKey: `leave-encashment:${createdEncashment.id}`,
+    sourceTable: "leave_encashments",
+    sourceId: createdEncashment.id,
+    remarks: args.decisionNote ?? null,
+  });
+
+  const manualPayrollEntryId = await appendEncashmentManualPayrollLine({
+    tx: args.tx,
+    actorUserId: args.actorUserId,
+    employeeId: args.employeeId,
+    payrollPeriodId: args.payrollPeriod.id,
+    encashmentId: createdEncashment.id,
+    leaveCode: args.leaveType.code,
+    quantity: args.quantity,
+    amount,
+    rate: args.rate,
+    taxable: args.policy.encashmentTaxable,
+    month13thEligible: args.policy.encashmentMonth13thEligible,
+    accountCodeId:
+      args.policy.encashmentAccountCodeId ?? args.leaveType.accountCodeId,
+  });
+
+  await args.tx
+    .update(leaveEncashments)
+    .set({ manualPayrollEntryId })
+    .where(eq(leaveEncashments.id, createdEncashment.id));
+
+  return { ...createdEncashment, manualPayrollEntryId };
+}
+
 export async function createLeaveEncashment(data: {
   employeeId: string;
   leaveType: string;
   payrollPeriodId: string;
+  leaveYear?: number;
   quantity: number;
   rate: number;
   decisionNote?: string | null;
@@ -1373,101 +1873,22 @@ export async function createLeaveEncashment(data: {
     const encashment = await db.transaction(async (tx) => {
       const leaveType = await requireExistingLeaveType(data.leaveType, tx);
       const policy = await getLeavePolicyForType(leaveType.id, tx);
-      const payrollPeriod = await tx.query.payrollPeriods.findFirst({
-        where: eq(payrollPeriods.id, data.payrollPeriodId),
+      const payrollPeriod = await assertPayrollPeriodCanReceiveEncashment({
+        tx,
+        payrollPeriodId: data.payrollPeriodId,
       });
-
-      if (!payrollPeriod) {
-        throw new Error("Payroll period not found.");
-      }
-
-      if (!policy.encashmentEnabled) {
-        throw new Error("Leave encashment is not enabled for this leave type.");
-      }
-
-      if (data.quantity <= 0 || data.rate <= 0) {
-        throw new Error("Encashment quantity and rate must be greater than zero.");
-      }
-
-      const year = getYear(payrollPeriod.startDate);
-      await lockLeaveBalance({
-        employeeId: data.employeeId,
-        leaveTypeId: leaveType.id,
-        year,
-        database: tx,
-      });
-      const balanceBefore = await getLeaveBalance(
-        data.employeeId,
-        leaveType.id,
-        year,
-        tx
-      );
-      const projectedBalance = balanceBefore - data.quantity;
-
-      if (projectedBalance < -0.0001) {
-        throw new Error(
-          `Insufficient ${leaveType.code} balance for encashment. Available: ${balanceBefore.toFixed(
-            2
-          )}, requested: ${data.quantity.toFixed(2)}.`
-        );
-      }
-
-      const amount = data.quantity * data.rate;
-      const [createdEncashment] = await tx
-        .insert(leaveEncashments)
-        .values({
-          employeeId: data.employeeId,
-          leaveTypeId: leaveType.id,
-          payrollPeriodId: data.payrollPeriodId,
-          quantity: money(data.quantity),
-          rate: money(data.rate),
-          amount: money(amount),
-          status: "Approved",
-          taxable: policy.encashmentTaxable,
-          month13thEligible: policy.encashmentMonth13thEligible,
-          accountCodeId: policy.encashmentAccountCodeId ?? leaveType.accountCodeId,
-          requestedByUserId: actor.userId,
-          approvedByUserId: actor.userId,
-          approvedAt: new Date(),
-          decisionNote: data.decisionNote,
-          balanceBefore: money(balanceBefore),
-          projectedBalance: money(projectedBalance),
-        })
-        .returning();
-
-      await tx.insert(leaveBalanceLedger).values({
-        employeeId: data.employeeId,
-        leaveTypeId: leaveType.id,
-        entryDate: payrollPeriod.endDate,
-        transactionType: "Encashment",
-        quantity: money(-data.quantity),
-        balanceAfter: money(projectedBalance),
-        periodYear: year,
-        idempotencyKey: `leave-encashment:${createdEncashment.id}`,
-        sourceTable: "leave_encashments",
-        sourceId: createdEncashment.id,
-        remarks: data.decisionNote ?? null,
-      });
-
-      const manualPayrollEntryId = await appendEncashmentManualPayrollLine({
+      const createdEncashment = await insertApprovedLeaveEncashment({
         tx,
         actorUserId: actor.userId,
         employeeId: data.employeeId,
-        payrollPeriodId: data.payrollPeriodId,
-        encashmentId: createdEncashment.id,
-        leaveCode: leaveType.code,
+        leaveType,
+        policy,
+        payrollPeriod,
+        leaveYear: data.leaveYear,
         quantity: data.quantity,
-        amount,
         rate: data.rate,
-        taxable: policy.encashmentTaxable,
-        month13thEligible: policy.encashmentMonth13thEligible,
-        accountCodeId: policy.encashmentAccountCodeId ?? leaveType.accountCodeId,
+        decisionNote: data.decisionNote,
       });
-
-      await tx
-        .update(leaveEncashments)
-        .set({ manualPayrollEntryId })
-        .where(eq(leaveEncashments.id, createdEncashment.id));
 
       await markPayrollPeriodRunStale({
         tx,
@@ -1476,7 +1897,7 @@ export async function createLeaveEncashment(data: {
         notes: "Marked stale because leave encashment changed manual payroll.",
       });
 
-      return { ...createdEncashment, manualPayrollEntryId };
+      return createdEncashment;
     });
 
     revalidatePath("/payroll");
@@ -1487,6 +1908,237 @@ export async function createLeaveEncashment(data: {
     return {
       data: null,
       error: error instanceof Error ? error.message : "Failed to create leave encashment",
+    };
+  }
+}
+
+export async function voidLeaveEncashment(args: {
+  encashmentId: string;
+  reason: string;
+}) {
+  try {
+    const actor = await requireAdminActor();
+    const result = await db.transaction(async (tx) => {
+      const encashment = await tx.query.leaveEncashments.findFirst({
+        where: eq(leaveEncashments.id, args.encashmentId),
+        with: {
+          leaveType: true,
+          payrollPeriod: true,
+        },
+      });
+
+      if (!encashment) {
+        throw new Error("Leave encashment not found.");
+      }
+
+      if (encashment.status !== "Approved") {
+        throw new Error("Only approved leave encashments can be reverted.");
+      }
+
+      const reason = args.reason.trim();
+      if (!reason) {
+        throw new Error("Revert reason is required.");
+      }
+
+      const [originalLedgerEntry] = await tx
+        .select({
+          periodYear: leaveBalanceLedger.periodYear,
+          entryDate: leaveBalanceLedger.entryDate,
+        })
+        .from(leaveBalanceLedger)
+        .where(
+          and(
+            eq(leaveBalanceLedger.sourceTable, "leave_encashments"),
+            eq(leaveBalanceLedger.sourceId, encashment.id),
+            eq(leaveBalanceLedger.transactionType, "Encashment")
+          )
+        )
+        .limit(1);
+
+      const reversalYear = normalizeLeaveYear(
+        originalLedgerEntry?.periodYear,
+        getYear(encashment.payrollPeriod.startDate)
+      );
+      const quantity = toAmount(encashment.quantity);
+
+      await lockLeaveBalance({
+        employeeId: encashment.employeeId,
+        leaveTypeId: encashment.leaveTypeId,
+        year: reversalYear,
+        database: tx,
+      });
+
+      const currentBalance = await getLeaveBalance(
+        encashment.employeeId,
+        encashment.leaveTypeId,
+        reversalYear,
+        tx
+      );
+      const balanceAfter = currentBalance + quantity;
+
+      await tx
+        .insert(leaveBalanceLedger)
+        .values({
+          employeeId: encashment.employeeId,
+          leaveTypeId: encashment.leaveTypeId,
+          entryDate: encashment.payrollPeriod.endDate,
+          transactionType: "Reversal",
+          quantity: money(quantity),
+          balanceAfter: money(balanceAfter),
+          periodYear: reversalYear,
+          idempotencyKey: `leave-encashment-reversal:${encashment.id}`,
+          sourceTable: "leave_encashments",
+          sourceId: encashment.id,
+          remarks: reason,
+        })
+        .onConflictDoNothing();
+
+      const decisionNote = [encashment.decisionNote, `Void: ${reason}`]
+        .filter(Boolean)
+        .join("\n");
+
+      await tx
+        .update(leaveEncashments)
+        .set({
+          status: "Void",
+          decisionNote,
+          updatedAt: new Date(),
+        })
+        .where(eq(leaveEncashments.id, encashment.id));
+
+      await removeEncashmentManualPayrollLine({
+        tx,
+        actorUserId: actor.userId,
+        manualPayrollEntryId: encashment.manualPayrollEntryId,
+        encashmentId: encashment.id,
+      });
+
+      await markPayrollPeriodRunStale({
+        tx,
+        payrollPeriodId: encashment.payrollPeriodId,
+        actorUserId: actor.userId,
+        notes: "Marked stale because leave encashment was reverted.",
+      });
+
+      return {
+        id: encashment.id,
+        leaveYear: reversalYear,
+        leaveType: encashment.leaveType.code,
+      };
+    });
+
+    revalidatePath("/payroll");
+    revalidatePath("/leaves");
+    return { data: result, error: null };
+  } catch (error) {
+    console.error("Error voiding leave encashment:", error);
+    return {
+      data: null,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to revert leave encashment",
+    };
+  }
+}
+
+export async function submitLeaveEncashmentBatch(data: {
+  employeeId: string;
+  payrollPeriodId: string;
+  leaveYear?: number;
+  useSickLeave: boolean;
+  useVacationLeave: boolean;
+  decisionNote?: string | null;
+}) {
+  try {
+    const actor = await requireAdminActor();
+    const selectedCodes: LeaveEncashmentTypeCode[] = [
+      data.useSickLeave ? "SL" : null,
+      data.useVacationLeave ? "VL" : null,
+    ].filter((code): code is LeaveEncashmentTypeCode => code != null);
+
+    if (selectedCodes.length === 0) {
+      throw new Error("Select at least one leave type to encash.");
+    }
+
+    const result = await db.transaction(async (tx) => {
+      const payrollPeriod = await assertPayrollPeriodCanReceiveEncashment({
+        tx,
+        payrollPeriodId: data.payrollPeriodId,
+      });
+      const resolvedSalary = await resolveEmployeeSalaryForPeriod(
+        data.employeeId,
+        payrollPeriod.id,
+        tx
+      );
+      const dailyRate = toAmount(resolvedSalary.salary.dailyRate);
+
+      if (dailyRate <= 0) {
+        throw new Error(
+          "Employee daily rate is missing or zero for this payroll period."
+        );
+      }
+
+      const balanceSummary = await getEmployeeLeaveBalanceSummary(
+        data.employeeId,
+        normalizeLeaveYear(data.leaveYear, getYear(payrollPeriod.startDate)),
+        tx
+      );
+      const createdEncashments = [];
+
+      for (const code of selectedCodes) {
+        const balanceRow = getUsageFromSummary(balanceSummary, code);
+        const quantity = Math.max(0, balanceRow?.balance ?? 0);
+
+        if (quantity <= 0) {
+          throw new Error(`No available ${code} balance to encash.`);
+        }
+
+        const leaveType = await requireExistingLeaveType(code, tx);
+        const policy = await getLeavePolicyForType(leaveType.id, tx);
+        const createdEncashment = await insertApprovedLeaveEncashment({
+          tx,
+          actorUserId: actor.userId,
+          employeeId: data.employeeId,
+          leaveType,
+          policy,
+          payrollPeriod,
+          leaveYear: data.leaveYear,
+          quantity,
+          rate: dailyRate,
+          decisionNote: data.decisionNote,
+        });
+
+        createdEncashments.push(createdEncashment);
+      }
+
+      await markPayrollPeriodRunStale({
+        tx,
+        payrollPeriodId: payrollPeriod.id,
+        actorUserId: actor.userId,
+        notes: "Marked stale because leave encashment changed manual payroll.",
+      });
+
+      return {
+        encashmentCount: createdEncashments.length,
+        totalAmount: createdEncashments.reduce(
+          (total, encashment) => total + toAmount(encashment.amount),
+          0
+        ),
+      };
+    });
+
+    revalidatePath("/payroll");
+    revalidatePath("/leaves");
+    return { data: result, error: null };
+  } catch (error) {
+    console.error("Error submitting leave encashment batch:", error);
+    return {
+      data: null,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to submit leave encashment",
     };
   }
 }

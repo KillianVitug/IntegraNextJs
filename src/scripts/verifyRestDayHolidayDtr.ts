@@ -5,6 +5,11 @@ import {
   isGeneratedDtrHolidayCheckRequirementSatisfied,
 } from "@/lib/payroll/generatedDtrHolidays";
 import {
+  buildBranchCalendarOverrideRowsForGeneratedDtr,
+  buildBranchCalendarOverrideScopeMaps,
+  splitHeldDtrBranchCalendarApprovalMinutes,
+} from "@/lib/payroll/branchCalendarAccountCodes";
+import {
   buildHolidayCheckDateAssignments,
   buildHolidayCheckDateBackfillUpdates,
 } from "@/lib/holidayCheckDates";
@@ -252,6 +257,136 @@ assert.equal(
   }),
   true,
   "A check date outside the holiday payroll period should still qualify from its own DTR row."
+);
+
+const branchAccounts = new Map([
+  [1, { id: 1, accountCode: "ALL-REG" }],
+  [2, { id: 2, accountCode: "ALL-OT" }],
+  [3, { id: 3, accountCode: "DEPT-REG" }],
+  [4, { id: 4, accountCode: "DEPT-OT" }],
+]);
+const branchOverrideMaps = buildBranchCalendarOverrideScopeMaps([
+  {
+    attendanceDate: "2026-03-02",
+    departmentId: null,
+    regularAccountCodeId: 1,
+    overtimeAccountCodeId: 2,
+  },
+  {
+    attendanceDate: "2026-03-02",
+    departmentId: 10,
+    regularAccountCodeId: 3,
+    overtimeAccountCodeId: 4,
+  },
+]);
+const branchAttendanceRow = {
+  attendanceDate: "2026-03-02",
+  workedMinutes: 540,
+  regularMinutes: 480,
+  lateMinutes: 30,
+  undertimeMinutes: 0,
+  overtimeMinutes: 60,
+  isRestDay: false,
+};
+
+const departmentBranchRows = buildBranchCalendarOverrideRowsForGeneratedDtr({
+  rows: [branchAttendanceRow],
+  departmentId: 10,
+  overrideMaps: branchOverrideMaps,
+  accountById: branchAccounts,
+});
+
+assert.equal(
+  departmentBranchRows[0]?.regularAccount.accountCode,
+  "DEPT-REG",
+  "Department-specific branch calendar regular account should win over all-department."
+);
+assert.equal(
+  departmentBranchRows[0]?.overtimeAccount.accountCode,
+  "DEPT-OT",
+  "Department-specific branch calendar overtime account should win over all-department."
+);
+assert.equal(
+  departmentBranchRows[0]?.regularMinutes,
+  450,
+  "Branch calendar regular hours should use worked hours less late/undertime and replace the fallback REG bucket."
+);
+assert.equal(
+  departmentBranchRows[0]?.overtimeMinutes,
+  60,
+  "Branch calendar overtime should keep overtime minutes for the selected overtime account."
+);
+
+const inheritedBranchRows = buildBranchCalendarOverrideRowsForGeneratedDtr({
+  rows: [branchAttendanceRow],
+  departmentId: 20,
+  overrideMaps: branchOverrideMaps,
+  accountById: branchAccounts,
+});
+
+assert.equal(
+  inheritedBranchRows[0]?.regularAccount.accountCode,
+  "ALL-REG",
+  "All-department branch calendar account should apply when no department override exists."
+);
+
+const skippedHolidayBranchRows = buildBranchCalendarOverrideRowsForGeneratedDtr({
+  rows: [branchAttendanceRow],
+  departmentId: 10,
+  overrideMaps: branchOverrideMaps,
+  accountById: branchAccounts,
+  isBranchCalendarDateEligible: () => false,
+});
+
+assert.equal(
+  skippedHolidayBranchRows.length,
+  0,
+  "Branch calendar account codes should not apply to holiday/rest-day payroll rows."
+);
+
+const heldSplit = splitHeldDtrBranchCalendarApprovalMinutes({
+  approvalRows: [
+    {
+      attendanceDate: "2026-03-02",
+      workedMinutes: 480,
+      overtimeMinutes: 60,
+    },
+    {
+      attendanceDate: "2026-03-03",
+      workedMinutes: 120,
+      overtimeMinutes: 30,
+    },
+  ],
+  departmentId: 10,
+  overrideMaps: branchOverrideMaps,
+  accountById: branchAccounts,
+});
+
+assert.equal(
+  heldSplit.branchRows.length,
+  1,
+  "Held DTR approval should use branch calendar account codes for source dates with an override."
+);
+assert.equal(
+  heldSplit.branchRows[0]?.attendanceDate,
+  "2026-03-02",
+  "Held DTR branch-calendar rows should preserve the original source attendance date."
+);
+assert.deepEqual(
+  heldSplit.fallbackWorkedRows.map((row) => ({
+    attendanceDate: row.attendanceDate,
+    quantityMinutes: row.quantityMinutes,
+  })),
+  [{ attendanceDate: "2026-03-03", quantityMinutes: 120 }],
+  "Held DTR worked minutes without a branch override should fall back to generic hold codes only for non-overridden minutes."
+);
+assert.deepEqual(
+  heldSplit.fallbackOvertimeRows.map((row) => ({
+    attendanceDate: row.attendanceDate,
+    quantityMinutes: row.quantityMinutes,
+  })),
+  [{ attendanceDate: "2026-03-03", quantityMinutes: 30 }],
+  "Held DTR overtime without a branch override should fall back to generic hold overtime only for non-overridden minutes."
 );
 
 console.log("Rest-day holiday DTR checks passed.");

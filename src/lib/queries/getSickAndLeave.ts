@@ -125,13 +125,17 @@ export async function getSickAndLeaveWithUsage(year: number, options: TableQuery
     .select({
       employeeId: leaveBalanceLedger.employeeId,
       leaveType: leaveTypes.code,
-      usedDays: sql<string>`ABS(COALESCE(SUM(${leaveBalanceLedger.quantity}), 0))`,
+      usedDays: sql<string>`GREATEST(0, -COALESCE(SUM(${leaveBalanceLedger.quantity}), 0))`,
     })
     .from(leaveBalanceLedger)
     .innerJoin(leaveTypes, eq(leaveBalanceLedger.leaveTypeId, leaveTypes.id))
     .where(and(
       inArray(leaveBalanceLedger.employeeId, employeeIds),
-      eq(leaveBalanceLedger.transactionType, "Used"),
+      inArray(leaveBalanceLedger.transactionType, [
+        "Used",
+        "Encashment",
+        "Reversal",
+      ]),
       sql`(${leaveBalanceLedger.periodYear} = ${year} or (${leaveBalanceLedger.periodYear} is null and extract(year from ${leaveBalanceLedger.entryDate}) = ${year}))`,
     ))
     .groupBy(leaveBalanceLedger.employeeId, leaveTypes.code);
@@ -235,14 +239,18 @@ export async function getLeaveUsageByEmployeeIds(employeeIds: string[]) {
     .select({
       employeeId: leaveBalanceLedger.employeeId,
       leaveType: leaveTypes.code,
-      usedDays: sql<string>`ABS(COALESCE(SUM(${leaveBalanceLedger.quantity}), 0))`,
+      usedDays: sql<string>`GREATEST(0, -COALESCE(SUM(${leaveBalanceLedger.quantity}), 0))`,
     })
     .from(leaveBalanceLedger)
     .innerJoin(leaveTypes, eq(leaveBalanceLedger.leaveTypeId, leaveTypes.id))
     .where(
       and(
         inArray(leaveBalanceLedger.employeeId, employeeIds),
-        eq(leaveBalanceLedger.transactionType, "Used")
+        inArray(leaveBalanceLedger.transactionType, [
+          "Used",
+          "Encashment",
+          "Reversal",
+        ])
       )
     )
     .groupBy(leaveBalanceLedger.employeeId, leaveTypes.code);

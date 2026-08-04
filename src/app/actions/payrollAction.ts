@@ -40,9 +40,15 @@ import {
   saveEmployeePayrollOvertimeOverride,
 } from "@/lib/payroll/overtimeOverrides";
 import {
+  getEmployeePayrollApprovedLeaveAccountCodeRows,
   getEmployeePayrollExceptionRows,
+  getEmployeePayrollManualLeaveAccountCodeRows,
   getEmployeePayrollRecurringEntryRows,
+  getPayrollAccountCodeImportSkippedRows,
   getPayrollExceptionAccountCodeOptions,
+  getRevertablePayrollAccountCodeImportBatches,
+  importPayrollAccountCodeRows,
+  revertPayrollAccountCodeImportsForPeriod,
   saveEmployeePayrollExceptionRows,
 } from "@/lib/payroll/payrollExceptionRows";
 import {
@@ -64,6 +70,8 @@ import {
 } from "@/lib/payroll/reports";
 import { savePayrollOvertimeOverrideSchema } from "@/zod-schemas/payrollOvertimeOverride";
 import {
+  importPayrollAccountCodeRowsSchema,
+  payrollAccountCodeImportPeriodRevertSchema,
   savePayrollExceptionRowsSchema,
   updatePayrollLoanInstallmentAmountSchema,
 } from "@/zod-schemas/payrollExceptionRows";
@@ -456,10 +464,23 @@ export async function getEmployeePayrollExceptionWorkspaceAction(
       employeeId,
     }),
   ]);
+  const [manualLeaveRows, approvedLeaveRows] = await Promise.all([
+    getEmployeePayrollManualLeaveAccountCodeRows({
+      payrollPeriodId,
+      employeeId,
+      accountCodeOptions: codeOptions,
+    }),
+    getEmployeePayrollApprovedLeaveAccountCodeRows({
+      payrollPeriodId,
+      employeeId,
+      accountCodeOptions: codeOptions,
+    }),
+  ]);
 
   return {
     rows,
     recurringRows,
+    leaveRows: [...manualLeaveRows, ...approvedLeaveRows],
     loanRows,
     accountCodeOptions: codeOptions,
   };
@@ -513,6 +534,44 @@ export async function saveEmployeePayrollExceptionRowsAction(input: unknown) {
   const result = await saveEmployeePayrollExceptionRows({
     actorUserId: actor.userId,
     ...payload,
+  });
+  revalidatePath("/payroll");
+  return result;
+}
+
+export async function importPayrollAccountCodeRowsAction(input: unknown) {
+  const actor = await requireAdminActor();
+  const payload = importPayrollAccountCodeRowsSchema.parse(input);
+
+  const result = await importPayrollAccountCodeRows({
+    actorUserId: actor.userId,
+    payload,
+  });
+  revalidatePath("/payroll");
+  return result;
+}
+
+export async function getPayrollAccountCodeImportBatchesAction(
+  payrollPeriodId: string
+) {
+  await requireAdminActor();
+  return getRevertablePayrollAccountCodeImportBatches(payrollPeriodId);
+}
+
+export async function getPayrollAccountCodeImportSkippedRowsAction(
+  batchId: string
+) {
+  await requireAdminActor();
+  return getPayrollAccountCodeImportSkippedRows(batchId);
+}
+
+export async function revertPayrollAccountCodeImportsForPeriodAction(input: unknown) {
+  const actor = await requireAdminActor();
+  const payload = payrollAccountCodeImportPeriodRevertSchema.parse(input);
+
+  const result = await revertPayrollAccountCodeImportsForPeriod({
+    actorUserId: actor.userId,
+    payload,
   });
   revalidatePath("/payroll");
   return result;

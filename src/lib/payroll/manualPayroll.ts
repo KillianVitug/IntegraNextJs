@@ -708,15 +708,41 @@ const ATTENDANCE_REFRESHABLE_MANUAL_CODES = new Set([
   "COLA",
 ]);
 
+const HELD_DTR_REFRESHABLE_MANUAL_CODES = new Set([
+  "1-REG",
+  "2-OT",
+  "6-UT",
+  "9-LATE",
+]);
+
+function isHeldDtrRefreshableManualLine(
+  line: Pick<
+    ManualPayrollEntryLineView,
+    "code" | "description" | "sourceTable"
+  >
+) {
+  if (line.sourceTable?.trim() !== "employee_payroll_exception_rows") {
+    return false;
+  }
+
+  const code = normalizeManualCodeKey(line.code);
+  const description = line.description.trim().toUpperCase();
+  return (
+    HELD_DTR_REFRESHABLE_MANUAL_CODES.has(code) ||
+    description.startsWith("HELD DTR ")
+  );
+}
+
 function createAttendanceRefreshableManualLinePredicate(args?: {
   refreshableExceptionRowIds?: Iterable<string>;
+  refreshHeldDtrLines?: boolean;
 }) {
   const refreshableExceptionRowIds = new Set(args?.refreshableExceptionRowIds ?? []);
 
   return (
     line: Pick<
       ManualPayrollEntryLineView,
-      "accountCodeId" | "code" | "sourceTable" | "sourceId"
+      "accountCodeId" | "code" | "description" | "sourceTable" | "sourceId"
     >
   ) => {
     const code = normalizeManualCodeKey(line.code);
@@ -727,6 +753,12 @@ function createAttendanceRefreshableManualLinePredicate(args?: {
       sourceTable === "employee_payroll_exception_rows" &&
       line.sourceId &&
       refreshableExceptionRowIds.has(line.sourceId)
+    ) {
+      return true;
+    }
+    if (
+      args?.refreshHeldDtrLines &&
+      isHeldDtrRefreshableManualLine(line)
     ) {
       return true;
     }
@@ -1475,6 +1507,7 @@ export async function refreshManualPayrollAttendanceLinesFromBaseline(args: {
   employeeId: string;
   latestBaseline?: ManualPayrollBaselineSnapshot | null;
   refreshableExceptionRowIds?: string[];
+  refreshHeldDtrLines?: boolean;
 }) {
   const latestBaseline = await sanitizeManualPayrollBaselineSnapshot(
     args.latestBaseline
@@ -1513,6 +1546,7 @@ export async function refreshManualPayrollAttendanceLinesFromBaseline(args: {
   const isAttendanceRefreshableLine =
     createAttendanceRefreshableManualLinePredicate({
       refreshableExceptionRowIds: args.refreshableExceptionRowIds,
+      refreshHeldDtrLines: args.refreshHeldDtrLines,
     });
   const mergedLines = mergeManualLinesWithFreshAttendanceRows({
     saved: savedLines,

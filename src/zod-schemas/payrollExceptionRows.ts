@@ -159,6 +159,24 @@ export type SavePayrollExceptionRowsSchemaType = z.infer<
   typeof savePayrollExceptionRowsSchema
 >;
 
+export const importPayrollAccountCodeRowsSchema = z.object({
+  selectedPayrollPeriodId: z.string().uuid(),
+  fileName: z.string().trim().min(1).max(255),
+  contentBase64: z.string().trim().min(1),
+});
+
+export type ImportPayrollAccountCodeRowsSchemaType = z.infer<
+  typeof importPayrollAccountCodeRowsSchema
+>;
+
+export const payrollAccountCodeImportPeriodRevertSchema = z.object({
+  payrollPeriodId: z.string().uuid(),
+});
+
+export type PayrollAccountCodeImportPeriodRevertSchemaType = z.infer<
+  typeof payrollAccountCodeImportPeriodRevertSchema
+>;
+
 export const updatePayrollLoanInstallmentAmountSchema = z.object({
   payrollPeriodId: z.string().uuid(),
   employeeId: z.string().uuid(),

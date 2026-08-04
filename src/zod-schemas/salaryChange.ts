@@ -37,6 +37,8 @@ export const resolvedSalarySourceSchema = z.enum([
   "OnePeriodOverride",
 ]);
 
+export const salaryRateTypeSchema = z.enum(["DailyRate", "MonthlyRate"]);
+
 export const salarySnapshotSchema = z.object({
   dailyRate: requiredRateNumericString,
   monthlyRate: requiredRateNumericString,
@@ -86,6 +88,13 @@ export const cancelSalaryChangeSchema = z.object({
   reason: z.string().trim().min(1, "Reason is required"),
 });
 
+export const bulkCancelSalaryChangesSchema = z.object({
+  changeIds: z
+    .array(z.coerce.number().int().positive())
+    .min(1, "Select at least one salary change"),
+  reason: z.string().trim().min(1, "Reason is required"),
+});
+
 export const makeBaseSalarySchema = z.object({
   employeeId: z.string().uuid(),
   changeId: z.coerce.number().int().positive(),
@@ -94,6 +103,47 @@ export const makeBaseSalarySchema = z.object({
 export const salaryChangePeriodLookupSchema = z.object({
   employeeId: z.string().uuid(),
   payrollPeriodId: z.string().uuid(),
+});
+
+export const salaryChangeWorkspaceLookupSchema = z.object({
+  payrollPeriodId: z.string().uuid(),
+});
+
+export const createDailyRateSalaryChangesSchema = z.object({
+  payrollPeriodId: z.string().uuid(),
+  reason: z.string().trim().min(1, "Reason is required"),
+  notes: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => (value ? value : undefined)),
+  rows: z
+    .array(
+      z.object({
+        employeeId: z.string().uuid(),
+        dailyRate: requiredRateNumericString,
+      })
+    )
+    .min(1, "Select at least one employee"),
+});
+
+export const createSalaryRateSalaryChangesSchema = z.object({
+  payrollPeriodId: z.string().uuid(),
+  salaryRateType: salaryRateTypeSchema,
+  reason: z.string().trim().min(1, "Reason is required"),
+  notes: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => (value ? value : undefined)),
+  rows: z
+    .array(
+      z.object({
+        employeeId: z.string().uuid(),
+        rate: requiredRateNumericString,
+      })
+    )
+    .min(1, "Select at least one employee"),
 });
 
 export const salaryChangeFilterSchema = z.object({
@@ -112,6 +162,12 @@ export const resolvedSalaryReadSchema = z.object({
   adjustmentMode: salaryChangeModeSchema.nullable(),
   resolvedFrom: resolvedSalarySourceSchema,
   latestRunStatus: z.string().nullable(),
+});
+
+export const dailyRateSalaryAdjustmentRowSchema = z.object({
+  employeeId: z.string().uuid(),
+  previousDailyRate: z.string(),
+  previousMonthlyRate: z.string(),
 });
 
 export const salaryChangeHistoryReadSchema = z.object({
@@ -145,9 +201,22 @@ export type SalaryChangeFilter = z.infer<typeof salaryChangeFilterSchema>;
 export type SalaryChangeHistoryRead = z.infer<typeof salaryChangeHistoryReadSchema>;
 export type SalaryChangeMode = z.infer<typeof salaryChangeModeSchema>;
 export type SalaryChangeStatus = z.infer<typeof salaryChangeStatusSchema>;
+export type SalaryRateType = z.infer<typeof salaryRateTypeSchema>;
 export type SalarySnapshot = z.infer<typeof salarySnapshotSchema>;
 export type SalarySnapshotNullable = z.infer<typeof salarySnapshotNullableSchema>;
 export type CreateSalaryChangeInput = z.infer<typeof createSalaryChangeSchema>;
+export type CreateDailyRateSalaryChangesInput = z.infer<
+  typeof createDailyRateSalaryChangesSchema
+>;
+export type CreateSalaryRateSalaryChangesInput = z.infer<
+  typeof createSalaryRateSalaryChangesSchema
+>;
 export type CancelSalaryChangeInput = z.infer<typeof cancelSalaryChangeSchema>;
+export type BulkCancelSalaryChangesInput = z.infer<
+  typeof bulkCancelSalaryChangesSchema
+>;
 export type MakeBaseSalaryInput = z.infer<typeof makeBaseSalarySchema>;
 export type ResolvedSalaryRead = z.infer<typeof resolvedSalaryReadSchema>;
+export type DailyRateSalaryAdjustmentRow = z.infer<
+  typeof dailyRateSalaryAdjustmentRowSchema
+>;

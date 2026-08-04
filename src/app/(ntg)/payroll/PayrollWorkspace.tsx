@@ -9,7 +9,7 @@ import {
   useState,
   useTransition,
 } from "react";
-import type { ReactNode } from "react";
+import type { ChangeEvent, ReactNode } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Building2,
@@ -18,6 +18,7 @@ import {
   ChevronRight,
   RefreshCw,
   Search,
+  Upload,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -39,15 +40,18 @@ import {
   deleteManualPayrollEntryAction,
   getAgencyDeductionSummaryAction,
   getEmployeePayrollExceptionWorkspaceAction,
-  getEmployeePayslipAction,
   getManualPayrollAccountCodeOptionsAction,
   getManualPayrollEntryWorkspaceAction,
+  getPayrollAccountCodeImportBatchesAction,
+  getPayrollAccountCodeImportSkippedRowsAction,
   getPayrollRunEmployeeDetailAction,
   getLoanDeductionSummaryAction,
   getPayrollRegisterAction,
   getPayrollWorkspaceSnapshotAction,
+  importPayrollAccountCodeRowsAction,
   postPayrollRun,
   reviewPayrollRun,
+  revertPayrollAccountCodeImportsForPeriodAction,
   saveManualPayrollEntryAction,
   saveEmployeePayrollExceptionRowsAction,
   seedPayrollPeriods,
@@ -120,15 +124,21 @@ import type {
   ManualPayrollEntryLineView,
   ManualPayrollEntryWorkspaceView,
   ManualPayrollLineSummaryBucket,
+  PayrollAccountCodeReportOptionView,
   PayrollAccountCodeEmployeeView,
   PayrollAgencySummaryView,
+  PayrollDepartmentReportRowView,
   PayrollExceptionAccountCodeOptionView,
   PayrollExceptionRowView,
+  PayrollLineReportRowView,
   PayrollLoanDeductionView,
-  PayrollPayslipView,
+  PayrollManualLeaveAccountCodeRowView,
+  PayrollNetPayReportRowView,
   PayrollPeriodSummary,
   PayrollRecurringEntryRowView,
+  PayrollReportType,
   PayrollRunEmployeeDetailView,
+  PayrollRunEmployeeView,
   PayrollRunLineView,
   PayrollRegisterReportView,
   PayrollRunView,
@@ -321,14 +331,6 @@ type ReportState = {
   error: string | null;
 };
 
-type PayslipState = {
-  status: LoadStatus;
-  runId: string | null;
-  employeeId: string | null;
-  payslip: PayrollPayslipView | null;
-  error: string | null;
-};
-
 type AttendanceDtrState = {
   status: LoadStatus;
   periodId: string | null;
@@ -350,8 +352,50 @@ type PayrollExceptionState = {
   employeeId: string | null;
   rows: PayrollExceptionRowView[];
   recurringRows: PayrollRecurringEntryRowView[];
+  leaveRows: PayrollManualLeaveAccountCodeRowView[];
   loanRows: PayrollScheduledLoanDeductionView[];
   accountCodeOptions: PayrollExceptionAccountCodeOptionView[];
+  error: string | null;
+};
+
+type PayrollAccountCodeImportBatchSummary = {
+  id: string;
+  sourceFileName: string;
+  totalRows: number;
+  insertedRowCount: number;
+  updatedRowCount: number;
+  skippedPeriodMismatchCount: number;
+  skippedInvalidRowCount: number;
+  skippedRowCount: number;
+  storedSkippedRowCount: number;
+  affectedEmployeeCount: number;
+  createdAt: string;
+};
+
+type PayrollAccountCodeImportSkippedRowsView = {
+  batchId: string;
+  skippedRowCount: number;
+  storedSkippedRowCount: number;
+  detailsAvailable: boolean;
+  rows: Array<{
+    sourceLine: number;
+    payrollPeriodCode?: string;
+    employeeNo?: string;
+    accountCode?: string;
+    reason: string;
+  }>;
+};
+
+type PayrollAccountCodeImportBatchState = {
+  status: LoadStatus;
+  periodId: string | null;
+  batches: PayrollAccountCodeImportBatchSummary[];
+  error: string | null;
+};
+
+type PayrollAccountCodeSkippedRowsState = {
+  status: LoadStatus;
+  data: PayrollAccountCodeImportSkippedRowsView | null;
   error: string | null;
 };
 
@@ -435,9 +479,62 @@ const EMPTY_AGENCY_SUMMARY: PayrollAgencySummaryView = {
   sssEc: "0",
 };
 
+const PAYROLL_REPORT_OPTIONS: Array<{
+  value: PayrollReportType;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "department",
+    label: "Department Payroll",
+    description: "Payroll totals grouped by employee department.",
+  },
+  {
+    value: "netPay",
+    label: "Net Pay Report",
+    description: "Employee gross pay, deductions, contributions, and net pay.",
+  },
+  {
+    value: "allowance",
+    label: "Allowance Report",
+    description: "Allowance and COLA earning lines from this run.",
+  },
+  {
+    value: "deduction",
+    label: "Deduction Report",
+    description: "Deduction lines excluding contribution and tax rows.",
+  },
+  {
+    value: "contribution",
+    label: "Contribution Report",
+    description: "Employee and employer contribution and tax rows.",
+  },
+  {
+    value: "accountCode",
+    label: "Account Code Report",
+    description: "Employees and values for the selected payroll line code.",
+  },
+];
+
+const ALLOWANCE_REPORT_CODES = new Set(["M-ALLOW", "D-ALLOW", "COLA"]);
+
+const CONTRIBUTION_REPORT_CODES = new Set([
+  "SSS",
+  "SSS-ER",
+  "SSS-EC",
+  "PHILHEALTH",
+  "PHILHEALTH-ER",
+  "PAGIBIG",
+  "PAGIBIG-ER",
+  "PERAA",
+  "PERAA-ER",
+  "TAX",
+]);
+
 const EMPTY_PAYROLL_EXCEPTION_ACCOUNT_CODE_OPTIONS: PayrollExceptionAccountCodeOptionView[] =
   [];
 const EMPTY_PAYROLL_RECURRING_ENTRY_ROWS: PayrollRecurringEntryRowView[] = [];
+const EMPTY_PAYROLL_MANUAL_LEAVE_ROWS: PayrollManualLeaveAccountCodeRowView[] = [];
 
 const EMPTY_MANUAL_PAYROLL_ACCOUNT_CODE_OPTIONS: ManualPayrollAccountCodeOptionView[] =
   [];
@@ -1841,6 +1938,88 @@ function renderStatutoryAuditCards(employee: {
   );
 }
 
+function PayrollLineReportTable({
+  rows,
+  emptyMessage,
+  selectedEmployeeId,
+  onEmployeeSelect,
+}: {
+  rows: PayrollLineReportRowView[];
+  emptyMessage: string;
+  selectedEmployeeId: string | null;
+  onEmployeeSelect: (employeeId: string) => void;
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Employee No</TableHead>
+            <TableHead>Type</TableHead>
+            <TableHead>Employee</TableHead>
+            <TableHead>Department</TableHead>
+            <TableHead>Line Type</TableHead>
+            <TableHead>Code</TableHead>
+            <TableHead>Description</TableHead>
+            <TableHead>Qty</TableHead>
+            <TableHead>Rate</TableHead>
+            <TableHead>Amount</TableHead>
+            <TableHead>Source</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow
+              key={`${row.id}:${row.employeeId}`}
+              className={cn(
+                "cursor-pointer",
+                row.employeeId === selectedEmployeeId && "bg-muted/60"
+              )}
+              onClick={() => onEmployeeSelect(row.employeeId)}
+            >
+              <TableCell>{formatEmployeeNoDisplay(row.employeeNo)}</TableCell>
+              <TableCell>{row.employeeType ?? "-"}</TableCell>
+              <TableCell className="font-medium">{row.employeeName}</TableCell>
+              <TableCell>
+                {row.departmentName ?? "Unassigned"}
+                {row.departmentCode ? ` (${row.departmentCode})` : ""}
+              </TableCell>
+              <TableCell>{row.lineType}</TableCell>
+              <TableCell className="font-medium">{row.code}</TableCell>
+              <TableCell>
+                <div>{row.description}</div>
+                <div className="text-xs text-muted-foreground">
+                  {row.taxable ? "Taxable" : "Non-taxable"}
+                  {row.month13thEligible ? " | 13th-month eligible" : ""}
+                </div>
+              </TableCell>
+              <TableCell>{formatPayrollLineQuantity(row)}</TableCell>
+              <TableCell>{row.rate ?? "-"}</TableCell>
+              <TableCell className="font-semibold">
+                {formatMoney(row.amount)}
+              </TableCell>
+              <TableCell className="text-xs text-muted-foreground">
+                {row.sourceTable ?? "-"}
+                {row.sourceId ? ` / ${row.sourceId}` : ""}
+              </TableCell>
+            </TableRow>
+          ))}
+          {rows.length === 0 && (
+            <TableRow>
+              <TableCell
+                colSpan={11}
+                className="py-10 text-center text-muted-foreground"
+              >
+                {emptyMessage}
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 const PAYROLL_ACCOUNT_CODE_DEDUCTION_TYPES = new Set<PayrollExceptionAccountType>([
   "Unpaid Leaves/Absences",
   "Loan",
@@ -2715,6 +2894,215 @@ function buildRunSummary(run: PayrollRunView | null) {
   );
 }
 
+function buildRunSummaryFromEmployees(employees: PayrollRunEmployeeView[]) {
+  return employees.reduce(
+    (totals, employee) => {
+      totals.grossPay += toNumber(employee.grossPay);
+      totals.totalDeductions += toNumber(employee.totalDeductions);
+      totals.netPay += toNumber(employee.netPay);
+      totals.employeeContributions += toNumber(employee.employeeContributions);
+      totals.employerContributions += toNumber(employee.employerContributions);
+      return totals;
+    },
+    {
+      grossPay: 0,
+      totalDeductions: 0,
+      netPay: 0,
+      employeeContributions: 0,
+      employerContributions: 0,
+    }
+  );
+}
+
+function buildDepartmentReportRows(
+  employees: PayrollRunEmployeeView[]
+): PayrollDepartmentReportRowView[] {
+  const rowsByDepartment = new Map<string, PayrollDepartmentReportRowView>();
+
+  for (const employee of employees) {
+    const key =
+      employee.departmentId != null
+        ? `department:${employee.departmentId}`
+        : "department:unassigned";
+    const row =
+      rowsByDepartment.get(key) ??
+      ({
+        key,
+        departmentId: employee.departmentId,
+        departmentName: employee.departmentName ?? "Unassigned Department",
+        departmentCode: employee.departmentCode,
+        employeeCount: 0,
+        grossPay: 0,
+        totalDeductions: 0,
+        employeeContributions: 0,
+        employerContributions: 0,
+        netPay: 0,
+      } satisfies PayrollDepartmentReportRowView);
+
+    row.employeeCount += 1;
+    row.grossPay += toNumber(employee.grossPay);
+    row.totalDeductions += toNumber(employee.totalDeductions);
+    row.employeeContributions += toNumber(employee.employeeContributions);
+    row.employerContributions += toNumber(employee.employerContributions);
+    row.netPay += toNumber(employee.netPay);
+    rowsByDepartment.set(key, row);
+  }
+
+  return [...rowsByDepartment.values()].sort((left, right) =>
+    left.departmentName.localeCompare(right.departmentName)
+  );
+}
+
+function buildNetPayReportRows(
+  employees: PayrollRunEmployeeView[]
+): PayrollNetPayReportRowView[] {
+  return employees.map((employee) => ({
+    employeeId: employee.employeeId,
+    employeeNo: employee.employeeNoSnapshot,
+    employeeType:
+      getEmployeeTypeDisplay({ employeeNo: employee.employeeNoSnapshot }) || null,
+    employeeName: employee.employeeNameSnapshot,
+    departmentName: employee.departmentName,
+    departmentCode: employee.departmentCode,
+    grossPay: employee.grossPay,
+    totalDeductions: employee.totalDeductions,
+    employeeContributions: employee.employeeContributions,
+    employerContributions: employee.employerContributions,
+    netPay: employee.netPay,
+  }));
+}
+
+function isContributionReportLine(line: PayrollRunLineView) {
+  return (
+    line.lineType === "Employer Contribution" ||
+    CONTRIBUTION_REPORT_CODES.has(line.code.toUpperCase())
+  );
+}
+
+function isAllowanceReportLine(line: PayrollRunLineView) {
+  const normalizedCode = line.code.toUpperCase();
+  const normalizedDescription = line.description.toLowerCase();
+
+  return (
+    line.lineType === "Earning" &&
+    (ALLOWANCE_REPORT_CODES.has(normalizedCode) ||
+      normalizedDescription.includes("allowance"))
+  );
+}
+
+function isDeductionReportLine(line: PayrollRunLineView) {
+  return line.lineType === "Deduction" && !isContributionReportLine(line);
+}
+
+function buildLineReportRows(
+  employees: PayrollRunEmployeeView[],
+  predicate: (line: PayrollRunLineView) => boolean
+): PayrollLineReportRowView[] {
+  return employees
+    .flatMap((employee) =>
+      employee.lines.filter(predicate).map((line) => ({
+        id: line.id,
+        employeeId: employee.employeeId,
+        employeeNo: employee.employeeNoSnapshot,
+        employeeType:
+          getEmployeeTypeDisplay({ employeeNo: employee.employeeNoSnapshot }) ||
+          null,
+        employeeName: employee.employeeNameSnapshot,
+        departmentName: employee.departmentName,
+        departmentCode: employee.departmentCode,
+        lineType: line.lineType,
+        code: line.code,
+        description: line.description,
+        quantity: line.quantity,
+        rate: line.rate,
+        amount: line.amount,
+        taxable: line.taxable,
+        month13thEligible: line.month13thEligible,
+        sourceTable: line.sourceTable,
+        sourceId: line.sourceId,
+      }))
+    )
+    .sort((left, right) => {
+      const byCode = left.code.localeCompare(right.code);
+      if (byCode !== 0) return byCode;
+      const byName = left.employeeName.localeCompare(right.employeeName);
+      if (byName !== 0) return byName;
+      return left.employeeNo.localeCompare(right.employeeNo);
+    });
+}
+
+function buildAccountCodeReportOptions(
+  lineRows: PayrollLineReportRowView[]
+): PayrollAccountCodeReportOptionView[] {
+  const rowsByCode = new Map<
+    string,
+    PayrollAccountCodeReportOptionView & { employeeIds: Set<string> }
+  >();
+
+  for (const row of lineRows) {
+    const existing =
+      rowsByCode.get(row.code) ??
+      ({
+        code: row.code,
+        description: row.description,
+        lineType: row.lineType,
+        employeeCount: 0,
+        lineCount: 0,
+        totalAmount: 0,
+        employeeIds: new Set<string>(),
+      } satisfies PayrollAccountCodeReportOptionView & {
+        employeeIds: Set<string>;
+      });
+
+    existing.lineCount += 1;
+    existing.totalAmount += toNumber(row.amount);
+    existing.employeeIds.add(row.employeeId);
+    existing.employeeCount = existing.employeeIds.size;
+
+    if (!existing.description && row.description) {
+      existing.description = row.description;
+    }
+
+    rowsByCode.set(row.code, existing);
+  }
+
+  return [...rowsByCode.values()]
+    .map((option) => ({
+      code: option.code,
+      description: option.description,
+      lineType: option.lineType,
+      employeeCount: option.employeeCount,
+      lineCount: option.lineCount,
+      totalAmount: option.totalAmount,
+    }))
+    .sort((left, right) => left.code.localeCompare(right.code));
+}
+
+function formatAccountCodeReportOptionName(
+  option: Pick<PayrollAccountCodeReportOptionView, "code" | "description">
+) {
+  const code = option.code.trim();
+  const description = option.description.trim();
+
+  if (description && description.toLowerCase() !== code.toLowerCase()) {
+    return `${code} - ${description}`;
+  }
+
+  return code;
+}
+
+function formatAccountCodeReportOptionLabel(
+  option: PayrollAccountCodeReportOptionView
+) {
+  return `${formatAccountCodeReportOptionName(option)} - ${formatMoney(
+    option.totalAmount
+  )}`;
+}
+
+function sumLineReportAmount(rows: PayrollLineReportRowView[]) {
+  return rows.reduce((total, row) => total + toNumber(row.amount), 0);
+}
+
 function deleteCacheKeys<T>(
   cacheRef: { current: Record<string, T> },
   prefixes: string[]
@@ -2760,6 +3148,8 @@ export function PayrollWorkspace({
     useState<AttendanceImportResult | null>(null);
   const [replaceExistingAttendance, setReplaceExistingAttendance] = useState(false);
   const [fileInputKey, setFileInputKey] = useState(0);
+  const [payrollAccountCodeImportInputKey, setPayrollAccountCodeImportInputKey] =
+    useState(0);
   const [reportState, setReportState] = useState<ReportState>({
     status: "idle",
     runId: null,
@@ -2768,13 +3158,9 @@ export function PayrollWorkspace({
     loanDeductions: [],
     error: null,
   });
-  const [payslipState, setPayslipState] = useState<PayslipState>({
-    status: "idle",
-    runId: null,
-    employeeId: null,
-    payslip: null,
-    error: null,
-  });
+  const [selectedReportType, setSelectedReportType] =
+    useState<PayrollReportType>("department");
+  const [selectedReportAccountCode, setSelectedReportAccountCode] = useState("");
   const [attendanceDtrState, setAttendanceDtrState] = useState<AttendanceDtrState>({
     status: "idle",
     periodId: null,
@@ -2796,6 +3182,7 @@ export function PayrollWorkspace({
       employeeId: null,
       rows: [],
       recurringRows: [],
+      leaveRows: [],
       loanRows: [],
       accountCodeOptions: [],
       error: null,
@@ -2803,6 +3190,15 @@ export function PayrollWorkspace({
   const [payrollExceptionDrafts, setPayrollExceptionDrafts] = useState<
     PayrollExceptionDraft[]
   >([]);
+  const [
+    payrollAccountCodeImportBatchState,
+    setPayrollAccountCodeImportBatchState,
+  ] = useState<PayrollAccountCodeImportBatchState>({
+    status: "idle",
+    periodId: null,
+    batches: [],
+    error: null,
+  });
   const [manualPayrollState, setManualPayrollState] = useState<ManualPayrollState>({
     status: "idle",
     periodId: null,
@@ -2867,6 +3263,10 @@ export function PayrollWorkspace({
   const [expandedAttendanceBatchIds, setExpandedAttendanceBatchIds] = useState<
     Set<string>
   >(new Set());
+  const [
+    expandedPayrollAccountCodeImportBatchIds,
+    setExpandedPayrollAccountCodeImportBatchIds,
+  ] = useState<Set<string>>(new Set());
   const [expandedUnmatchedGroupKeys, setExpandedUnmatchedGroupKeys] = useState<
     Set<string>
   >(new Set());
@@ -2889,6 +3289,10 @@ export function PayrollWorkspace({
   ] = useState<Set<string>>(new Set());
   const [attendanceBatchDiagnosticsById, setAttendanceBatchDiagnosticsById] =
     useState<Record<string, AttendanceBatchDiagnosticsState>>({});
+  const [
+    payrollAccountCodeSkippedRowsById,
+    setPayrollAccountCodeSkippedRowsById,
+  ] = useState<Record<string, PayrollAccountCodeSkippedRowsState>>({});
   const [employeeDetailsByKey, setEmployeeDetailsByKey] = useState<
     Record<string, PayrollRunEmployeeDetailView>
   >({});
@@ -2897,7 +3301,6 @@ export function PayrollWorkspace({
   >({});
   const employeeDetailRequestsRef = useRef<Set<string>>(new Set());
   const reportCacheRef = useRef<Record<string, ReportState>>({});
-  const payslipCacheRef = useRef<Record<string, PayslipState>>({});
   const attendanceDtrCacheRef = useRef<Record<string, AttendanceDtrState>>({});
   const attendanceDtrRowsCacheRef = useRef<Record<string, AttendanceDtrRowsState>>(
     {}
@@ -2905,6 +3308,7 @@ export function PayrollWorkspace({
   const payrollExceptionCacheRef = useRef<Record<string, PayrollExceptionState>>(
     {}
   );
+  const payrollAccountCodeImportInputRef = useRef<HTMLInputElement | null>(null);
   const manualPayrollAccountCodeOptionsRef = useRef<
     ManualPayrollAccountCodeOptionView[] | null
   >(null);
@@ -3104,6 +3508,62 @@ export function PayrollWorkspace({
   const runSummary = useMemo(() => buildRunSummary(selectedRun), [selectedRun]);
   const agencySummary = selectedRun?.agencySummary ?? EMPTY_AGENCY_SUMMARY;
   const reportAgencySummary = reportState.agencySummary ?? EMPTY_AGENCY_SUMMARY;
+  const reportRegisterEmployees = useMemo(
+    () => sortEmployeesByLastName(reportState.register?.employees ?? []),
+    [reportState.register?.employees]
+  );
+  const reportRunSummary = useMemo(
+    () => buildRunSummaryFromEmployees(reportRegisterEmployees),
+    [reportRegisterEmployees]
+  );
+  const departmentReportRows = useMemo(
+    () => buildDepartmentReportRows(reportRegisterEmployees),
+    [reportRegisterEmployees]
+  );
+  const netPayReportRows = useMemo(
+    () => buildNetPayReportRows(reportRegisterEmployees),
+    [reportRegisterEmployees]
+  );
+  const allowanceReportRows = useMemo(
+    () => buildLineReportRows(reportRegisterEmployees, isAllowanceReportLine),
+    [reportRegisterEmployees]
+  );
+  const deductionReportRows = useMemo(
+    () => buildLineReportRows(reportRegisterEmployees, isDeductionReportLine),
+    [reportRegisterEmployees]
+  );
+  const contributionReportRows = useMemo(
+    () => buildLineReportRows(reportRegisterEmployees, isContributionReportLine),
+    [reportRegisterEmployees]
+  );
+  const accountCodeReportRows = useMemo(
+    () => buildLineReportRows(reportRegisterEmployees, () => true),
+    [reportRegisterEmployees]
+  );
+  const accountCodeReportOptions = useMemo(
+    () => buildAccountCodeReportOptions(accountCodeReportRows),
+    [accountCodeReportRows]
+  );
+  const selectedAccountCodeReportRows = useMemo(
+    () =>
+      accountCodeReportRows.filter(
+        (row) => row.code === selectedReportAccountCode
+      ),
+    [accountCodeReportRows, selectedReportAccountCode]
+  );
+  const selectedReportOption =
+    PAYROLL_REPORT_OPTIONS.find((option) => option.value === selectedReportType) ??
+    PAYROLL_REPORT_OPTIONS[0];
+  const selectedAccountCodeReportOption =
+    accountCodeReportOptions.find(
+      (option) => option.code === selectedReportAccountCode
+    ) ?? null;
+  const allowanceReportTotal = sumLineReportAmount(allowanceReportRows);
+  const deductionReportTotal = sumLineReportAmount(deductionReportRows);
+  const contributionReportTotal = sumLineReportAmount(contributionReportRows);
+  const selectedAccountCodeReportTotal = sumLineReportAmount(
+    selectedAccountCodeReportRows
+  );
   const attendanceDtrEmployees = useMemo(
     () => sortEmployeesByLastName(attendanceDtrState.data?.employees ?? []),
     [attendanceDtrState.data?.employees]
@@ -3271,6 +3731,16 @@ export function PayrollWorkspace({
       payrollExceptionStateMatchesSelectedEmployee,
     ]
   );
+  const payrollManualLeaveRows = useMemo(
+    () =>
+      payrollExceptionStateMatchesSelectedEmployee
+        ? payrollExceptionState.leaveRows
+        : EMPTY_PAYROLL_MANUAL_LEAVE_ROWS,
+    [
+      payrollExceptionState.leaveRows,
+      payrollExceptionStateMatchesSelectedEmployee,
+    ]
+  );
   const payrollLoanRows = useMemo(
     () =>
       payrollExceptionStateMatchesSelectedEmployee
@@ -3372,8 +3842,19 @@ export function PayrollWorkspace({
       ),
     [payrollAccountCodeLineTab, payrollRecurringRows]
   );
+  const visiblePayrollManualLeaveRows = useMemo(
+    () =>
+      payrollManualLeaveRows.filter(
+        (row) =>
+          getPayrollAccountCodeLineTab(row.accountTypeSnapshot) ===
+          payrollAccountCodeLineTab
+      ),
+    [payrollAccountCodeLineTab, payrollManualLeaveRows]
+  );
   const visiblePayrollAccountCodeRowCount =
-    visiblePayrollExceptionDrafts.length + visiblePayrollRecurringRows.length;
+    visiblePayrollExceptionDrafts.length +
+    visiblePayrollRecurringRows.length +
+    visiblePayrollManualLeaveRows.length;
   const payrollExceptionIncomeCount = useMemo(
     () =>
       payrollExceptionDrafts.filter(
@@ -3381,12 +3862,16 @@ export function PayrollWorkspace({
       ).length +
       payrollRecurringRows.filter(
         (row) => getPayrollAccountCodeLineTab(row.accountTypeSnapshot) === "income"
+      ).length +
+      payrollManualLeaveRows.filter(
+        (row) => getPayrollAccountCodeLineTab(row.accountTypeSnapshot) === "income"
       ).length,
-    [payrollExceptionDrafts, payrollRecurringRows]
+    [payrollExceptionDrafts, payrollManualLeaveRows, payrollRecurringRows]
   );
   const payrollExceptionDeductionCount =
     payrollExceptionDrafts.length +
-    payrollRecurringRows.length -
+    payrollRecurringRows.length +
+    payrollManualLeaveRows.length -
     payrollExceptionIncomeCount;
   const payrollDeductionTabCount =
     payrollExceptionDeductionCount + payrollLoanRows.length;
@@ -3648,6 +4133,7 @@ export function PayrollWorkspace({
         employeeId: null,
         rows: [],
         recurringRows: [],
+        leaveRows: [],
         loanRows: [],
         accountCodeOptions: [],
         error: null,
@@ -3675,6 +4161,7 @@ export function PayrollWorkspace({
       employeeId,
       rows: [],
       recurringRows: [],
+      leaveRows: [],
       loanRows: [],
       accountCodeOptions: [],
       error: null,
@@ -3695,6 +4182,7 @@ export function PayrollWorkspace({
           employeeId,
           rows: workspace.rows,
           recurringRows: workspace.recurringRows,
+          leaveRows: workspace.leaveRows,
           loanRows: workspace.loanRows,
           accountCodeOptions: workspace.accountCodeOptions,
           error: null,
@@ -3713,6 +4201,7 @@ export function PayrollWorkspace({
           employeeId,
           rows: [],
           recurringRows: [],
+          leaveRows: [],
           loanRows: [],
           accountCodeOptions: [],
           error: getErrorMessage(
@@ -3831,6 +4320,30 @@ export function PayrollWorkspace({
   }, [payrollLoanRows]);
 
   useEffect(() => {
+    if (selectedReportType !== "accountCode") return;
+
+    if (accountCodeReportOptions.length === 0) {
+      if (selectedReportAccountCode) {
+        setSelectedReportAccountCode("");
+      }
+      return;
+    }
+
+    if (
+      !selectedReportAccountCode ||
+      !accountCodeReportOptions.some(
+        (option) => option.code === selectedReportAccountCode
+      )
+    ) {
+      setSelectedReportAccountCode(accountCodeReportOptions[0].code);
+    }
+  }, [
+    accountCodeReportOptions,
+    selectedReportAccountCode,
+    selectedReportType,
+  ]);
+
+  useEffect(() => {
     if (activeTab !== "reports") return;
 
     if (!selectedRunId) {
@@ -3901,73 +4414,6 @@ export function PayrollWorkspace({
       cancelled = true;
     };
   }, [activeTab, selectedRunId]);
-
-  useEffect(() => {
-    if (activeTab !== "reports") return;
-
-    if (!selectedRunId || !selectedEmployeeId) {
-      setPayslipState({
-        status: "idle",
-        runId: null,
-        employeeId: null,
-        payslip: null,
-        error: null,
-      });
-      return;
-    }
-
-    const cacheKey = `payslip:${selectedRunId}:${selectedEmployeeId}`;
-    const cachedState = payslipCacheRef.current[cacheKey];
-    if (cachedState) {
-      setPayslipState(cachedState);
-      return;
-    }
-
-    let cancelled = false;
-
-    setPayslipState({
-      status: "loading",
-      runId: selectedRunId,
-      employeeId: selectedEmployeeId,
-      payslip: null,
-      error: null,
-    });
-
-    void (async () => {
-      try {
-        const payslip = await getEmployeePayslipAction(
-          selectedRunId,
-          selectedEmployeeId
-        );
-
-        if (cancelled) return;
-
-        const nextState: PayslipState = {
-          status: "ready",
-          runId: selectedRunId,
-          employeeId: selectedEmployeeId,
-          payslip,
-          error: null,
-        };
-        payslipCacheRef.current[cacheKey] = nextState;
-        setPayslipState(nextState);
-      } catch (error) {
-        if (cancelled) return;
-
-        setPayslipState({
-          status: "error",
-          runId: selectedRunId,
-          employeeId: selectedEmployeeId,
-          payslip: null,
-          error: getErrorMessage(error, "Unable to load the employee payslip."),
-        });
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeTab, selectedEmployeeId, selectedRunId]);
 
   useEffect(() => {
     if (activeTab !== "attendance") return;
@@ -4537,15 +4983,34 @@ export function PayrollWorkspace({
         undertimeMinutes,
         overtimeMinutes,
       });
+      const generatedAccountCodeRowCount = result.affectedTargetPeriods.reduce(
+        (total, period) => total + period.generatedAccountCodeRowCount,
+        0
+      );
+      const staleRunCount = result.affectedTargetPeriods.reduce(
+        (total, period) => total + period.staleRunCount,
+        0
+      );
       toast.success(
         `${employee.employeeName} Attendance Hold approved for ${result.targetPayrollPeriodCode}.`
       );
+      toast.message("Attendance Hold payroll rows", {
+        description: `${generatedAccountCodeRowCount} combined account-code row${
+          generatedAccountCodeRowCount === 1 ? "" : "s"
+        } generated. ${staleRunCount} payroll run${
+          staleRunCount === 1 ? "" : "s"
+        } marked stale.`,
+      });
       setAttendanceHoldApprovalDrafts((prev) => {
         const next = { ...prev };
         delete next[employee.employeeId];
         return next;
       });
       setAttendanceDtrReloadKey((key) => key + 1);
+      await refreshPayrollAccountCodesAfterAttendanceHoldChange({
+        employeeId: employee.employeeId,
+        affectedTargetPeriods: result.affectedTargetPeriods,
+      });
       await refreshWorkspaceSnapshot();
     } catch (error) {
       toast.error(getErrorMessage(error, "Unable to approve held biometrics."));
@@ -4593,17 +5058,36 @@ export function PayrollWorkspace({
         employeeId: employee.employeeId,
         attendanceDates: submittedDates,
       });
+      const generatedAccountCodeRowCount = result.affectedTargetPeriods.reduce(
+        (total, period) => total + period.generatedAccountCodeRowCount,
+        0
+      );
+      const staleRunCount = result.affectedTargetPeriods.reduce(
+        (total, period) => total + period.staleRunCount,
+        0
+      );
       toast.success(
         `${employee.employeeName} Attendance Hold reset for ${result.resetDateCount} row${
           result.resetDateCount === 1 ? "" : "s"
         }.`
       );
+      toast.message("Attendance Hold payroll rows", {
+        description: `${generatedAccountCodeRowCount} combined account-code row${
+          generatedAccountCodeRowCount === 1 ? "" : "s"
+        } remain after reset. ${staleRunCount} payroll run${
+          staleRunCount === 1 ? "" : "s"
+        } marked stale.`,
+      });
       setAttendanceHoldApprovalDrafts((prev) => {
         const next = { ...prev };
         delete next[employee.employeeId];
         return next;
       });
       setAttendanceDtrReloadKey((key) => key + 1);
+      await refreshPayrollAccountCodesAfterAttendanceHoldChange({
+        employeeId: employee.employeeId,
+        affectedTargetPeriods: result.affectedTargetPeriods,
+      });
       await refreshWorkspaceSnapshot();
     } catch (error) {
       toast.error(getErrorMessage(error, "Unable to reset held biometrics."));
@@ -4678,6 +5162,20 @@ export function PayrollWorkspace({
     selectedPayrollAccountCodeEmployeeId,
   ]);
 
+  useEffect(() => {
+    if (!selectedPeriodKey) {
+      setPayrollAccountCodeImportBatchState({
+        status: "idle",
+        periodId: null,
+        batches: [],
+        error: null,
+      });
+      return;
+    }
+
+    void refreshPayrollAccountCodeImportBatches(selectedPeriodKey);
+  }, [selectedPeriodKey]);
+
   function replaceQueryParams(updates: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams.toString());
 
@@ -4700,7 +5198,6 @@ export function PayrollWorkspace({
 
   function invalidatePayrollResourceCache(prefixes: string[]) {
     deleteCacheKeys(reportCacheRef, prefixes);
-    deleteCacheKeys(payslipCacheRef, prefixes);
     deleteCacheKeys(attendanceDtrCacheRef, prefixes);
     deleteCacheKeys(attendanceDtrRowsCacheRef, prefixes);
     deleteCacheKeys(payrollExceptionCacheRef, prefixes);
@@ -4788,6 +5285,91 @@ export function PayrollWorkspace({
     }
 
     await refreshManualPayrollWorkspace({ preserveDirtyDraft: false });
+  }
+
+  async function refreshPayrollAccountCodeImportBatches(periodId: string) {
+    setPayrollAccountCodeImportBatchState((current) => ({
+      status: "loading",
+      periodId,
+      batches: current.periodId === periodId ? current.batches : [],
+      error: null,
+    }));
+
+    try {
+      const batches = await getPayrollAccountCodeImportBatchesAction(periodId);
+      setPayrollAccountCodeImportBatchState({
+        status: "ready",
+        periodId,
+        batches,
+        error: null,
+      });
+    } catch (error) {
+      setPayrollAccountCodeImportBatchState({
+        status: "error",
+        periodId,
+        batches: [],
+        error: getErrorMessage(error, "Unable to load imported files."),
+      });
+    }
+  }
+
+  async function refreshSelectedPayrollAccountCodeWorkspace(periodId: string) {
+    const selectedEmployeeId =
+      selectedPayrollAccountCodeEmployee?.employeeId ?? null;
+
+    if (!selectedEmployeeId) return null;
+
+    const workspace = await getEmployeePayrollExceptionWorkspaceAction(
+      periodId,
+      selectedEmployeeId
+    );
+    const nextState: PayrollExceptionState = {
+      status: "ready",
+      periodId,
+      employeeId: selectedEmployeeId,
+      rows: workspace.rows,
+      recurringRows: workspace.recurringRows,
+      leaveRows: workspace.leaveRows,
+      loanRows: workspace.loanRows,
+      accountCodeOptions: workspace.accountCodeOptions,
+      error: null,
+    };
+
+    payrollExceptionCacheRef.current[`exceptions:${periodId}:${selectedEmployeeId}`] =
+      nextState;
+    setPayrollExceptionState(nextState);
+    setPayrollExceptionDrafts(
+      workspace.rows.map((row) => createPayrollExceptionDraft(row))
+    );
+
+    return workspace;
+  }
+
+  async function refreshPayrollAccountCodesAfterAttendanceHoldChange(args: {
+    employeeId: string;
+    affectedTargetPeriods: Array<{
+      payrollPeriodId: string;
+      generatedAccountCodeRowCount: number;
+      staleRunCount: number;
+    }>;
+  }) {
+    const affectedPeriodIds = [
+      ...new Set(args.affectedTargetPeriods.map((period) => period.payrollPeriodId)),
+    ];
+
+    if (affectedPeriodIds.length === 0) return;
+
+    invalidatePayrollResourceCache(
+      affectedPeriodIds.flatMap((periodId) => [`exceptions:${periodId}:`])
+    );
+
+    if (
+      selectedPeriod &&
+      affectedPeriodIds.includes(selectedPeriod.id) &&
+      selectedPayrollAccountCodeEmployee?.employeeId === args.employeeId
+    ) {
+      await refreshSelectedPayrollAccountCodeWorkspace(selectedPeriod.id);
+    }
   }
 
   function updatePayrollExceptionDraft(
@@ -4886,6 +5468,7 @@ export function PayrollWorkspace({
         employeeId: selectedPayrollAccountCodeEmployee.employeeId,
         rows: result.rows,
         recurringRows: payrollExceptionState.recurringRows,
+        leaveRows: payrollExceptionState.leaveRows,
         loanRows: payrollExceptionState.loanRows,
         accountCodeOptions: payrollExceptionState.accountCodeOptions,
         error: null,
@@ -4914,6 +5497,210 @@ export function PayrollWorkspace({
     } finally {
       setSavingPayrollExceptions(false);
     }
+  }
+
+  async function handleImportPayrollAccountCodeFile(
+    event: ChangeEvent<HTMLInputElement>
+  ) {
+    const file = event.currentTarget.files?.[0] ?? null;
+    event.currentTarget.value = "";
+    setPayrollAccountCodeImportInputKey((current) => current + 1);
+
+    if (!file) return;
+
+    if (!selectedPeriod) {
+      toast.error("Select a payroll period first.");
+      return;
+    }
+
+    let importSuccessMessage = "Account-code import finished.";
+
+    await runAction(
+      "import-account-codes",
+      async () => {
+        const contentBase64 = await readFileAsBase64(file);
+        const result = await importPayrollAccountCodeRowsAction({
+          selectedPayrollPeriodId: selectedPeriod.id,
+          fileName: file.name,
+          contentBase64,
+        });
+
+        const skippedParts = [
+          result.skippedPeriodMismatchCount > 0
+            ? `${result.skippedPeriodMismatchCount} period mismatch`
+            : null,
+          result.skippedInvalidRowCount > 0
+            ? `${result.skippedInvalidRowCount} invalid/unmatched`
+            : null,
+        ].filter(Boolean);
+
+        if (result.importedRowCount === 0) {
+          const firstSkippedReason = result.skippedRows[0]?.reason;
+          throw new Error(
+            firstSkippedReason
+              ? `No account-code rows imported. ${firstSkippedReason}`
+              : "No account-code rows imported."
+          );
+        }
+
+        importSuccessMessage = `${result.importedRowCount} account-code row${
+          result.importedRowCount === 1 ? "" : "s"
+        } imported for ${result.affectedEmployeeCount} employee${
+          result.affectedEmployeeCount === 1 ? "" : "s"
+        }.`;
+
+        const detailMessage = [
+          `${result.insertedRowCount} inserted, ${result.updatedRowCount} updated.`,
+          skippedParts.length > 0 ? `Skipped: ${skippedParts.join(", ")}.` : null,
+          `${result.staleRunCount} payroll run${
+            result.staleRunCount === 1 ? "" : "s"
+          } marked stale.`,
+        ]
+          .filter(Boolean)
+          .join(" ");
+
+        toast.message("Account-code import details", {
+          description: detailMessage,
+        });
+        await refreshPayrollAccountCodeImportBatches(selectedPeriod.id);
+
+        if (result.skippedRows.length > 0) {
+          toast.message("First skipped import row", {
+            description: `Line ${result.skippedRows[0].sourceLine}: ${result.skippedRows[0].reason}`,
+          });
+        }
+
+        invalidatePayrollResourceCache([
+          `exceptions:${selectedPeriod.id}:`,
+          `attendance-summary:${selectedPeriod.id}`,
+          `attendance-rows:${selectedPeriod.id}:`,
+          ...(selectedRunId
+            ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
+            : []),
+        ]);
+
+        const selectedEmployeeId =
+          selectedPayrollAccountCodeEmployee?.employeeId ?? null;
+        if (
+          selectedEmployeeId &&
+          result.affectedEmployeeIds.includes(selectedEmployeeId)
+        ) {
+          const workspace = await getEmployeePayrollExceptionWorkspaceAction(
+            selectedPeriod.id,
+            selectedEmployeeId
+          );
+          const nextState: PayrollExceptionState = {
+            status: "ready",
+            periodId: selectedPeriod.id,
+            employeeId: selectedEmployeeId,
+            rows: workspace.rows,
+            recurringRows: workspace.recurringRows,
+            leaveRows: workspace.leaveRows,
+            loanRows: workspace.loanRows,
+            accountCodeOptions: workspace.accountCodeOptions,
+            error: null,
+          };
+
+          payrollExceptionCacheRef.current[
+            `exceptions:${selectedPeriod.id}:${selectedEmployeeId}`
+          ] = nextState;
+          setPayrollExceptionState(nextState);
+          setPayrollExceptionDrafts(
+            workspace.rows.map((row) => createPayrollExceptionDraft(row))
+          );
+        }
+      },
+      () => importSuccessMessage
+    );
+  }
+
+  async function handleRevertPayrollAccountCodeImport() {
+    if (!selectedPeriod) {
+      toast.error("Select a payroll period first.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Revert all account-code imports for ${selectedPeriod.code}? This removes rows created by imported files and restores account-code rows that those imports updated.`
+    );
+
+    if (!confirmed) return;
+
+    let revertSuccessMessage = "Account-code import reverted.";
+
+    await runAction(
+      "revert-account-code-import",
+      async () => {
+        const result = await revertPayrollAccountCodeImportsForPeriodAction({
+          payrollPeriodId: selectedPeriod.id,
+        });
+
+        const totalRemovedRows =
+          result.deletedRowCount + result.legacyDeletedRowCount;
+        revertSuccessMessage =
+          result.revertedBatchCount === 0 && totalRemovedRows === 0
+            ? `No account-code imports found for ${selectedPeriod.code}.`
+            : `Account-code imports reverted: ${result.revertedBatchCount} file${
+                result.revertedBatchCount === 1 ? "" : "s"
+              }, ${totalRemovedRows} imported row${
+                totalRemovedRows === 1 ? "" : "s"
+              } removed, ${result.restoredRowCount} previous row${
+                result.restoredRowCount === 1 ? "" : "s"
+              } restored.`;
+
+        if (
+          result.revertedBatchCount > 0 ||
+          totalRemovedRows > 0 ||
+          result.restoredRowCount > 0
+        ) {
+          toast.message("Account-code import revert details", {
+            description: `${result.affectedEmployeeCount} employee${
+              result.affectedEmployeeCount === 1 ? "" : "s"
+            } affected. ${result.staleRunCount} payroll run${
+              result.staleRunCount === 1 ? "" : "s"
+            } marked stale.`,
+          });
+        }
+        await refreshPayrollAccountCodeImportBatches(selectedPeriod.id);
+        invalidatePayrollResourceCache([
+          `exceptions:${selectedPeriod.id}:`,
+          `attendance-summary:${selectedPeriod.id}`,
+          `attendance-rows:${selectedPeriod.id}:`,
+          ...(selectedRunId
+            ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
+            : []),
+        ]);
+
+        const selectedEmployeeId =
+          selectedPayrollAccountCodeEmployee?.employeeId ?? null;
+        if (selectedEmployeeId) {
+          const workspace = await getEmployeePayrollExceptionWorkspaceAction(
+            selectedPeriod.id,
+            selectedEmployeeId
+          );
+          const nextState: PayrollExceptionState = {
+            status: "ready",
+            periodId: selectedPeriod.id,
+            employeeId: selectedEmployeeId,
+            rows: workspace.rows,
+            recurringRows: workspace.recurringRows,
+            leaveRows: workspace.leaveRows,
+            loanRows: workspace.loanRows,
+            accountCodeOptions: workspace.accountCodeOptions,
+            error: null,
+          };
+
+          payrollExceptionCacheRef.current[
+            `exceptions:${selectedPeriod.id}:${selectedEmployeeId}`
+          ] = nextState;
+          setPayrollExceptionState(nextState);
+          setPayrollExceptionDrafts(
+            workspace.rows.map((row) => createPayrollExceptionDraft(row))
+          );
+        }
+      },
+      () => revertSuccessMessage
+    );
   }
 
   async function handleSavePayrollLoanInstallment(row: PayrollScheduledLoanDeductionView) {
@@ -4951,6 +5738,7 @@ export function PayrollWorkspace({
         employeeId: selectedPayrollAccountCodeEmployee.employeeId,
         rows: payrollExceptionState.rows,
         recurringRows: payrollExceptionState.recurringRows,
+        leaveRows: payrollExceptionState.leaveRows,
         loanRows: result.loanRows,
         accountCodeOptions: payrollExceptionState.accountCodeOptions,
         error: null,
@@ -5169,6 +5957,14 @@ export function PayrollWorkspace({
           ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
           : []),
       ]);
+      if (
+        selectedPayrollAccountCodeEmployee?.employeeId ===
+        workspaceForCache.employee.employeeId
+      ) {
+        await refreshSelectedPayrollAccountCodeWorkspace(
+          workspaceForCache.payrollPeriod.id
+        );
+      }
       await refreshWorkspaceSnapshot();
     } catch (error) {
       toast.error(getErrorMessage(error, "Unable to save manual payroll."));
@@ -5222,6 +6018,14 @@ export function PayrollWorkspace({
           ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
           : []),
       ]);
+      if (
+        selectedPayrollAccountCodeEmployee?.employeeId ===
+        workspaceForCache.employee.employeeId
+      ) {
+        await refreshSelectedPayrollAccountCodeWorkspace(
+          workspaceForCache.payrollPeriod.id
+        );
+      }
       await refreshWorkspaceSnapshot();
     } catch (error) {
       toast.error(getErrorMessage(error, "Unable to delete manual payroll."));
@@ -5282,6 +6086,7 @@ export function PayrollWorkspace({
         employeeId: selectedDtrEmployee.employeeId,
         rows: result.payrollExceptionWorkspace.rows,
         recurringRows: result.payrollExceptionWorkspace.recurringRows,
+        leaveRows: result.payrollExceptionWorkspace.leaveRows,
         loanRows: result.payrollExceptionWorkspace.loanRows,
         accountCodeOptions: result.payrollExceptionWorkspace.accountCodeOptions,
         error: null,
@@ -5393,6 +6198,7 @@ export function PayrollWorkspace({
         employeeId: selectedDtrEmployee.employeeId,
         rows: result.payrollExceptionWorkspace.rows,
         recurringRows: result.payrollExceptionWorkspace.recurringRows,
+        leaveRows: result.payrollExceptionWorkspace.leaveRows,
         loanRows: result.payrollExceptionWorkspace.loanRows,
         accountCodeOptions: result.payrollExceptionWorkspace.accountCodeOptions,
         error: null,
@@ -5511,6 +6317,62 @@ export function PayrollWorkspace({
       diagnosticsState?.status !== "ready"
     ) {
       void loadAttendanceBatchDiagnostics(batchId);
+    }
+  }
+
+  async function loadPayrollAccountCodeSkippedRows(batchId: string) {
+    setPayrollAccountCodeSkippedRowsById((current) => ({
+      ...current,
+      [batchId]: {
+        status: "loading",
+        data: current[batchId]?.data ?? null,
+        error: null,
+      },
+    }));
+
+    try {
+      const data = await getPayrollAccountCodeImportSkippedRowsAction(batchId);
+
+      setPayrollAccountCodeSkippedRowsById((current) => ({
+        ...current,
+        [batchId]: {
+          status: "ready",
+          data,
+          error: null,
+        },
+      }));
+    } catch (error) {
+      setPayrollAccountCodeSkippedRowsById((current) => ({
+        ...current,
+        [batchId]: {
+          status: "error",
+          data: null,
+          error: getErrorMessage(error, "Unable to load skipped rows."),
+        },
+      }));
+    }
+  }
+
+  function handleTogglePayrollAccountCodeImportBatch(batchId: string) {
+    const isExpanded = expandedPayrollAccountCodeImportBatchIds.has(batchId);
+
+    setExpandedPayrollAccountCodeImportBatchIds((current) => {
+      const next = new Set(current);
+      if (isExpanded) {
+        next.delete(batchId);
+      } else {
+        next.add(batchId);
+      }
+      return next;
+    });
+
+    const skippedRowsState = payrollAccountCodeSkippedRowsById[batchId];
+    if (
+      !isExpanded &&
+      skippedRowsState?.status !== "loading" &&
+      skippedRowsState?.status !== "ready"
+    ) {
+      void loadPayrollAccountCodeSkippedRows(batchId);
     }
   }
 
@@ -5642,9 +6504,18 @@ export function PayrollWorkspace({
       async () => {
         const result = await refreshAttendancePeriodSummariesAction(selectedPeriod.id);
         setAttendanceDtrReloadKey((current) => current + 1);
+        invalidatePayrollResourceCache([
+          `exceptions:${selectedPeriod.id}:`,
+          `attendance-summary:${selectedPeriod.id}`,
+          `attendance-rows:${selectedPeriod.id}:`,
+          ...(selectedRunId
+            ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
+            : []),
+        ]);
+        await refreshSelectedPayrollAccountCodeWorkspace(selectedPeriod.id);
 
         toast.message("Attendance summaries refreshed", {
-          description: `${result.payrollPeriodCode}: ${result.summaryCount} summary row(s) rebuilt for ${result.employeeCount} employee(s). ${result.staleRunCount} payroll run(s) marked stale.`,
+          description: `${result.payrollPeriodCode}: ${result.summaryCount} summary row(s) rebuilt for ${result.employeeCount} employee(s), ${result.generatedAccountCodeRowCount} payroll account-code row(s) regenerated. ${result.staleRunCount} payroll run(s) marked stale.`,
         });
       },
       "Attendance summaries refreshed."
@@ -5912,8 +6783,45 @@ export function PayrollWorkspace({
     const recurringRows = payrollRecurringRows.filter(
       (row) => getPayrollAccountCodeLineTab(row.accountTypeSnapshot) === lineTab
     );
-    const hasRows = drafts.length > 0 || recurringRows.length > 0;
+    const leaveRows = payrollManualLeaveRows.filter(
+      (row) => getPayrollAccountCodeLineTab(row.accountTypeSnapshot) === lineTab
+    );
+    const hasRows =
+      drafts.length > 0 || recurringRows.length > 0 || leaveRows.length > 0;
     const columnCount = isDeductionTab ? 7 : 9;
+
+    function renderReadOnlyHoursMinutes(args: {
+      hours: number;
+      minutes: number;
+      label: string;
+    }) {
+      const hasQuantity = args.hours > 0 || args.minutes > 0;
+
+      if (!hasQuantity) {
+        return <span className="text-sm text-muted-foreground">-</span>;
+      }
+
+      return (
+        <div className="flex items-center gap-2">
+          <Input
+            value={String(args.hours)}
+            inputMode="numeric"
+            aria-label={`Hours for ${args.label}`}
+            className="w-16"
+            disabled
+          />
+          <span className="text-xs text-muted-foreground">h</span>
+          <Input
+            value={String(args.minutes)}
+            inputMode="numeric"
+            aria-label={`Minutes for ${args.label}`}
+            className="w-16"
+            disabled
+          />
+          <span className="text-xs text-muted-foreground">m</span>
+        </div>
+      );
+    }
 
     return (
       <div className="overflow-x-auto rounded-md border">
@@ -6234,6 +7142,93 @@ export function PayrollWorkspace({
                         <Input
                           value={row.sourceRemark}
                           aria-label={`Recurring entry source for ${row.accountCodeSnapshot}`}
+                          className="min-w-[180px]"
+                          disabled
+                        />
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <span className="text-sm text-muted-foreground">-</span>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+                {leaveRows.map((row) => {
+                  const selectedAccountOption =
+                    payrollExceptionAccountCodeOptions.find(
+                      (option) => option.id === row.accountCodeId
+                    ) ?? null;
+                  const amountValue = formatMoneyInput(row.amount);
+
+                  return (
+                    <TableRow key={row.id} className="bg-muted/20">
+                      <TableCell>
+                        <PayrollAccountCodePicker
+                          value={String(row.accountCodeId)}
+                          options={accountOptions}
+                          snapshotCode={row.accountCodeSnapshot}
+                          onChange={() => undefined}
+                          disabled
+                        />
+                      </TableCell>
+                      <TableCell className="min-w-[150px] text-sm">
+                        <div className="flex flex-col gap-1">
+                          <span>{row.accountTypeSnapshot}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {row.sourceLabel}
+                          </span>
+                        </div>
+                      </TableCell>
+                      {!isDeductionTab && (
+                        <TableCell className="whitespace-nowrap text-sm">
+                          {formatDecimalUpTo4(selectedAccountOption?.dailyRate)}
+                        </TableCell>
+                      )}
+                      {!isDeductionTab && (
+                        <TableCell className="whitespace-nowrap text-sm">
+                          {formatDecimalUpTo4(selectedAccountOption?.monthlyRate)}
+                        </TableCell>
+                      )}
+                      <TableCell>
+                        {renderReadOnlyHoursMinutes({
+                          hours: row.hours,
+                          minutes: row.minutes,
+                          label: row.accountCodeSnapshot,
+                        })}
+                      </TableCell>
+                      {isDeductionTab && (
+                        <TableCell>
+                          <Input
+                            value={amountValue}
+                            inputMode="decimal"
+                            aria-label={`Manual payroll leave deduction amount for ${row.accountCodeSnapshot}`}
+                            className="w-32"
+                            disabled
+                          />
+                        </TableCell>
+                      )}
+                      <TableCell className="min-w-[170px] text-sm">
+                        <div>
+                          <div>{formatMoney(row.amount)}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {row.sourceLabel}
+                          </div>
+                        </div>
+                      </TableCell>
+                      {!isDeductionTab && (
+                        <TableCell>
+                          <Input
+                            value={amountValue}
+                            inputMode="decimal"
+                            aria-label={`Manual payroll leave amount for ${row.accountCodeSnapshot}`}
+                            className="w-32"
+                            disabled
+                          />
+                        </TableCell>
+                      )}
+                      <TableCell>
+                        <Input
+                          value={row.sourceRemark}
+                          aria-label={`Manual payroll leave source for ${row.accountCodeSnapshot}`}
                           className="min-w-[180px]"
                           disabled
                         />
@@ -6856,8 +7851,23 @@ export function PayrollWorkspace({
 
                       void runAction(
                         "void-run",
-                        () => voidPayrollRun(selectedRun.id, reason),
-                        "Payroll run voided."
+                        async () => {
+                          await voidPayrollRun(selectedRun.id, reason);
+                          invalidatePayrollResourceCache([
+                            `exceptions:${selectedPeriod.id}:`,
+                            `attendance-summary:${selectedPeriod.id}`,
+                            `attendance-rows:${selectedPeriod.id}:`,
+                            `reports:${selectedRun.id}`,
+                            `payslip:${selectedRun.id}:`,
+                          ]);
+                          await refreshPayrollAccountCodeImportBatches(
+                            selectedPeriod.id
+                          );
+                          await refreshSelectedPayrollAccountCodeWorkspace(
+                            selectedPeriod.id
+                          );
+                        },
+                        "Payroll run voided. Non-held payroll account-code rows were cleared; approved held attendance was retained."
                       );
                     }}
                     disabled={!canVoid || actionState !== null || isNavigating}
@@ -7605,8 +8615,9 @@ export function PayrollWorkspace({
             <Card>
               <CardContent className="py-10">
                 <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-                  Compute a payroll run for the selected period to load payroll
-                  register, payslip, agency summary, and loan deduction reports.
+                  Compute a payroll run for the selected period to load selected-run
+                  department, net pay, allowance, deduction, contribution, account
+                  code, agency, and payslip reports.
                 </div>
               </CardContent>
             </Card>
@@ -7621,7 +8632,7 @@ export function PayrollWorkspace({
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="grid gap-3 md:grid-cols-4">
+                  <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-7">
                     <div className="rounded-lg border p-3">
                       <div className="text-xs uppercase tracking-wide text-muted-foreground">
                         Run
@@ -7650,58 +8661,85 @@ export function PayrollWorkspace({
                     </div>
                     <div className="rounded-lg border p-3">
                       <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                        Adjusted Pay Date
+                        Employees
                       </div>
                       <div className="mt-1 text-lg font-semibold">
+                        {reportState.status === "ready"
+                          ? reportRegisterEmployees.length
+                          : runEmployees.length}
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        Selected run rows
+                      </div>
+                    </div>
+                    <div className="rounded-lg border p-3">
+                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                        Gross Pay
+                      </div>
+                      <div className="mt-1 text-lg font-semibold">
+                        {formatMoney(
+                          reportState.status === "ready"
+                            ? reportRunSummary.grossPay
+                            : runSummary.grossPay
+                        )}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border p-3">
+                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                        Deductions
+                      </div>
+                      <div className="mt-1 text-lg font-semibold">
+                        {formatMoney(
+                          reportState.status === "ready"
+                            ? reportRunSummary.totalDeductions
+                            : runSummary.totalDeductions
+                        )}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border p-3">
+                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                        Net Pay
+                      </div>
+                      <div className="mt-1 text-lg font-semibold">
+                        {formatMoney(
+                          reportState.status === "ready"
+                            ? reportRunSummary.netPay
+                            : runSummary.netPay
+                        )}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border p-3">
+                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                        Employer Share
+                      </div>
+                      <div className="mt-1 text-lg font-semibold">
+                        {formatMoney(
+                          reportState.status === "ready"
+                            ? reportRunSummary.employerContributions
+                            : runSummary.employerContributions
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="rounded-lg border p-3">
+                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                        Adjusted Pay Date
+                      </div>
+                      <div className="mt-1 font-semibold">
                         {selectedRun.payrollPeriod?.adjustedPayDate ?? "-"}
                       </div>
                       <div className="text-sm text-muted-foreground">
                         Created {formatDateTime(selectedRun.createdAt)}
                       </div>
                     </div>
-                    <div className="rounded-lg border p-3">
-                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                        Payslip Employee
-                      </div>
-                      <div className="mt-2">
-                        {runEmployees.length > 0 ? (
-                          <Select
-                            value={
-                              selectedEmployee?.employeeId ??
-                              runEmployees[0]?.employeeId
-                            }
-                            onValueChange={setSelectedEmployeeId}
-                          >
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select employee" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {runEmployees.map((employee) => (
-                                <SelectItem
-                                  key={employee.employeeId}
-                                  value={employee.employeeId}
-                                >
-                                  {formatEmployeePickerLabel({
-                                    employeeNo: employee.employeeNoSnapshot,
-                                    fallbackName: employee.employeeNameSnapshot,
-                                  })}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        ) : (
-                          <div className="text-sm text-muted-foreground">
-                            No employees available in this run.
-                          </div>
-                        )}
-                      </div>
-                    </div>
                   </div>
 
                   <div className="rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
-                    Opening this tab loads the selected-run reports without
-                    changing the payroll workflow. Changing the employee selector
-                    refreshes only the payslip section below.
+                    Opening this tab loads selected-run report snapshots without
+                    changing the payroll workflow. The report selector below reads
+                    from stored payroll_run_employees and payroll_run_lines.
                   </div>
                 </CardContent>
               </Card>
@@ -7709,8 +8747,7 @@ export function PayrollWorkspace({
               {reportState.status === "loading" && (
                 <Card>
                   <CardContent className="py-10 text-center text-sm text-muted-foreground">
-                    Loading payroll register, agency summary, and loan deduction
-                    report data...
+                    Loading selected-run payroll report data...
                   </CardContent>
                 </Card>
               )}
@@ -7726,16 +8763,151 @@ export function PayrollWorkspace({
               )}
 
               {reportState.status === "ready" && reportState.register && (
-                <div className="grid gap-6 xl:grid-cols-[1.25fr_1fr]">
-                  <Card>
-                    <CardHeader className="pb-3">
-                      <CardTitle>Payroll Register</CardTitle>
-                      <CardDescription>
-                        Employee-level totals loaded from the payroll register
-                        report for this run.
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-4 p-0">
+                <Card>
+                  <CardHeader className="pb-3">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div>
+                        <CardTitle>{selectedReportOption.label}</CardTitle>
+                        <CardDescription>
+                          {selectedReportOption.description}
+                        </CardDescription>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2 lg:w-[560px]">
+                        <Select
+                          value={selectedReportType}
+                          onValueChange={(value) =>
+                            setSelectedReportType(value as PayrollReportType)
+                          }
+                        >
+                          <SelectTrigger aria-label="Select payroll report">
+                            <SelectValue placeholder="Select report" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {PAYROLL_REPORT_OPTIONS.map((option) => (
+                              <SelectItem key={option.value} value={option.value}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+
+                        {selectedReportType === "accountCode" ? (
+                          accountCodeReportOptions.length > 0 ? (
+                            <Select
+                              value={selectedReportAccountCode}
+                              onValueChange={setSelectedReportAccountCode}
+                            >
+                              <SelectTrigger aria-label="Select account code report code">
+                                <SelectValue placeholder="Select account code" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {accountCodeReportOptions.map((option) => (
+                                  <SelectItem key={option.code} value={option.code}>
+                                    {formatAccountCodeReportOptionLabel(option)}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          ) : (
+                            <div className="rounded-md border border-dashed px-3 py-2 text-sm text-muted-foreground">
+                              No payroll line codes in this run.
+                            </div>
+                          )
+                        ) : null}
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-4 p-0">
+                    {selectedReportType === "department" && (
+                      <>
+                        <div className="grid gap-3 px-6 md:grid-cols-4">
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Departments
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {departmentReportRows.length}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Employees
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {reportRegisterEmployees.length}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Gross Pay
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {formatMoney(reportRunSummary.grossPay)}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Net Pay
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {formatMoney(reportRunSummary.netPay)}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <Table>
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead>Department</TableHead>
+                                <TableHead>Code</TableHead>
+                                <TableHead>Employees</TableHead>
+                                <TableHead>Gross</TableHead>
+                                <TableHead>Deductions</TableHead>
+                                <TableHead>Employee Share</TableHead>
+                                <TableHead>Employer Share</TableHead>
+                                <TableHead>Net</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {departmentReportRows.map((row) => (
+                                <TableRow key={row.key}>
+                                  <TableCell className="font-medium">
+                                    {row.departmentName}
+                                  </TableCell>
+                                  <TableCell>{row.departmentCode ?? "-"}</TableCell>
+                                  <TableCell>{row.employeeCount}</TableCell>
+                                  <TableCell>{formatMoney(row.grossPay)}</TableCell>
+                                  <TableCell>
+                                    {formatMoney(row.totalDeductions)}
+                                  </TableCell>
+                                  <TableCell>
+                                    {formatMoney(row.employeeContributions)}
+                                  </TableCell>
+                                  <TableCell>
+                                    {formatMoney(row.employerContributions)}
+                                  </TableCell>
+                                  <TableCell className="font-semibold">
+                                    {formatMoney(row.netPay)}
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                              {departmentReportRows.length === 0 && (
+                                <TableRow>
+                                  <TableCell
+                                    colSpan={8}
+                                    className="py-10 text-center text-muted-foreground"
+                                  >
+                                    This payroll run does not contain department rows.
+                                  </TableCell>
+                                </TableRow>
+                              )}
+                            </TableBody>
+                          </Table>
+                        </div>
+                      </>
+                    )}
+
+                    {selectedReportType === "netPay" && (
                       <div className="overflow-x-auto">
                         <Table>
                           <TableHeader>
@@ -7743,58 +8915,58 @@ export function PayrollWorkspace({
                               <TableHead>Employee No</TableHead>
                               <TableHead>Type</TableHead>
                               <TableHead>Employee</TableHead>
-                              <TableHead>Basis</TableHead>
+                              <TableHead>Department</TableHead>
                               <TableHead>Gross</TableHead>
                               <TableHead>Deductions</TableHead>
+                              <TableHead>Employee Share</TableHead>
+                              <TableHead>Employer Share</TableHead>
                               <TableHead>Net</TableHead>
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {reportState.register.employees.map((employee) => (
+                            {netPayReportRows.map((row) => (
                               <TableRow
-                                key={employee.id}
+                                key={row.employeeId}
                                 className={cn(
                                   "cursor-pointer",
-                                  employee.employeeId === selectedEmployee?.employeeId &&
+                                  row.employeeId === selectedEmployee?.employeeId &&
                                     "bg-muted/60"
                                 )}
-                                onClick={() => setSelectedEmployeeId(employee.employeeId)}
+                                onClick={() => setSelectedEmployeeId(row.employeeId)}
                               >
                                 <TableCell>
-                                  {formatEmployeeNoDisplay(
-                                    employee.employeeNoSnapshot
-                                  )}
+                                  {formatEmployeeNoDisplay(row.employeeNo)}
                                 </TableCell>
-                                <TableCell>
-                                  {getEmployeeTypeDisplay({
-                                    employeeNo: employee.employeeNoSnapshot,
-                                  }) || "-"}
-                                </TableCell>
+                                <TableCell>{row.employeeType ?? "-"}</TableCell>
                                 <TableCell className="font-medium">
-                                  {employee.employeeNameSnapshot}
+                                  {row.employeeName}
                                 </TableCell>
                                 <TableCell>
-                                  {renderPayComputationModeBadge(
-                                    employee.payComputationMode,
-                                    employee.isManualPayrollOverride
-                                  )}
+                                  {row.departmentName ?? "Unassigned"}
+                                  {row.departmentCode ? ` (${row.departmentCode})` : ""}
                                 </TableCell>
-                                <TableCell>{formatMoney(employee.grossPay)}</TableCell>
+                                <TableCell>{formatMoney(row.grossPay)}</TableCell>
                                 <TableCell>
-                                  {formatMoney(employee.totalDeductions)}
+                                  {formatMoney(row.totalDeductions)}
+                                </TableCell>
+                                <TableCell>
+                                  {formatMoney(row.employeeContributions)}
+                                </TableCell>
+                                <TableCell>
+                                  {formatMoney(row.employerContributions)}
                                 </TableCell>
                                 <TableCell className="font-semibold">
-                                  {formatMoney(employee.netPay)}
+                                  {formatMoney(row.netPay)}
                                 </TableCell>
                               </TableRow>
                             ))}
-                            {reportState.register.employees.length === 0 && (
+                            {netPayReportRows.length === 0 && (
                               <TableRow>
                                 <TableCell
-                                  colSpan={7}
+                                  colSpan={9}
                                   className="py-10 text-center text-muted-foreground"
                                 >
-                                  This payroll register does not contain any employee
+                                  This payroll run does not contain employee net pay
                                   rows.
                                 </TableCell>
                               </TableRow>
@@ -7802,85 +8974,179 @@ export function PayrollWorkspace({
                           </TableBody>
                         </Table>
                       </div>
+                    )}
 
-                      <div className="px-6 pb-6 text-xs text-muted-foreground">
-                        Run #{reportState.register.runNumber} created{" "}
-                        {formatDateTime(reportState.register.createdAt)}
-                        {reportState.register.computedAt
-                          ? ` and last computed ${formatDateTime(
-                              reportState.register.computedAt
-                            )}.`
-                          : "."}
-                      </div>
-                    </CardContent>
-                  </Card>
+                    {selectedReportType === "allowance" && (
+                      <>
+                        <div className="grid gap-3 px-6 md:grid-cols-3">
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Line Count
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {allowanceReportRows.length}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Employees
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {new Set(allowanceReportRows.map((row) => row.employeeId)).size}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Total
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {formatMoney(allowanceReportTotal)}
+                            </div>
+                          </div>
+                        </div>
+                        <PayrollLineReportTable
+                          rows={allowanceReportRows}
+                          emptyMessage="No allowance or COLA lines were posted for this payroll run."
+                          onEmployeeSelect={setSelectedEmployeeId}
+                          selectedEmployeeId={selectedEmployee?.employeeId ?? null}
+                        />
+                      </>
+                    )}
 
-                  <Card>
-                    <CardHeader className="pb-3">
-                      <CardTitle>Agency Summary</CardTitle>
-                      <CardDescription>
-                        Government contribution and withholding totals loaded from
-                        the agency summary report.
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-3 text-sm">
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="rounded-lg border p-3">
-                          <div className="text-muted-foreground">SSS Employee</div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(reportAgencySummary.sssEmployee)}
+                    {selectedReportType === "deduction" && (
+                      <>
+                        <div className="grid gap-3 px-6 md:grid-cols-3">
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Line Count
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {deductionReportRows.length}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Employees
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {new Set(deductionReportRows.map((row) => row.employeeId)).size}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Total
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {formatMoney(deductionReportTotal)}
+                            </div>
                           </div>
                         </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-muted-foreground">SSS Employer</div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(reportAgencySummary.sssEmployer)}
+                        <PayrollLineReportTable
+                          rows={deductionReportRows}
+                          emptyMessage="No non-contribution deduction lines were posted for this payroll run."
+                          onEmployeeSelect={setSelectedEmployeeId}
+                          selectedEmployeeId={selectedEmployee?.employeeId ?? null}
+                        />
+                      </>
+                    )}
+
+                    {selectedReportType === "contribution" && (
+                      <>
+                        <div className="grid gap-3 px-6 md:grid-cols-3">
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Line Count
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {contributionReportRows.length}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Employees
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {new Set(contributionReportRows.map((row) => row.employeeId)).size}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Total
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {formatMoney(contributionReportTotal)}
+                            </div>
                           </div>
                         </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-muted-foreground">SSS EC</div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(reportAgencySummary.sssEc)}
+                        <PayrollLineReportTable
+                          rows={contributionReportRows}
+                          emptyMessage="No contribution or tax lines were posted for this payroll run."
+                          onEmployeeSelect={setSelectedEmployeeId}
+                          selectedEmployeeId={selectedEmployee?.employeeId ?? null}
+                        />
+                      </>
+                    )}
+
+                    {selectedReportType === "accountCode" && (
+                      <>
+                        <div className="grid gap-3 px-6 md:grid-cols-4">
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Selected Code
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {selectedAccountCodeReportOption
+                                ? formatAccountCodeReportOptionName(
+                                    selectedAccountCodeReportOption
+                                  )
+                                : selectedReportAccountCode || "-"}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Employees
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {selectedAccountCodeReportOption?.employeeCount ?? 0}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Lines
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {selectedAccountCodeReportRows.length}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border p-3">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Total
+                            </div>
+                            <div className="mt-1 font-semibold">
+                              {formatMoney(selectedAccountCodeReportTotal)}
+                            </div>
                           </div>
                         </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-muted-foreground">
-                            PhilHealth Employee
-                          </div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(reportAgencySummary.philhealthEmployee)}
-                          </div>
-                        </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-muted-foreground">
-                            PhilHealth Employer
-                          </div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(reportAgencySummary.philhealthEmployer)}
-                          </div>
-                        </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-muted-foreground">Pag-IBIG Employee</div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(reportAgencySummary.pagibigEmployee)}
-                          </div>
-                        </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-muted-foreground">Pag-IBIG Employer</div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(reportAgencySummary.pagibigEmployer)}
-                          </div>
-                        </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-muted-foreground">Withholding Tax</div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(reportAgencySummary.withholdingTax)}
-                          </div>
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                </div>
+                        <PayrollLineReportTable
+                          rows={selectedAccountCodeReportRows}
+                          emptyMessage="Select an account code to show employees and values from this payroll run."
+                          onEmployeeSelect={setSelectedEmployeeId}
+                          selectedEmployeeId={selectedEmployee?.employeeId ?? null}
+                        />
+                      </>
+                    )}
+
+                    <div className="px-6 pb-6 text-xs text-muted-foreground">
+                      Run #{reportState.register.runNumber} created{" "}
+                      {formatDateTime(reportState.register.createdAt)}
+                      {reportState.register.computedAt
+                        ? ` and last computed ${formatDateTime(
+                            reportState.register.computedAt
+                          )}.`
+                        : "."}
+                    </div>
+                  </CardContent>
+                </Card>
               )}
 
               {reportState.status === "ready" && !reportState.register && (
@@ -7891,263 +9157,74 @@ export function PayrollWorkspace({
                 </Card>
               )}
 
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle>Employee Payslip</CardTitle>
-                  <CardDescription>
-                    Detailed line items loaded for the currently selected employee
-                    only.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  {runEmployees.length === 0 ? (
-                    <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-                      No employees are available in the selected payroll run.
-                    </div>
-                  ) : payslipState.status === "loading" ? (
-                    <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-                      Loading payslip for {selectedEmployee?.employeeNameSnapshot ?? "the selected employee"}...
-                    </div>
-                  ) : payslipState.status === "error" ? (
-                    <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
-                      {payslipState.error ?? "Unable to load the employee payslip."}
-                    </div>
-                  ) : payslipState.payslip ? (
-                    <>
-                      <div className="grid gap-3 md:grid-cols-5">
-                        <div className="rounded-lg border p-3">
-                          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                            Employee
-                          </div>
-                          <div className="mt-1 font-semibold">
-                            {payslipState.payslip.employeeNameSnapshot}
-                          </div>
-                          <div className="text-sm text-muted-foreground">
-                            {formatEmployeeNoDisplay(
-                              payslipState.payslip.employeeNoSnapshot
-                            )}
-                          </div>
-                        </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                            Computation Basis
-                          </div>
-                          <div className="mt-2">
-                            {renderPayComputationModeBadge(
-                              payslipState.payslip.payComputationMode,
-                              payslipState.payslip.isManualPayrollOverride
-                            )}
-                          </div>
-                        </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                            Period Code
-                          </div>
-                          <div className="mt-1 font-semibold">
-                            {payslipState.payslip.payrollRun?.payrollPeriod?.code ?? "-"}
-                          </div>
-                          <div className="text-sm text-muted-foreground">
-                            {payslipState.payslip.payrollRun?.payrollPeriod?.startDate ?? "-"} to{" "}
-                            {payslipState.payslip.payrollRun?.payrollPeriod?.endDate ?? "-"}
-                          </div>
-                        </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                            Adjusted Pay Date
-                          </div>
-                          <div className="mt-1 font-semibold">
-                            {payslipState.payslip.payrollRun?.payrollPeriod?.adjustedPayDate ?? "-"}
-                          </div>
-                          <div className="text-sm text-muted-foreground">
-                            Run #{payslipState.payslip.payrollRun?.runNumber ?? "-"}
-                          </div>
-                        </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                            Run Status
-                          </div>
-                          <div className="mt-2">
-                            <span
-                              className={cn(
-                                "inline-flex rounded-full px-2 py-1 text-xs font-medium",
-                                getToneClass(payslipState.payslip.payrollRun?.status)
-                              )}
-                            >
-                              {payslipState.payslip.payrollRun?.status ?? "-"}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="grid gap-3 md:grid-cols-5">
-                        <div className="rounded-lg border p-3">
-                          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                            Gross Pay
-                          </div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(payslipState.payslip.grossPay)}
-                          </div>
-                        </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                            Taxable Pay
-                          </div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(payslipState.payslip.taxablePay)}
-                          </div>
-                        </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                            Deductions
-                          </div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(payslipState.payslip.totalDeductions)}
-                          </div>
-                        </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                            Employee Share
-                          </div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(payslipState.payslip.employeeContributions)}
-                          </div>
-                        </div>
-                        <div className="rounded-lg border p-3">
-                          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                            Net Pay
-                          </div>
-                          <div className="mt-1 font-semibold">
-                            {formatMoney(payslipState.payslip.netPay)}
-                          </div>
-                        </div>
-                      </div>
-
-                      {payslipState.payslip.breakdownNotes && (
-                        <div className="rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
-                          {payslipState.payslip.breakdownNotes}
-                        </div>
-                      )}
-
-                      {renderStatutoryAuditCards(payslipState.payslip)}
-
-                      <div className="overflow-x-auto">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Type</TableHead>
-                              <TableHead>Code</TableHead>
-                              <TableHead>Description</TableHead>
-                              <TableHead>Qty</TableHead>
-                              <TableHead>Rate</TableHead>
-                              <TableHead>Amount</TableHead>
-                              <TableHead>Source</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {payslipState.payslip.lines.map((line) => (
-                              <TableRow key={line.id}>
-                                <TableCell>{line.lineType}</TableCell>
-                                <TableCell className="font-medium">{line.code}</TableCell>
-                                <TableCell>
-                                  <div>{line.description}</div>
-                                  <div className="text-xs text-muted-foreground">
-                                    {line.taxable ? "Taxable" : "Non-taxable"}
-                                    {line.month13thEligible
-                                      ? " | 13th-month eligible"
-                                      : ""}
-                                  </div>
-                                </TableCell>
-                                <TableCell>{formatPayrollLineQuantity(line)}</TableCell>
-                                <TableCell>{line.rate ?? "-"}</TableCell>
-                                <TableCell>{formatMoney(line.amount)}</TableCell>
-                                <TableCell className="text-xs text-muted-foreground">
-                                  {line.sourceTable ?? "-"}
-                                </TableCell>
-                              </TableRow>
-                            ))}
-                            {payslipState.payslip.lines.length === 0 && (
-                              <TableRow>
-                                <TableCell
-                                  colSpan={7}
-                                  className="py-10 text-center text-muted-foreground"
-                                >
-                                  No payroll line items were returned for this payslip.
-                                </TableCell>
-                              </TableRow>
-                            )}
-                          </TableBody>
-                        </Table>
-                      </div>
-                    </>
-                  ) : (
-                    <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-                      No payslip is available for the selected employee.
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-
               {reportState.status === "ready" && (
                 <Card>
                   <CardHeader className="pb-3">
-                    <CardTitle>Loan Deduction Summary</CardTitle>
+                    <CardTitle>Agency Summary</CardTitle>
                     <CardDescription>
-                      Loan deduction lines loaded from the selected payroll run.
+                      Government contribution and withholding totals loaded from
+                      the selected payroll run.
                     </CardDescription>
                   </CardHeader>
-                  <CardContent className="p-0">
-                    <div className="overflow-x-auto">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>Employee No</TableHead>
-                            <TableHead>Type</TableHead>
-                            <TableHead>Employee</TableHead>
-                            <TableHead>Description</TableHead>
-                            <TableHead>Source</TableHead>
-                            <TableHead>Amount</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {reportState.loanDeductions.map((row) => (
-                            <TableRow key={`${row.employeeId}-${row.sourceId ?? row.description}`}>
-                              <TableCell>
-                                {formatEmployeeNoDisplay(row.employeeNo)}
-                              </TableCell>
-                              <TableCell>
-                                {getEmployeeTypeDisplay({
-                                  employeeNo: row.employeeNo,
-                                }) || "-"}
-                              </TableCell>
-                              <TableCell className="font-medium">
-                                {row.employeeName}
-                              </TableCell>
-                              <TableCell>{row.description}</TableCell>
-                              <TableCell className="text-xs text-muted-foreground">
-                                {row.sourceId ?? "-"}
-                              </TableCell>
-                              <TableCell className="font-semibold">
-                                {formatMoney(row.amount)}
-                              </TableCell>
-                            </TableRow>
-                          ))}
-                          {reportState.loanDeductions.length === 0 && (
-                            <TableRow>
-                              <TableCell
-                                colSpan={6}
-                                className="py-10 text-center text-muted-foreground"
-                              >
-                                No loan deduction lines were posted for this payroll
-                                run.
-                              </TableCell>
-                            </TableRow>
-                          )}
-                        </TableBody>
-                      </Table>
+                  <CardContent className="space-y-3 text-sm">
+                    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                      <div className="rounded-lg border p-3">
+                        <div className="text-muted-foreground">SSS Employee</div>
+                        <div className="mt-1 font-semibold">
+                          {formatMoney(reportAgencySummary.sssEmployee)}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border p-3">
+                        <div className="text-muted-foreground">SSS Employer</div>
+                        <div className="mt-1 font-semibold">
+                          {formatMoney(reportAgencySummary.sssEmployer)}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border p-3">
+                        <div className="text-muted-foreground">SSS EC</div>
+                        <div className="mt-1 font-semibold">
+                          {formatMoney(reportAgencySummary.sssEc)}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border p-3">
+                        <div className="text-muted-foreground">
+                          PhilHealth Employee
+                        </div>
+                        <div className="mt-1 font-semibold">
+                          {formatMoney(reportAgencySummary.philhealthEmployee)}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border p-3">
+                        <div className="text-muted-foreground">
+                          PhilHealth Employer
+                        </div>
+                        <div className="mt-1 font-semibold">
+                          {formatMoney(reportAgencySummary.philhealthEmployer)}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border p-3">
+                        <div className="text-muted-foreground">Pag-IBIG Employee</div>
+                        <div className="mt-1 font-semibold">
+                          {formatMoney(reportAgencySummary.pagibigEmployee)}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border p-3">
+                        <div className="text-muted-foreground">Pag-IBIG Employer</div>
+                        <div className="mt-1 font-semibold">
+                          {formatMoney(reportAgencySummary.pagibigEmployer)}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border p-3">
+                        <div className="text-muted-foreground">Withholding Tax</div>
+                        <div className="mt-1 font-semibold">
+                          {formatMoney(reportAgencySummary.withholdingTax)}
+                        </div>
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
               )}
+
             </>
           )}
         </TabsContent>
@@ -8735,6 +9812,41 @@ export function PayrollWorkspace({
                           </div>
                         </div>
                         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                          <Input
+                            key={payrollAccountCodeImportInputKey}
+                            ref={payrollAccountCodeImportInputRef}
+                            type="file"
+                            accept=".txt,.tsv,text/plain"
+                            className="hidden"
+                            onChange={handleImportPayrollAccountCodeFile}
+                            disabled={!selectedPeriod || actionState !== null}
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              payrollAccountCodeImportInputRef.current?.click()
+                            }
+                            disabled={!selectedPeriod || actionState !== null}
+                          >
+                            <Upload className="mr-2 h-4 w-4" />
+                            {actionState === "import-account-codes"
+                              ? "Importing..."
+                              : "Import Account Code"}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={handleRevertPayrollAccountCodeImport}
+                            disabled={!selectedPeriod || actionState !== null}
+                            title="Revert all imported account-code files for this payroll period"
+                          >
+                            {actionState === "revert-account-code-import"
+                              ? "Reverting..."
+                              : "Revert Import"}
+                          </Button>
                           <Button
                             type="button"
                             variant="outline"
@@ -8803,6 +9915,285 @@ export function PayrollWorkspace({
                           </div>
                         </TabsContent>
                       </Tabs>
+
+                      <div className="space-y-2 border-t pt-3">
+                        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <div className="text-sm font-medium">
+                              Imported Account Code Files
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              Files listed here are active for {selectedPeriod.code}.
+                            </div>
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {payrollAccountCodeImportBatchState.periodId ===
+                              selectedPeriod.id
+                              ? payrollAccountCodeImportBatchState.batches.length
+                              : 0}{" "}
+                            imported file
+                            {payrollAccountCodeImportBatchState.batches.length ===
+                            1
+                              ? ""
+                              : "s"}
+                          </div>
+                        </div>
+
+                        {payrollAccountCodeImportBatchState.periodId ===
+                          selectedPeriod.id &&
+                        payrollAccountCodeImportBatchState.status ===
+                          "loading" ? (
+                          <div className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+                            Loading imported account-code files...
+                          </div>
+                        ) : payrollAccountCodeImportBatchState.periodId ===
+                            selectedPeriod.id &&
+                          payrollAccountCodeImportBatchState.status ===
+                            "error" ? (
+                          <div className="rounded-lg border border-rose-300 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-200">
+                            {payrollAccountCodeImportBatchState.error ??
+                              "Unable to load imported account-code files."}
+                          </div>
+                        ) : payrollAccountCodeImportBatchState.periodId ===
+                            selectedPeriod.id &&
+                          payrollAccountCodeImportBatchState.batches.length >
+                            0 ? (
+                          <div className="overflow-x-auto rounded-lg border">
+                            <Table>
+                              <TableHeader>
+                                <TableRow>
+                                  <TableHead className="w-10">
+                                    <span className="sr-only">
+                                      Expand skipped rows
+                                    </span>
+                                  </TableHead>
+                                  <TableHead>File</TableHead>
+                                  <TableHead className="text-right">
+                                    Rows
+                                  </TableHead>
+                                  <TableHead className="text-right">
+                                    Inserted
+                                  </TableHead>
+                                  <TableHead className="text-right">
+                                    Updated
+                                  </TableHead>
+                                  <TableHead className="text-right">
+                                    Skipped
+                                  </TableHead>
+                                  <TableHead className="text-right">
+                                    Employees
+                                  </TableHead>
+                                  <TableHead>Imported</TableHead>
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {payrollAccountCodeImportBatchState.batches.map(
+                                  (batch) => {
+                                    const isBatchExpanded =
+                                      expandedPayrollAccountCodeImportBatchIds.has(
+                                        batch.id
+                                      );
+                                    const skippedRowsState =
+                                      payrollAccountCodeSkippedRowsById[batch.id];
+                                    const skippedRows =
+                                      skippedRowsState?.data?.rows ?? [];
+                                    const skippedRowCount =
+                                      skippedRowsState?.data?.skippedRowCount ??
+                                      batch.skippedRowCount;
+                                    const detailsAvailable =
+                                      skippedRowsState?.data?.detailsAvailable ??
+                                      (batch.storedSkippedRowCount > 0 ||
+                                        batch.skippedRowCount === 0);
+                                    const detailRowId = `account-code-import-${batch.id}-skipped-rows`;
+
+                                    return (
+                                      <Fragment key={batch.id}>
+                                        <TableRow
+                                          className={cn(
+                                            "cursor-pointer",
+                                            isBatchExpanded &&
+                                              "bg-muted/40 hover:bg-muted/40"
+                                          )}
+                                          onClick={() =>
+                                            handleTogglePayrollAccountCodeImportBatch(
+                                              batch.id
+                                            )
+                                          }
+                                        >
+                                          <TableCell className="w-10">
+                                            <Button
+                                              type="button"
+                                              variant="ghost"
+                                              size="icon"
+                                              className="h-8 w-8"
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                handleTogglePayrollAccountCodeImportBatch(
+                                                  batch.id
+                                                );
+                                              }}
+                                              aria-label={`${
+                                                isBatchExpanded
+                                                  ? "Collapse"
+                                                  : "Expand"
+                                              } skipped rows for ${
+                                                batch.sourceFileName
+                                              }`}
+                                              aria-expanded={isBatchExpanded}
+                                              aria-controls={detailRowId}
+                                              title={`${
+                                                isBatchExpanded
+                                                  ? "Collapse"
+                                                  : "Expand"
+                                              } skipped rows`}
+                                            >
+                                              {isBatchExpanded ? (
+                                                <ChevronDown
+                                                  className="h-4 w-4"
+                                                  aria-hidden="true"
+                                                />
+                                              ) : (
+                                                <ChevronRight
+                                                  className="h-4 w-4"
+                                                  aria-hidden="true"
+                                                />
+                                              )}
+                                            </Button>
+                                          </TableCell>
+                                          <TableCell className="font-medium">
+                                            {batch.sourceFileName}
+                                          </TableCell>
+                                          <TableCell className="text-right">
+                                            {batch.totalRows}
+                                          </TableCell>
+                                          <TableCell className="text-right">
+                                            {batch.insertedRowCount}
+                                          </TableCell>
+                                          <TableCell className="text-right">
+                                            {batch.updatedRowCount}
+                                          </TableCell>
+                                          <TableCell className="text-right">
+                                            {batch.skippedRowCount}
+                                          </TableCell>
+                                          <TableCell className="text-right">
+                                            {batch.affectedEmployeeCount}
+                                          </TableCell>
+                                          <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
+                                            {dateTimeFormatter.format(
+                                              new Date(batch.createdAt)
+                                            )}
+                                          </TableCell>
+                                        </TableRow>
+                                        {isBatchExpanded && (
+                                          <TableRow
+                                            id={detailRowId}
+                                            className="bg-muted/20 hover:bg-muted/20"
+                                          >
+                                            <TableCell colSpan={8} className="p-0">
+                                              <div className="border-t px-4 py-4">
+                                                {skippedRowsState?.status ===
+                                                "error" ? (
+                                                  <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                                                    {skippedRowsState.error ??
+                                                      "Unable to load skipped rows."}
+                                                  </div>
+                                                ) : skippedRowsState?.status ===
+                                                  "ready" ? (
+                                                  !detailsAvailable ? (
+                                                    <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
+                                                      Skipped-row details are only
+                                                      available for imports made
+                                                      after this update.
+                                                    </div>
+                                                  ) : skippedRows.length === 0 ? (
+                                                    <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
+                                                      No skipped rows were saved
+                                                      for this file.
+                                                    </div>
+                                                  ) : (
+                                                    <div className="space-y-3">
+                                                      <div className="text-sm font-medium">
+                                                        Skipped rows (
+                                                        {skippedRowCount})
+                                                      </div>
+                                                      <div className="overflow-x-auto rounded-md border bg-background">
+                                                        <Table className="min-w-[760px] table-fixed">
+                                                          <TableHeader>
+                                                            <TableRow>
+                                                              <TableHead className="w-20">
+                                                                Line
+                                                              </TableHead>
+                                                              <TableHead className="w-36">
+                                                                Payroll Period
+                                                              </TableHead>
+                                                              <TableHead className="w-32">
+                                                                Employee No
+                                                              </TableHead>
+                                                              <TableHead className="w-36">
+                                                                Account Code
+                                                              </TableHead>
+                                                              <TableHead>
+                                                                Reason
+                                                              </TableHead>
+                                                            </TableRow>
+                                                          </TableHeader>
+                                                          <TableBody>
+                                                            {skippedRows.map(
+                                                              (row) => (
+                                                                <TableRow
+                                                                  key={`${batch.id}:${row.sourceLine}:${row.reason}`}
+                                                                >
+                                                                  <TableCell>
+                                                                    {
+                                                                      row.sourceLine
+                                                                    }
+                                                                  </TableCell>
+                                                                  <TableCell className="whitespace-normal break-words">
+                                                                    {row.payrollPeriodCode ??
+                                                                      "-"}
+                                                                  </TableCell>
+                                                                  <TableCell className="whitespace-normal break-words">
+                                                                    {row.employeeNo ??
+                                                                      "-"}
+                                                                  </TableCell>
+                                                                  <TableCell className="whitespace-normal break-words">
+                                                                    {row.accountCode ??
+                                                                      "-"}
+                                                                  </TableCell>
+                                                                  <TableCell className="whitespace-normal break-words text-xs text-muted-foreground">
+                                                                    {row.reason}
+                                                                  </TableCell>
+                                                                </TableRow>
+                                                              )
+                                                            )}
+                                                          </TableBody>
+                                                        </Table>
+                                                      </div>
+                                                    </div>
+                                                  )
+                                                ) : (
+                                                  <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
+                                                    Loading skipped rows...
+                                                  </div>
+                                                )}
+                                              </div>
+                                            </TableCell>
+                                          </TableRow>
+                                        )}
+                                      </Fragment>
+                                    );
+                                  }
+                                )}
+                              </TableBody>
+                            </Table>
+                          </div>
+                        ) : (
+                          <div className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+                            No imported account-code files for this payroll
+                            period.
+                          </div>
+                        )}
+                      </div>
 
                       <div className="flex flex-col gap-3 border-t pt-3 text-sm md:flex-row md:items-center md:justify-between">
                         <div className="text-muted-foreground">
