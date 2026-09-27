@@ -121,6 +121,21 @@ export function getLeaveQuantityForDayPart(dayPart: LeaveDayPart) {
   return dayPart === "FullDay" ? 1 : 0.5;
 }
 
+export function getLeaveDayExclusionReason(args: {
+  excludeRestDaysAndHolidays: boolean;
+  chargeRestDays?: boolean;
+  hasScheduledHours: boolean;
+  isRestDay: boolean;
+  isNonWorkingHoliday: boolean;
+}) {
+  if (!args.excludeRestDaysAndHolidays) return null;
+  if (args.isNonWorkingHoliday) return "NonWorkingHoliday";
+  if (args.chargeRestDays && args.isRestDay) return null;
+  if (!args.hasScheduledHours) return "NoScheduledHours";
+  if (args.isRestDay) return "RestDay";
+  return null;
+}
+
 export function getAnnualLeaveGrantQuantity(args: {
   leaveCode: string;
   leaveTypeAnnualEntitlement?: string | number | null;
@@ -453,10 +468,12 @@ export async function buildLeaveDayDetails(args: {
   endDate?: string | null;
   dayPart?: LeaveDayPart | null;
   policy?: LeavePolicyRecord | null;
+  chargeRestDays?: boolean;
   database?: DatabaseLike;
 }) {
   const database = args.database ?? db;
   const dayPart = args.dayPart ?? "FullDay";
+  const chargeRestDays = args.chargeRestDays ?? false;
   const endDate = normalizeLeaveEndDate(args.endDate) ?? args.startDate;
   const policy =
     args.policy ??
@@ -497,18 +514,17 @@ export async function buildLeaveDayDetails(args: {
       weeklyPatterns: context.weeklyPatterns,
       legacyTimekeeping: context.legacyTimekeeping,
     });
-    const isRestDay =
-      isResolvedScheduleRestDay(resolvedSchedule) ||
-      resolvedSchedule.hoursPerDay <= 0;
+    const hasScheduledHours = resolvedSchedule.hoursPerDay > 0;
+    const isScheduleRestDay = isResolvedScheduleRestDay(resolvedSchedule);
+    const isRestDay = isScheduleRestDay || !hasScheduledHours;
     const isNonWorkingHoliday = isAttendanceDtrNonWorkingDayType(dayType);
-    let exclusionReason: string | null = null;
-
-    if (policy.excludeRestDaysAndHolidays && isNonWorkingHoliday) {
-      exclusionReason = "NonWorkingHoliday";
-    } else if (policy.excludeRestDaysAndHolidays && isRestDay) {
-      exclusionReason =
-        resolvedSchedule.hoursPerDay <= 0 ? "NoScheduledHours" : "RestDay";
-    }
+    const exclusionReason = getLeaveDayExclusionReason({
+      excludeRestDaysAndHolidays: policy.excludeRestDaysAndHolidays,
+      chargeRestDays,
+      hasScheduledHours,
+      isRestDay,
+      isNonWorkingHoliday,
+    });
 
     return {
       leaveDate,
@@ -532,6 +548,7 @@ export async function replaceLeaveRecordDayDetails(args: {
   endDate?: string | null;
   dayPart?: LeaveDayPart | null;
   leaveTypeId?: number | null;
+  chargeRestDays?: boolean;
   database?: DatabaseLike;
 }) {
   const database = args.database ?? db;
@@ -544,13 +561,14 @@ export async function replaceLeaveRecordDayDetails(args: {
     endDate: args.endDate,
     dayPart: args.dayPart,
     policy,
+    chargeRestDays: args.chargeRestDays,
     database,
   });
   const totalDays = summarizeLeaveDayDetails(details);
 
   if (totalDays <= 0) {
     throw new Error(
-      "This leave request has no chargeable working day after rest days and non-working holidays are excluded."
+      "This leave request has no chargeable working day in the selected date range after rest days and non-working holidays are excluded."
     );
   }
 

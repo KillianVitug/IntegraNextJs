@@ -1,3 +1,5 @@
+import { ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG } from "./attendance";
+
 export const attendanceDtrManualStatusValues = [
   "Present",
   "Absent",
@@ -107,6 +109,8 @@ export type AttendanceDtrPeriodOverride = {
 };
 
 export const ATTENDANCE_DTR_WORKED_MINUTES_PER_PRESENT_DAY = 8 * 60;
+export const ATTENDANCE_DTR_LATE_PENALTY_BLOCK_MINUTES = 3 * 60;
+export const ATTENDANCE_DTR_LATE_PENALTY_MINUTES_PER_BLOCK = 5 * 60;
 
 export function computeDefaultDtrWorkedMinutes(
   presentDays: string | number | null | undefined
@@ -121,6 +125,29 @@ export function computeDefaultDtrWorkedMinutes(
   );
 }
 
+export function computeAccumulatedLatePenaltyMinutes(
+  lateMinutes: number | null | undefined
+) {
+  const normalizedLateMinutes = Math.max(0, Math.round(lateMinutes ?? 0));
+
+  return (
+    Math.floor(
+      normalizedLateMinutes / ATTENDANCE_DTR_LATE_PENALTY_BLOCK_MINUTES
+    ) * ATTENDANCE_DTR_LATE_PENALTY_MINUTES_PER_BLOCK
+  );
+}
+
+export function computePayrollTardinessMinutes(
+  lateMinutes: number | null | undefined
+) {
+  const normalizedLateMinutes = Math.max(0, Math.round(lateMinutes ?? 0));
+
+  return (
+    normalizedLateMinutes +
+    computeAccumulatedLatePenaltyMinutes(normalizedLateMinutes)
+  );
+}
+
 export function computeNetDtrWorkedMinutes(args: {
   presentDays: string | number | null | undefined;
   lateMinutes?: number | null;
@@ -132,10 +159,53 @@ export function computeNetDtrWorkedMinutes(args: {
   }
 
   const baseWorkedMinutes = computeDefaultDtrWorkedMinutes(args.presentDays);
-  const lateMinutes = Math.max(0, Math.round(args.lateMinutes ?? 0));
+  const lateMinutes = computePayrollTardinessMinutes(args.lateMinutes);
   const undertimeMinutes = Math.max(0, Math.round(args.undertimeMinutes ?? 0));
 
   return Math.max(0, baseWorkedMinutes - lateMinutes - undertimeMinutes);
+}
+
+export function computeDisplayedDtrWorkedMinutes(args: {
+  workedMinutes: number | null | undefined;
+  scheduledMinutes?: number | null;
+  lateMinutes?: number | null;
+  undertimeMinutes?: number | null;
+}) {
+  const workedMinutes = Math.max(0, Math.round(args.workedMinutes ?? 0));
+  const lateMinutes = Math.max(0, Math.round(args.lateMinutes ?? 0));
+  const undertimeMinutes = Math.max(
+    0,
+    Math.round(args.undertimeMinutes ?? 0)
+  );
+
+  if (lateMinutes <= 0 && undertimeMinutes <= 0) {
+    return workedMinutes;
+  }
+
+  const scheduledMinutes =
+    args.scheduledMinutes != null && args.scheduledMinutes > 0
+      ? Math.round(args.scheduledMinutes)
+      : ATTENDANCE_DTR_WORKED_MINUTES_PER_PRESENT_DAY;
+
+  return Math.max(0, scheduledMinutes - lateMinutes - undertimeMinutes);
+}
+
+export function computeAttendanceHoldWorkedMinutes(args: {
+  intendedWorkedMinutes: number | null | undefined;
+  lateMinutes?: number | null;
+  undertimeMinutes?: number | null;
+}) {
+  const intendedWorkedMinutes = Math.max(
+    0,
+    Math.round(args.intendedWorkedMinutes ?? 0)
+  );
+  const lateMinutes = Math.max(0, Math.round(args.lateMinutes ?? 0));
+  const undertimeMinutes = Math.max(
+    0,
+    Math.round(args.undertimeMinutes ?? 0)
+  );
+
+  return Math.max(0, intendedWorkedMinutes - lateMinutes - undertimeMinutes);
 }
 
 function toNumber(value: string | number | null | undefined) {
@@ -182,7 +252,8 @@ export function hasUnresolvedAttendanceDtrHoldFlag(
   const normalized = normalizeAttendanceDtrAnomalyFlags(flags);
   return (
     normalized.includes("ODD_PUNCH_COUNT") ||
-    normalized.includes("MISSING_OUT")
+    normalized.includes("MISSING_OUT") ||
+    normalized.includes(ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG)
   );
 }
 

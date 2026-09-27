@@ -93,16 +93,6 @@ const RATE_FIELDS = new Set<(typeof MONEY_FIELDS)[number]>([
   "monthlyRate",
 ]);
 
-function hasDirtySalaryFields(
-  dirtySalary: unknown
-): dirtySalary is Record<string, unknown> {
-  return (
-    typeof dirtySalary === "object" &&
-    dirtySalary !== null &&
-    Object.keys(dirtySalary).length > 0
-  );
-}
-
 type EmployeeCsvImportResponse = {
   success?: boolean;
   error?: string;
@@ -310,32 +300,20 @@ export default function EmployeeForm({
 
   async function submitForm(data: InsertEmployeeSchemaType) {
   setHasSubmitted(true);  // Mark that user submitted
-  const shouldRestoreBaseSalary =
-    Boolean(salaryTabView?.effectiveSalary) &&
-    Boolean(employee?.salary) &&
-    !hasDirtySalaryFields(form.formState.dirtyFields.salary);
-
-  const baseSalaryPayload: InsertEmployeeSchemaType["salary"] | undefined =
-    shouldRestoreBaseSalary && data.salary
+  const salaryPayload: InsertEmployeeSchemaType["salary"] | undefined =
+    employee?.salary && data.salary
       ? {
           ...data.salary,
           dailyRate: String(employee?.salary?.dailyRate ?? "0"),
           monthlyRate: String(employee?.salary?.monthlyRate ?? "0"),
-          monthlyAllowance: String(employee?.salary?.monthlyAllowance ?? "0"),
-          dailyAllowance: String(employee?.salary?.dailyAllowance ?? "0"),
-          cola: String(employee?.salary?.cola ?? "0"),
-          rateDivisor: String(employee?.salary?.rateDivisor ?? "0"),
-          billingRate: String(employee?.salary?.billingRate ?? "0"),
-          customPayrollId: data.salary.customPayrollId ?? null,
-          slvlGroupId: data.salary.slvlGroupId ?? null,
         }
       : data.salary;
 
   const payload: InsertEmployeeSchemaType =
-    shouldRestoreBaseSalary && baseSalaryPayload
+    salaryPayload
       ? {
           ...data,
-          salary: baseSalaryPayload,
+          salary: salaryPayload,
         }
       : data;
 

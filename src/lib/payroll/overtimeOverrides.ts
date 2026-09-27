@@ -11,6 +11,7 @@ import {
 import { recordAdminAuditEvent, recordPayrollRunEvent } from "@/lib/admin";
 import { fetchConfirmedHolidayRowsForRange } from "@/lib/holidays";
 import { and, desc, eq, gte, lte } from "drizzle-orm";
+import { isPayrollEligibleEmploymentStatus } from "@/lib/employmentStatus";
 import { format } from "date-fns";
 import {
   getDailyRate,
@@ -107,12 +108,16 @@ export async function getEmployeePayrollAdjustmentRows(args: {
   const employee = await db.query.employees.findFirst({
     where: eq(employees.id, args.employeeId),
     with: {
+      generalInfo: true,
       salary: true,
       timekeeping: true,
     },
   });
 
-  if (!employee) {
+  if (
+    !employee ||
+    !isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus)
+  ) {
     throw new Error("Employee not found.");
   }
 
@@ -281,12 +286,27 @@ export async function saveEmployeePayrollOvertimeOverride(args: {
   workedMinutes?: number | null;
   remarks?: string | null;
 }) {
-  const payrollPeriod = await db.query.payrollPeriods.findFirst({
-    where: eq(payrollPeriods.id, args.payrollPeriodId),
-  });
+  const [payrollPeriod, employee] = await Promise.all([
+    db.query.payrollPeriods.findFirst({
+      where: eq(payrollPeriods.id, args.payrollPeriodId),
+    }),
+    db.query.employees.findFirst({
+      where: eq(employees.id, args.employeeId),
+      with: {
+        generalInfo: true,
+      },
+    }),
+  ]);
 
   if (!payrollPeriod) {
     throw new Error("Payroll period not found.");
+  }
+  if (
+    !employee ||
+    employee.deletedAt ||
+    !isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus)
+  ) {
+    throw new Error("Employee not found.");
   }
 
   if (

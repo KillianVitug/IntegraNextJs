@@ -174,6 +174,7 @@ export const saveEmployeeAction = actionClient
       otherReferences,
       timekeeping,
     } = parsedInput;
+    const isEditingExistingEmployee = Boolean(id);
 
     const normalizedOtherReferences = normalizeOtherReferences(otherReferences);
     let attemptedEmployeeNo = employeeNo?.trim() ?? "";
@@ -263,9 +264,17 @@ export const saveEmployeeAction = actionClient
               where: eq(employeesSalary.employeeId, employeeId),
             })
           : null;
+        const normalizedSalaryForSave =
+          normalizedSalary && isEditingExistingEmployee && existingSalary
+            ? {
+                ...normalizedSalary,
+                dailyRate: existingSalary.dailyRate,
+                monthlyRate: existingSalary.monthlyRate,
+              }
+            : normalizedSalary;
         const salaryChanged =
-          normalizedSalary != null &&
-          hasSalaryImpactChange(existingSalary, normalizedSalary);
+          normalizedSalaryForSave != null &&
+          hasSalaryImpactChange(existingSalary, normalizedSalaryForSave);
 
         await upsert(
           employeesGeneralInfo,
@@ -274,7 +283,7 @@ export const saveEmployeeAction = actionClient
             departmentId: normalizeOptionalInt(generalInfo.departmentId),
           },
         );
-        await upsert(employeesSalary, normalizedSalary);
+        await upsert(employeesSalary, normalizedSalaryForSave);
         await upsert(
           employeesOtherReferences,
           normalizedOtherReferences && {

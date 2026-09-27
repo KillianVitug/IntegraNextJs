@@ -130,9 +130,9 @@ export function getActiveWeeklyShiftPatternForDate(
           (!pattern.effectiveTo || pattern.effectiveTo >= dateKey)
       )
       .sort((left, right) => {
-        const fromComparison = right.effectiveFrom.localeCompare(left.effectiveFrom);
-        if (fromComparison !== 0) return fromComparison;
-        return right.id - left.id;
+        const idComparison = right.id - left.id;
+        if (idComparison !== 0) return idComparison;
+        return right.effectiveFrom.localeCompare(left.effectiveFrom);
       })[0] ?? null
   );
 }

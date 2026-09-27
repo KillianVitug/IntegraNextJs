@@ -25,8 +25,8 @@ import {
   approveAttendanceDtrHoldRowsAction,
   getAttendanceDtrHeldRowsAction,
   getAttendanceImportBatchUnmatchedDiagnosticsAction,
+  getAttendancePeriodBundleAction,
   getAttendancePeriodDtrEmployeeRowsAction,
-  getAttendancePeriodDtrSummaryAction,
   importAttendanceLogs,
   refreshAttendancePeriodSummariesAction,
   resetAttendanceDtrHoldRowsAction,
@@ -38,15 +38,13 @@ import {
   approvePayrollRun,
   computePayrollRun,
   deleteManualPayrollEntryAction,
-  getAgencyDeductionSummaryAction,
   getEmployeePayrollExceptionWorkspaceAction,
   getManualPayrollAccountCodeOptionsAction,
   getManualPayrollEntryWorkspaceAction,
   getPayrollAccountCodeImportBatchesAction,
   getPayrollAccountCodeImportSkippedRowsAction,
   getPayrollRunEmployeeDetailAction,
-  getLoanDeductionSummaryAction,
-  getPayrollRegisterAction,
+  getPayrollReportBundleAction,
   getPayrollWorkspaceSnapshotAction,
   importPayrollAccountCodeRowsAction,
   postPayrollRun,
@@ -96,6 +94,8 @@ import {
 } from "@/lib/payroll/overtime";
 import {
   attendanceDtrManualStatusValues,
+  computeAttendanceHoldWorkedMinutes,
+  computeDisplayedDtrWorkedMinutes,
   getHolidayTypeFromAttendanceDtrDayType,
   type AttendanceDtrDayType,
   type AttendanceDtrManualStatus,
@@ -127,6 +127,7 @@ import type {
   PayrollAccountCodeReportOptionView,
   PayrollAccountCodeEmployeeView,
   PayrollAgencySummaryView,
+  PayrollContributionReportRowView,
   PayrollDepartmentReportRowView,
   PayrollExceptionAccountCodeOptionView,
   PayrollExceptionRowView,
@@ -217,25 +218,19 @@ type AttendanceHoldRowDisplayMinutes = {
   overtimeMinutes: number;
 };
 
-function isFixedScheduleAttendanceHoldRow(
-  row: AttendanceDtrHeldRowsView["rows"][number]
-) {
-  return row.workedBaselineSource === "schedule" || row.scheduledMinutes > 0;
-}
-
 function getAttendanceHoldRowDisplayMinutes(
   row: AttendanceDtrHeldRowsView["rows"][number]
 ): AttendanceHoldRowDisplayMinutes {
-  const isFixedSchedule = isFixedScheduleAttendanceHoldRow(row);
-
   if (row.approvalStatus === "Hold") {
     const lateMinutes = row.lateMinutes;
     const undertimeMinutes = row.undertimeMinutes;
 
     return {
-      workedMinutes: isFixedSchedule
-        ? row.intendedWorkedMinutes
-        : Math.max(0, row.intendedWorkedMinutes - lateMinutes - undertimeMinutes),
+      workedMinutes: computeAttendanceHoldWorkedMinutes({
+        intendedWorkedMinutes: row.intendedWorkedMinutes,
+        lateMinutes,
+        undertimeMinutes,
+      }),
       lateMinutes,
       undertimeMinutes,
       overtimeMinutes: row.overtimeMinutes,
@@ -248,9 +243,11 @@ function getAttendanceHoldRowDisplayMinutes(
   return {
     workedMinutes:
       row.approvedWorkedMinutes ??
-      (isFixedSchedule
-        ? row.intendedWorkedMinutes
-        : Math.max(0, row.intendedWorkedMinutes - lateMinutes - undertimeMinutes)),
+      computeAttendanceHoldWorkedMinutes({
+        intendedWorkedMinutes: row.intendedWorkedMinutes,
+        lateMinutes,
+        undertimeMinutes,
+      }),
     lateMinutes,
     undertimeMinutes,
     overtimeMinutes: row.approvedOvertimeMinutes ?? row.overtimeMinutes,
@@ -531,6 +528,43 @@ const CONTRIBUTION_REPORT_CODES = new Set([
   "TAX",
 ]);
 
+const CONTRIBUTION_REPORT_COLUMN_DEFINITIONS = [
+  { code: "PAGIBIG", key: "pagibig", label: "PAGIBIG" },
+  { code: "PAGIBIG-ER", key: "pagibigEmployer", label: "PAGIBIG-ER" },
+  { code: "PHILHEALTH", key: "philhealth", label: "PHILHEALTH" },
+  {
+    code: "PHILHEALTH-ER",
+    key: "philhealthEmployer",
+    label: "PHILHEALTH-ER",
+  },
+  { code: "SSS", key: "sss", label: "SSS" },
+  { code: "SSS-ER", key: "sssEmployer", label: "SSS-ER" },
+  { code: "SSS-EC", key: "sssEc", label: "SSS-EC" },
+  { code: "PERAA", key: "peraa", label: "PERAA" },
+  { code: "PERAA-ER", key: "peraaEmployer", label: "PERAA-ER" },
+  { code: "TAX", key: "tax", label: "TAX" },
+] as const satisfies readonly {
+  code: string;
+  key: keyof Pick<
+    PayrollContributionReportRowView,
+    | "pagibig"
+    | "pagibigEmployer"
+    | "philhealth"
+    | "philhealthEmployer"
+    | "sss"
+    | "sssEmployer"
+    | "sssEc"
+    | "peraa"
+    | "peraaEmployer"
+    | "tax"
+  >;
+  label: string;
+}[];
+
+const CONTRIBUTION_REPORT_VISIBLE_CODES = new Set<string>(
+  CONTRIBUTION_REPORT_COLUMN_DEFINITIONS.map((column) => column.code)
+);
+
 const EMPTY_PAYROLL_EXCEPTION_ACCOUNT_CODE_OPTIONS: PayrollExceptionAccountCodeOptionView[] =
   [];
 const EMPTY_PAYROLL_RECURRING_ENTRY_ROWS: PayrollRecurringEntryRowView[] = [];
@@ -799,11 +833,17 @@ function splitDtrMinutes(value: number | null | undefined) {
   };
 }
 
+function getEditableDtrLateMinutes(
+  totals: AttendanceDtrEmployeeSummaryView["totals"] | null | undefined
+) {
+  return totals?.overrides.lateMinutes ?? totals?.computed.lateMinutes ?? 0;
+}
+
 function createDtrOverrideDraft(
   totals: AttendanceDtrEmployeeSummaryView["totals"] | null | undefined
 ): DtrPeriodOverrideDraft {
   const worked = splitDtrMinutes(totals?.workedMinutes ?? 0);
-  const late = splitDtrMinutes(totals?.lateMinutes ?? 0);
+  const late = splitDtrMinutes(getEditableDtrLateMinutes(totals));
   const undertime = splitDtrMinutes(totals?.undertimeMinutes ?? 0);
   const overtime = splitDtrMinutes(totals?.overtimeMinutes ?? 0);
 
@@ -1851,12 +1891,14 @@ function EditableDtrTotalCard({
 
 function renderStatutoryAuditCards(employee: {
   statutoryMonthlyCompensationBase: string | null;
+  philhealthMonthlyCompensationBase: string | null;
   sssContributionSource: string | null;
   sssSalaryCredit: string | null;
   sssBracketLabel: string | null;
 }) {
   const hasAuditDetails =
     employee.statutoryMonthlyCompensationBase ||
+    employee.philhealthMonthlyCompensationBase ||
     employee.sssContributionSource ||
     employee.sssSalaryCredit ||
     employee.sssBracketLabel;
@@ -1878,10 +1920,10 @@ function renderStatutoryAuditCards(employee: {
       <div className="flex flex-col gap-1">
         <div className="font-semibold">Statutory Contribution Audit</div>
         <div className="text-sm text-muted-foreground">
-          The statutory base below is the monthly amount used to determine SSS,
-          PhilHealth, and Pag-IBIG. SSS salary credit and bracket appear only
-          when the employee uses the statutory table instead of a fixed custom
-          share.
+          The statutory base below is the monthly amount used to determine SSS
+          and Pag-IBIG. PhilHealth appears separately when daily-rate
+          annualization applies. SSS salary credit and bracket appear only when
+          the employee uses the statutory table instead of a fixed custom share.
         </div>
       </div>
 
@@ -1896,9 +1938,23 @@ function renderStatutoryAuditCards(employee: {
               : "-"}
           </div>
           <div className="text-xs text-muted-foreground">
-            Monthly basis used for SSS, PhilHealth, and Pag-IBIG.
+            Monthly basis used for SSS and Pag-IBIG.
           </div>
         </div>
+
+        {employee.philhealthMonthlyCompensationBase ? (
+          <div className="rounded-lg border p-3">
+            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+              PhilHealth Base
+            </div>
+            <div className="mt-1 font-semibold">
+              {formatMoney(employee.philhealthMonthlyCompensationBase)}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Monthly basis used for PhilHealth.
+            </div>
+          </div>
+        ) : null}
 
         <div className="rounded-lg border p-3">
           <div className="text-xs uppercase tracking-wide text-muted-foreground">
@@ -2008,6 +2064,110 @@ function PayrollLineReportTable({
             <TableRow>
               <TableCell
                 colSpan={11}
+                className="py-10 text-center text-muted-foreground"
+              >
+                {emptyMessage}
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function getContributionReportDepartmentKey(
+  row: Pick<PayrollContributionReportRowView, "departmentId" | "departmentName">
+) {
+  return row.departmentId != null
+    ? `department:${row.departmentId}`
+    : `department:${row.departmentName}`;
+}
+
+function formatContributionReportDepartmentName(
+  row: Pick<
+    PayrollContributionReportRowView,
+    "departmentName" | "departmentCode"
+  >
+) {
+  return `${row.departmentName}${row.departmentCode ? ` (${row.departmentCode})` : ""}`;
+}
+
+function PayrollContributionReportTable({
+  rows,
+  emptyMessage,
+  selectedEmployeeId,
+  onEmployeeSelect,
+}: {
+  rows: PayrollContributionReportRowView[];
+  emptyMessage: string;
+  selectedEmployeeId: string | null;
+  onEmployeeSelect: (employeeId: string) => void;
+}) {
+  let previousDepartmentKey: string | null = null;
+  const columnCount = CONTRIBUTION_REPORT_COLUMN_DEFINITIONS.length + 3;
+
+  return (
+    <div className="overflow-x-auto">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Employee No</TableHead>
+            <TableHead>Employee</TableHead>
+            {CONTRIBUTION_REPORT_COLUMN_DEFINITIONS.map((column) => (
+              <TableHead key={column.code} className="text-right">
+                {column.label}
+              </TableHead>
+            ))}
+            <TableHead className="text-right">Total</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => {
+            const departmentKey = getContributionReportDepartmentKey(row);
+            const showDepartmentHeader = departmentKey !== previousDepartmentKey;
+            previousDepartmentKey = departmentKey;
+
+            return (
+              <Fragment key={row.employeeId}>
+                {showDepartmentHeader && (
+                  <TableRow className="bg-muted/50 hover:bg-muted/50">
+                    <TableCell
+                      colSpan={columnCount}
+                      className="py-2 text-sm font-semibold text-foreground"
+                    >
+                      {formatContributionReportDepartmentName(row)}
+                    </TableCell>
+                  </TableRow>
+                )}
+                <TableRow
+                  className={cn(
+                    "cursor-pointer",
+                    row.employeeId === selectedEmployeeId && "bg-muted/60"
+                  )}
+                  onClick={() => onEmployeeSelect(row.employeeId)}
+                >
+                  <TableCell>{formatEmployeeNoDisplay(row.employeeNo)}</TableCell>
+                  <TableCell className="font-medium">{row.employeeName}</TableCell>
+                  {CONTRIBUTION_REPORT_COLUMN_DEFINITIONS.map((column) => (
+                    <TableCell
+                      key={column.code}
+                      className="whitespace-nowrap text-right"
+                    >
+                      {formatMoney(row[column.key])}
+                    </TableCell>
+                  ))}
+                  <TableCell className="whitespace-nowrap text-right font-semibold">
+                    {formatMoney(row.total)}
+                  </TableCell>
+                </TableRow>
+              </Fragment>
+            );
+          })}
+          {rows.length === 0 && (
+            <TableRow>
+              <TableCell
+                colSpan={columnCount}
                 className="py-10 text-center text-muted-foreground"
               >
                 {emptyMessage}
@@ -2578,6 +2738,14 @@ function createManualPayrollSystemLine(
     month13thEligible: config.month13thEligible,
     nonTaxable: config.nonTaxable,
     deminimis: config.deminimis,
+    birTaxCategory: config.deminimis
+      ? "DeMinimis"
+      : config.nonTaxable
+        ? "NonTaxable"
+        : config.taxable
+          ? "RegularTaxable"
+          : null,
+    birDeMinimisType: null,
     sourceTable: null,
     sourceId: null,
     sortOrder: 0,
@@ -2613,6 +2781,17 @@ function createManualPayrollAccountCodeLine(
     month13thEligible: !isDeduction && option.month13thPay,
     nonTaxable: option.nonTaxable,
     deminimis: option.deminimis,
+    birTaxCategory: isDeduction
+      ? null
+      : option.birTaxCategory ??
+        (option.deminimis
+          ? "DeMinimis"
+          : option.nonTaxable
+            ? "NonTaxable"
+            : "RegularTaxable"),
+    birDeMinimisType: option.birTaxCategory === "DeMinimis"
+      ? option.birDeMinimisType
+      : null,
     sourceTable: null,
     sourceId: null,
     sortOrder,
@@ -2701,6 +2880,15 @@ function isManualPayrollDraftDirty(
 
 function hasAttendancePunches(row: AttendanceDtrDayView) {
   return row.rawPunches.length > 0 || row.firstInAt != null || row.lastOutAt != null;
+}
+
+function getDisplayedDtrWorkedMinutes(row: AttendanceDtrDayView) {
+  return computeDisplayedDtrWorkedMinutes({
+    workedMinutes: row.workedMinutes,
+    scheduledMinutes: row.scheduledMinutes,
+    lateMinutes: row.lateMinutes,
+    undertimeMinutes: row.undertimeMinutes,
+  });
 }
 
 function getAttendanceDayStatus(row: AttendanceDtrDayView) {
@@ -2994,6 +3182,67 @@ function isDeductionReportLine(line: PayrollRunLineView) {
   return line.lineType === "Deduction" && !isContributionReportLine(line);
 }
 
+function buildContributionReportRows(
+  employees: PayrollRunEmployeeView[]
+): PayrollContributionReportRowView[] {
+  return employees
+    .flatMap((employee) => {
+      const row: PayrollContributionReportRowView = {
+        employeeId: employee.employeeId,
+        employeeNo: employee.employeeNoSnapshot,
+        employeeName: employee.employeeNameSnapshot,
+        departmentId: employee.departmentId,
+        departmentName: employee.departmentName ?? "Unassigned Department",
+        departmentCode: employee.departmentCode,
+        pagibig: 0,
+        pagibigEmployer: 0,
+        philhealth: 0,
+        philhealthEmployer: 0,
+        sss: 0,
+        sssEmployer: 0,
+        sssEc: 0,
+        peraa: 0,
+        peraaEmployer: 0,
+        tax: 0,
+        total: 0,
+      };
+      let hasVisibleContribution = false;
+
+      for (const line of employee.lines) {
+        const normalizedCode = line.code.toUpperCase();
+        if (!CONTRIBUTION_REPORT_VISIBLE_CODES.has(normalizedCode)) continue;
+
+        const column = CONTRIBUTION_REPORT_COLUMN_DEFINITIONS.find(
+          (definition) => definition.code === normalizedCode
+        );
+
+        if (!column) continue;
+
+        const amount = toNumber(line.amount);
+        row[column.key] += amount;
+        row.total += amount;
+        hasVisibleContribution = true;
+      }
+
+      return hasVisibleContribution ? [row] : [];
+    })
+    .sort((left, right) => {
+      const byDepartment = left.departmentName.localeCompare(right.departmentName);
+      if (byDepartment !== 0) return byDepartment;
+      const byDepartmentCode = (left.departmentCode ?? "").localeCompare(
+        right.departmentCode ?? ""
+      );
+      if (byDepartmentCode !== 0) return byDepartmentCode;
+      const byDepartmentKey = getContributionReportDepartmentKey(left).localeCompare(
+        getContributionReportDepartmentKey(right)
+      );
+      if (byDepartmentKey !== 0) return byDepartmentKey;
+      const byName = left.employeeName.localeCompare(right.employeeName);
+      if (byName !== 0) return byName;
+      return left.employeeNo.localeCompare(right.employeeNo);
+    });
+}
+
 function buildLineReportRows(
   employees: PayrollRunEmployeeView[],
   predicate: (line: PayrollRunLineView) => boolean
@@ -3103,6 +3352,10 @@ function sumLineReportAmount(rows: PayrollLineReportRowView[]) {
   return rows.reduce((total, row) => total + toNumber(row.amount), 0);
 }
 
+function sumContributionReportAmount(rows: PayrollContributionReportRowView[]) {
+  return rows.reduce((total, row) => total + row.total, 0);
+}
+
 function deleteCacheKeys<T>(
   cacheRef: { current: Record<string, T> },
   prefixes: string[]
@@ -3112,6 +3365,54 @@ function deleteCacheKeys<T>(
       delete cacheRef.current[key];
     }
   }
+}
+
+const PAYROLL_WORKSHOP_PREFETCH_CONCURRENCY = 3;
+const PAYROLL_WORKSHOP_PREFETCH_RADIUS = 2;
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  task: (item: T) => Promise<void>
+) {
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const item = items[nextIndex];
+        nextIndex += 1;
+        await task(item);
+      }
+    })
+  );
+}
+
+function getAdjacentEmployeeIds<T extends { employeeId: string }>(
+  employees: T[],
+  selectedEmployeeId: string | null | undefined,
+  radius = PAYROLL_WORKSHOP_PREFETCH_RADIUS
+) {
+  if (employees.length === 0) return [];
+
+  const selectedIndex = Math.max(
+    0,
+    employees.findIndex((employee) => employee.employeeId === selectedEmployeeId)
+  );
+  const ids: string[] = [];
+
+  for (let offset = 0; offset <= radius; offset += 1) {
+    const employee = employees[selectedIndex + offset];
+    if (employee) ids.push(employee.employeeId);
+  }
+
+  for (let offset = 1; offset <= radius; offset += 1) {
+    const employee = employees[selectedIndex - offset];
+    if (employee) ids.push(employee.employeeId);
+  }
+
+  return [...new Set(ids)];
 }
 
 export function PayrollWorkspace({
@@ -3299,15 +3600,27 @@ export function PayrollWorkspace({
   const [employeeDetailStatusByKey, setEmployeeDetailStatusByKey] = useState<
     Record<string, LoadStatus>
   >({});
+  const employeeDetailsByKeyRef = useRef<
+    Record<string, PayrollRunEmployeeDetailView>
+  >({});
   const employeeDetailRequestsRef = useRef<Set<string>>(new Set());
   const reportCacheRef = useRef<Record<string, ReportState>>({});
   const attendanceDtrCacheRef = useRef<Record<string, AttendanceDtrState>>({});
   const attendanceDtrRowsCacheRef = useRef<Record<string, AttendanceDtrRowsState>>(
     {}
   );
+  const attendanceHoldCacheRef = useRef<
+    Record<string, typeof attendanceDtrHeldRowsState>
+  >({});
   const payrollExceptionCacheRef = useRef<Record<string, PayrollExceptionState>>(
     {}
   );
+  const manualPayrollCacheRef = useRef<Record<string, ManualPayrollState>>({});
+  const payrollAccountCodeImportBatchCacheRef = useRef<
+    Record<string, PayrollAccountCodeImportBatchState>
+  >({});
+  const payrollWorkshopPrefetchVersionRef = useRef(0);
+  const payrollWorkshopPrefetchRequestsRef = useRef<Set<string>>(new Set());
   const payrollAccountCodeImportInputRef = useRef<HTMLInputElement | null>(null);
   const manualPayrollAccountCodeOptionsRef = useRef<
     ManualPayrollAccountCodeOptionView[] | null
@@ -3323,6 +3636,14 @@ export function PayrollWorkspace({
     () => periods.find((period) => period.id === selectedPeriodId) ?? null,
     [periods, selectedPeriodId]
   );
+  const attendanceHoldTargetPeriods = useMemo(() => {
+    if (!selectedPeriod) return [];
+    return periods.filter(
+      (period) =>
+        period.id === selectedPeriod.id ||
+        period.startDate >= selectedPeriod.startDate
+    );
+  }, [periods, selectedPeriod]);
   const selectedPeriodKey = selectedPeriod?.id ?? null;
   const currentAttendanceDtrHeldRowsState =
     selectedPeriodKey &&
@@ -3533,7 +3854,7 @@ export function PayrollWorkspace({
     [reportRegisterEmployees]
   );
   const contributionReportRows = useMemo(
-    () => buildLineReportRows(reportRegisterEmployees, isContributionReportLine),
+    () => buildContributionReportRows(reportRegisterEmployees),
     [reportRegisterEmployees]
   );
   const accountCodeReportRows = useMemo(
@@ -3560,7 +3881,8 @@ export function PayrollWorkspace({
     ) ?? null;
   const allowanceReportTotal = sumLineReportAmount(allowanceReportRows);
   const deductionReportTotal = sumLineReportAmount(deductionReportRows);
-  const contributionReportTotal = sumLineReportAmount(contributionReportRows);
+  const contributionReportTotal =
+    sumContributionReportAmount(contributionReportRows);
   const selectedAccountCodeReportTotal = sumLineReportAmount(
     selectedAccountCodeReportRows
   );
@@ -3998,6 +4320,7 @@ export function PayrollWorkspace({
         ])
     );
 
+    employeeDetailsByKeyRef.current = seededDetails;
     setEmployeeDetailsByKey(seededDetails);
     setEmployeeDetailStatusByKey(
       Object.fromEntries(
@@ -4090,10 +4413,14 @@ export function PayrollWorkspace({
         const detail = await getPayrollRunEmployeeDetailAction(runId, employeeId);
 
         if (detail) {
-          setEmployeeDetailsByKey((current) => ({
-            ...current,
-            [requestKey]: detail,
-          }));
+          setEmployeeDetailsByKey((current) => {
+            const next = {
+              ...current,
+              [requestKey]: detail,
+            };
+            employeeDetailsByKeyRef.current = next;
+            return next;
+          });
           setEmployeeDetailStatusByKey((current) => ({
             ...current,
             [requestKey]: "ready",
@@ -4143,7 +4470,7 @@ export function PayrollWorkspace({
       return;
     }
 
-    const cacheKey = `exceptions:${selectedPeriodKey}:${employeeId}`;
+    const cacheKey = `account-code:${selectedPeriodKey}:${employeeId}`;
     const cachedState = payrollExceptionCacheRef.current[cacheKey];
     if (cachedState) {
       setPayrollExceptionState(cachedState);
@@ -4239,6 +4566,14 @@ export function PayrollWorkspace({
       return;
     }
 
+    const cacheKey = `manual:${selectedPeriodKey}:${employeeId}`;
+    const cachedState = manualPayrollCacheRef.current[cacheKey];
+    if (cachedState) {
+      setManualPayrollState(cachedState);
+      setManualPayrollDraft(createManualPayrollDraft(cachedState.data));
+      return;
+    }
+
     let cancelled = false;
 
     setManualPayrollState({
@@ -4270,6 +4605,7 @@ export function PayrollWorkspace({
           data: workspace,
           error: null,
         };
+        manualPayrollCacheRef.current[cacheKey] = nextState;
         setManualPayrollState(nextState);
         setManualPayrollDraft(createManualPayrollDraft(workspace));
       } catch (error) {
@@ -4378,11 +4714,8 @@ export function PayrollWorkspace({
 
     void (async () => {
       try {
-        const [register, agencySummaryResult, loanDeductions] = await Promise.all([
-          getPayrollRegisterAction(selectedRunId),
-          getAgencyDeductionSummaryAction(selectedRunId),
-          getLoanDeductionSummaryAction(selectedRunId),
-        ]);
+        const { register, agencySummary, loanDeductions } =
+          await getPayrollReportBundleAction(selectedRunId);
 
         if (cancelled) return;
 
@@ -4390,12 +4723,37 @@ export function PayrollWorkspace({
           status: "ready",
           runId: selectedRunId,
           register,
-          agencySummary: agencySummaryResult ?? EMPTY_AGENCY_SUMMARY,
+          agencySummary: agencySummary ?? EMPTY_AGENCY_SUMMARY,
           loanDeductions: loanDeductions ?? [],
           error: null,
         };
         reportCacheRef.current[cacheKey] = nextState;
         setReportState(nextState);
+        setEmployeeDetailsByKey((current) => {
+          const seededDetails = Object.fromEntries(
+            (register?.employees ?? [])
+              .filter((employee) => employee.lines.length > 0)
+              .map((employee) => [`${selectedRunId}:${employee.employeeId}`, employee])
+          );
+
+          const next = {
+            ...current,
+            ...seededDetails,
+          };
+          employeeDetailsByKeyRef.current = next;
+          return next;
+        });
+        setEmployeeDetailStatusByKey((current) => ({
+          ...current,
+          ...Object.fromEntries(
+            (register?.employees ?? [])
+              .filter((employee) => employee.lines.length > 0)
+              .map((employee) => [
+                `${selectedRunId}:${employee.employeeId}`,
+                "ready" as LoadStatus,
+              ])
+          ),
+        }));
       } catch (error) {
         if (cancelled) return;
 
@@ -4450,18 +4808,28 @@ export function PayrollWorkspace({
 
     void (async () => {
       try {
-        const data = await getAttendancePeriodDtrSummaryAction(selectedPeriodKey);
+        const { summary, heldRows } =
+          await getAttendancePeriodBundleAction(selectedPeriodKey);
 
         if (cancelled) return;
 
         const nextState: AttendanceDtrState = {
           status: "ready",
           periodId: selectedPeriodKey,
-          data,
+          data: summary,
+          error: null,
+        };
+        const nextHoldState: typeof attendanceDtrHeldRowsState = {
+          status: "ready",
+          periodId: selectedPeriodKey,
+          data: heldRows,
           error: null,
         };
         attendanceDtrCacheRef.current[cacheKey] = nextState;
+        attendanceHoldCacheRef.current[`attendance-hold:${selectedPeriodKey}`] =
+          nextHoldState;
         setAttendanceDtrState(nextState);
+        setAttendanceDtrHeldRowsState(nextHoldState);
       } catch (error) {
         if (cancelled) return;
 
@@ -4578,6 +4946,9 @@ export function PayrollWorkspace({
             invalidatePayrollResourceCache([
               `attendance-summary:${selectedPeriodKey}`,
               `attendance-rows:${selectedPeriodKey}:`,
+              `attendance-hold:${selectedPeriodKey}`,
+              `account-code:${selectedPeriodKey}:`,
+              `manual:${selectedPeriodKey}:`,
             ]);
             setAttendanceDtrHeldRowsState((prev) =>
               prev.periodId === selectedPeriodKey
@@ -4604,6 +4975,9 @@ export function PayrollWorkspace({
             invalidatePayrollResourceCache([
               `attendance-summary:${selectedPeriodKey}`,
               `attendance-rows:${selectedPeriodKey}:`,
+              `attendance-hold:${selectedPeriodKey}`,
+              `account-code:${selectedPeriodKey}:`,
+              `manual:${selectedPeriodKey}:`,
             ]);
             setAttendanceDtrHeldRowsState((prev) =>
               prev.periodId === selectedPeriodKey
@@ -4657,6 +5031,13 @@ export function PayrollWorkspace({
     }
     if (activeTab !== "attendanceHold") return;
 
+    const cacheKey = `attendance-hold:${selectedPeriodKey}`;
+    const cachedState = attendanceHoldCacheRef.current[cacheKey];
+    if (cachedState) {
+      setAttendanceDtrHeldRowsState(cachedState);
+      return;
+    }
+
     setAttendanceDtrHeldRowsState({
       status: "loading",
       periodId: selectedPeriodKey,
@@ -4669,12 +5050,14 @@ export function PayrollWorkspace({
       try {
         const data = await getAttendanceDtrHeldRowsAction(selectedPeriodKey);
         if (cancelled) return;
-        setAttendanceDtrHeldRowsState({
+        const nextState: typeof attendanceDtrHeldRowsState = {
           status: "ready",
           periodId: selectedPeriodKey,
           data: data as AttendanceDtrHeldRowsView,
           error: null,
-        });
+        };
+        attendanceHoldCacheRef.current[cacheKey] = nextState;
+        setAttendanceDtrHeldRowsState(nextState);
       } catch (error) {
         if (cancelled) return;
         setAttendanceDtrHeldRowsState({
@@ -4715,9 +5098,7 @@ export function PayrollWorkspace({
     const late = splitAttendanceHoldDraftMinutes(employee.lateMinutes);
     const undertime = splitAttendanceHoldDraftMinutes(employee.undertimeMinutes);
     const overtime = splitAttendanceHoldDraftMinutes(employee.overtimeMinutes);
-    const targetPayrollPeriodId =
-      employee.rows.find((row) => row.targetPayrollPeriodId)?.targetPayrollPeriodId ??
-      "";
+    const targetPayrollPeriodId = selectedPeriodKey ?? "";
 
     return {
       targetPayrollPeriodId,
@@ -4773,7 +5154,11 @@ export function PayrollWorkspace({
 
     if (lateMinutes == null || undertimeMinutes == null) return null;
 
-    return Math.max(0, employee.intendedWorkedMinutes - lateMinutes - undertimeMinutes);
+    return computeAttendanceHoldWorkedMinutes({
+      intendedWorkedMinutes: employee.intendedWorkedMinutes,
+      lateMinutes,
+      undertimeMinutes,
+    });
   }
 
   function updateAttendanceHoldApprovalDraft(
@@ -4932,8 +5317,12 @@ export function PayrollWorkspace({
       return;
     }
 
+    if (!selectedPeriodKey) {
+      toast.error("Select a payroll period before saving held biometrics.");
+      return;
+    }
     if (!draft.targetPayrollPeriodId) {
-      toast.error("Select a payroll period before approving held biometrics.");
+      toast.error("Select a target payroll period before saving held biometrics.");
       return;
     }
 
@@ -4961,7 +5350,7 @@ export function PayrollWorkspace({
       overtimeMinutes == null
     ) {
       toast.error(
-        "Enter non-negative whole-number hours and minutes from 0 to 59 before approving."
+        "Enter non-negative whole-number hours and minutes from 0 to 59 before saving."
       );
       return;
     }
@@ -4982,6 +5371,7 @@ export function PayrollWorkspace({
         lateMinutes,
         undertimeMinutes,
         overtimeMinutes,
+        workedManuallyEdited: draft.workedManuallyEdited,
       });
       const generatedAccountCodeRowCount = result.affectedTargetPeriods.reduce(
         (total, period) => total + period.generatedAccountCodeRowCount,
@@ -4992,7 +5382,7 @@ export function PayrollWorkspace({
         0
       );
       toast.success(
-        `${employee.employeeName} Attendance Hold approved for ${result.targetPayrollPeriodCode}.`
+        `${employee.employeeName} Attendance Hold saved for ${result.targetPayrollPeriodCode}.`
       );
       toast.message("Attendance Hold payroll rows", {
         description: `${generatedAccountCodeRowCount} combined account-code row${
@@ -5200,7 +5590,10 @@ export function PayrollWorkspace({
     deleteCacheKeys(reportCacheRef, prefixes);
     deleteCacheKeys(attendanceDtrCacheRef, prefixes);
     deleteCacheKeys(attendanceDtrRowsCacheRef, prefixes);
+    deleteCacheKeys(attendanceHoldCacheRef, prefixes);
     deleteCacheKeys(payrollExceptionCacheRef, prefixes);
+    deleteCacheKeys(manualPayrollCacheRef, prefixes);
+    deleteCacheKeys(payrollAccountCodeImportBatchCacheRef, prefixes);
   }
 
   async function getCachedManualPayrollAccountCodeOptions() {
@@ -5228,6 +5621,7 @@ export function PayrollWorkspace({
   function applyManualPayrollWorkspace(
     workspace: ManualPayrollEntryWorkspaceView
   ) {
+    const cacheKey = `manual:${workspace.payrollPeriod.id}:${workspace.employee.employeeId}`;
     const nextState: ManualPayrollState = {
       status: "ready",
       periodId: workspace.payrollPeriod.id,
@@ -5236,6 +5630,7 @@ export function PayrollWorkspace({
       error: null,
     };
 
+    manualPayrollCacheRef.current[cacheKey] = nextState;
     setManualPayrollState(nextState);
     setManualPayrollDraft(createManualPayrollDraft(workspace));
   }
@@ -5287,7 +5682,17 @@ export function PayrollWorkspace({
     await refreshManualPayrollWorkspace({ preserveDirtyDraft: false });
   }
 
-  async function refreshPayrollAccountCodeImportBatches(periodId: string) {
+  async function refreshPayrollAccountCodeImportBatches(
+    periodId: string,
+    options?: { force?: boolean }
+  ) {
+    const cacheKey = `account-code-import-batches:${periodId}`;
+    const cachedState = payrollAccountCodeImportBatchCacheRef.current[cacheKey];
+    if (!options?.force && cachedState) {
+      setPayrollAccountCodeImportBatchState(cachedState);
+      return cachedState.batches;
+    }
+
     setPayrollAccountCodeImportBatchState((current) => ({
       status: "loading",
       periodId,
@@ -5297,12 +5702,15 @@ export function PayrollWorkspace({
 
     try {
       const batches = await getPayrollAccountCodeImportBatchesAction(periodId);
-      setPayrollAccountCodeImportBatchState({
+      const nextState: PayrollAccountCodeImportBatchState = {
         status: "ready",
         periodId,
         batches,
         error: null,
-      });
+      };
+      payrollAccountCodeImportBatchCacheRef.current[cacheKey] = nextState;
+      setPayrollAccountCodeImportBatchState(nextState);
+      return batches;
     } catch (error) {
       setPayrollAccountCodeImportBatchState({
         status: "error",
@@ -5310,6 +5718,7 @@ export function PayrollWorkspace({
         batches: [],
         error: getErrorMessage(error, "Unable to load imported files."),
       });
+      return null;
     }
   }
 
@@ -5335,7 +5744,7 @@ export function PayrollWorkspace({
       error: null,
     };
 
-    payrollExceptionCacheRef.current[`exceptions:${periodId}:${selectedEmployeeId}`] =
+    payrollExceptionCacheRef.current[`account-code:${periodId}:${selectedEmployeeId}`] =
       nextState;
     setPayrollExceptionState(nextState);
     setPayrollExceptionDrafts(
@@ -5360,7 +5769,10 @@ export function PayrollWorkspace({
     if (affectedPeriodIds.length === 0) return;
 
     invalidatePayrollResourceCache(
-      affectedPeriodIds.flatMap((periodId) => [`exceptions:${periodId}:`])
+      affectedPeriodIds.flatMap((periodId) => [
+        `account-code:${periodId}:`,
+        `manual:${periodId}:`,
+      ])
     );
 
     if (
@@ -5371,6 +5783,270 @@ export function PayrollWorkspace({
       await refreshSelectedPayrollAccountCodeWorkspace(selectedPeriod.id);
     }
   }
+
+  useEffect(() => {
+    payrollWorkshopPrefetchVersionRef.current += 1;
+    const version = payrollWorkshopPrefetchVersionRef.current;
+
+    if (!selectedPeriodKey) return;
+
+    const isStale = () => payrollWorkshopPrefetchVersionRef.current !== version;
+    const reserveRequest = (key: string) => {
+      if (payrollWorkshopPrefetchRequestsRef.current.has(key)) return false;
+      payrollWorkshopPrefetchRequestsRef.current.add(key);
+      return true;
+    };
+    const releaseRequest = (key: string) => {
+      payrollWorkshopPrefetchRequestsRef.current.delete(key);
+    };
+
+    const prefetchRunEmployeeDetails = async () => {
+      if (!selectedRunId) return;
+
+      const employeeIds = getAdjacentEmployeeIds(
+        filteredRunEmployees,
+        selectedEmployeeId
+      );
+
+      await runWithConcurrency(
+        employeeIds,
+        PAYROLL_WORKSHOP_PREFETCH_CONCURRENCY,
+        async (employeeId) => {
+          const cacheKey = `${selectedRunId}:${employeeId}`;
+          const employeeSummary = runEmployees.find(
+            (employee) => employee.employeeId === employeeId
+          );
+
+          if (
+            employeeSummary?.lines.length ||
+            employeeDetailsByKeyRef.current[cacheKey] ||
+            employeeDetailRequestsRef.current.has(cacheKey)
+          ) {
+            return;
+          }
+
+          employeeDetailRequestsRef.current.add(cacheKey);
+
+          try {
+            const detail = await getPayrollRunEmployeeDetailAction(
+              selectedRunId,
+              employeeId
+            );
+
+            if (!detail || isStale()) return;
+
+            setEmployeeDetailsByKey((current) => {
+              const next = {
+                ...current,
+                [cacheKey]: detail,
+              };
+              employeeDetailsByKeyRef.current = next;
+              return next;
+            });
+            setEmployeeDetailStatusByKey((current) => ({
+              ...current,
+              [cacheKey]: "ready",
+            }));
+          } catch {
+            if (!isStale()) {
+              setEmployeeDetailStatusByKey((current) => ({
+                ...current,
+                [cacheKey]: "error",
+              }));
+            }
+          } finally {
+            employeeDetailRequestsRef.current.delete(cacheKey);
+          }
+        }
+      );
+    };
+
+    const prefetchAttendanceRows = async () => {
+      const selectedEmployeeId = selectedDtrEmployee?.employeeId ?? null;
+      const employeeIds = getAdjacentEmployeeIds(
+        filteredAttendanceDtrEmployees,
+        selectedEmployeeId
+      ).filter((employeeId) => employeeId !== selectedEmployeeId);
+
+      await runWithConcurrency(
+        employeeIds,
+        PAYROLL_WORKSHOP_PREFETCH_CONCURRENCY,
+        async (employeeId) => {
+          const cacheKey = `attendance-rows:${selectedPeriodKey}:${employeeId}`;
+          const requestKey = `prefetch:${cacheKey}`;
+
+          if (attendanceDtrRowsCacheRef.current[cacheKey]) return;
+          if (!reserveRequest(requestKey)) return;
+
+          try {
+            const data = await getAttendancePeriodDtrEmployeeRowsAction(
+              selectedPeriodKey,
+              employeeId
+            );
+
+            if (isStale()) return;
+
+            attendanceDtrRowsCacheRef.current[cacheKey] = {
+              status: "ready",
+              periodId: selectedPeriodKey,
+              employeeId,
+              data,
+              error: null,
+            };
+          } catch {
+            // Background warmup stays quiet; the active view reports load errors.
+          } finally {
+            releaseRequest(requestKey);
+          }
+        }
+      );
+    };
+
+    const prefetchPayrollAccountCodes = async () => {
+      const selectedEmployeeId =
+        selectedPayrollAccountCodeEmployee?.employeeId ?? null;
+      const employeeIds = getAdjacentEmployeeIds(
+        filteredPayrollAccountCodeEmployees,
+        selectedEmployeeId
+      ).filter((employeeId) => employeeId !== selectedEmployeeId);
+
+      await runWithConcurrency(
+        employeeIds,
+        PAYROLL_WORKSHOP_PREFETCH_CONCURRENCY,
+        async (employeeId) => {
+          const cacheKey = `account-code:${selectedPeriodKey}:${employeeId}`;
+          const requestKey = `prefetch:${cacheKey}`;
+
+          if (payrollExceptionCacheRef.current[cacheKey]) return;
+          if (!reserveRequest(requestKey)) return;
+
+          try {
+            const workspace = await getEmployeePayrollExceptionWorkspaceAction(
+              selectedPeriodKey,
+              employeeId
+            );
+
+            if (isStale()) return;
+
+            payrollExceptionCacheRef.current[cacheKey] = {
+              status: "ready",
+              periodId: selectedPeriodKey,
+              employeeId,
+              rows: workspace.rows,
+              recurringRows: workspace.recurringRows,
+              leaveRows: workspace.leaveRows,
+              loanRows: workspace.loanRows,
+              accountCodeOptions: workspace.accountCodeOptions,
+              error: null,
+            };
+          } catch {
+            // Background warmup stays quiet; the active view reports load errors.
+          } finally {
+            releaseRequest(requestKey);
+          }
+        }
+      );
+    };
+
+    const prefetchManualPayroll = async () => {
+      const selectedEmployeeId =
+        selectedManualPayrollEmployee?.employeeId ?? null;
+      const employeeIds = getAdjacentEmployeeIds(
+        filteredManualPayrollEmployees,
+        selectedEmployeeId
+      ).filter((employeeId) => employeeId !== selectedEmployeeId);
+      let accountCodeOptionsRequest: Promise<
+        ManualPayrollAccountCodeOptionView[]
+      > | null = null;
+      const loadAccountCodeOptions = () => {
+        if (manualPayrollAccountCodeOptionsRef.current) {
+          return Promise.resolve(manualPayrollAccountCodeOptionsRef.current);
+        }
+
+        accountCodeOptionsRequest ??= getManualPayrollAccountCodeOptionsAction().then(
+          (options) => {
+            manualPayrollAccountCodeOptionsRef.current = options;
+            return options;
+          }
+        );
+
+        return accountCodeOptionsRequest;
+      };
+
+      await runWithConcurrency(
+        employeeIds,
+        PAYROLL_WORKSHOP_PREFETCH_CONCURRENCY,
+        async (employeeId) => {
+          const cacheKey = `manual:${selectedPeriodKey}:${employeeId}`;
+          const requestKey = `prefetch:${cacheKey}`;
+
+          if (manualPayrollCacheRef.current[cacheKey]) return;
+          if (!reserveRequest(requestKey)) return;
+
+          try {
+            const [workspaceWithoutOptions, accountCodeOptions] =
+              await Promise.all([
+                getManualPayrollEntryWorkspaceAction(
+                  selectedPeriodKey,
+                  employeeId,
+                  false
+                ),
+                loadAccountCodeOptions(),
+              ]);
+            const workspace = {
+              ...workspaceWithoutOptions,
+              accountCodeOptions,
+            };
+
+            if (isStale()) return;
+
+            manualPayrollCacheRef.current[cacheKey] = {
+              status: "ready",
+              periodId: selectedPeriodKey,
+              employeeId,
+              data: workspace,
+              error: null,
+            };
+          } catch {
+            // Background warmup stays quiet; the active view reports load errors.
+          } finally {
+            releaseRequest(requestKey);
+          }
+        }
+      );
+    };
+
+    void (async () => {
+      if (activeTab === "run") {
+        await prefetchRunEmployeeDetails();
+      } else if (activeTab === "attendance") {
+        await prefetchAttendanceRows();
+      } else if (activeTab === "accountCodes") {
+        await prefetchPayrollAccountCodes();
+      } else if (activeTab === "manual") {
+        await prefetchManualPayroll();
+      }
+    })();
+
+    return () => {
+      if (payrollWorkshopPrefetchVersionRef.current === version) {
+        payrollWorkshopPrefetchVersionRef.current += 1;
+      }
+    };
+  }, [
+    activeTab,
+    filteredAttendanceDtrEmployees,
+    filteredManualPayrollEmployees,
+    filteredPayrollAccountCodeEmployees,
+    filteredRunEmployees,
+    runEmployees,
+    selectedDtrEmployee?.employeeId,
+    selectedEmployeeId,
+    selectedManualPayrollEmployee?.employeeId,
+    selectedPayrollAccountCodeEmployee?.employeeId,
+    selectedPeriodKey,
+    selectedRunId,
+  ]);
 
   function updatePayrollExceptionDraft(
     localId: string,
@@ -5474,7 +6150,7 @@ export function PayrollWorkspace({
         error: null,
       };
       payrollExceptionCacheRef.current[
-        `exceptions:${selectedPeriod.id}:${selectedPayrollAccountCodeEmployee.employeeId}`
+        `account-code:${selectedPeriod.id}:${selectedPayrollAccountCodeEmployee.employeeId}`
       ] = nextState;
       setPayrollExceptionState(nextState);
       setPayrollExceptionDrafts(
@@ -5483,10 +6159,16 @@ export function PayrollWorkspace({
       invalidatePayrollResourceCache([
         `attendance-summary:${selectedPeriod.id}`,
         `attendance-rows:${selectedPeriod.id}:`,
+        `attendance-hold:${selectedPeriod.id}`,
+        `account-code:${selectedPeriod.id}:`,
+        `manual:${selectedPeriod.id}:`,
         ...(selectedRunId
           ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
           : []),
       ]);
+      payrollExceptionCacheRef.current[
+        `account-code:${selectedPeriod.id}:${selectedPayrollAccountCodeEmployee.employeeId}`
+      ] = nextState;
       setAttendanceDtrReloadKey((current) => current + 1);
       await refreshWorkspaceSnapshot();
       await refreshManualPayrollAfterExternalChange();
@@ -5562,7 +6244,9 @@ export function PayrollWorkspace({
         toast.message("Account-code import details", {
           description: detailMessage,
         });
-        await refreshPayrollAccountCodeImportBatches(selectedPeriod.id);
+        await refreshPayrollAccountCodeImportBatches(selectedPeriod.id, {
+          force: true,
+        });
 
         if (result.skippedRows.length > 0) {
           toast.message("First skipped import row", {
@@ -5571,9 +6255,12 @@ export function PayrollWorkspace({
         }
 
         invalidatePayrollResourceCache([
-          `exceptions:${selectedPeriod.id}:`,
+          `account-code:${selectedPeriod.id}:`,
+          `manual:${selectedPeriod.id}:`,
+          `account-code-import-batches:${selectedPeriod.id}`,
           `attendance-summary:${selectedPeriod.id}`,
           `attendance-rows:${selectedPeriod.id}:`,
+          `attendance-hold:${selectedPeriod.id}`,
           ...(selectedRunId
             ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
             : []),
@@ -5602,7 +6289,7 @@ export function PayrollWorkspace({
           };
 
           payrollExceptionCacheRef.current[
-            `exceptions:${selectedPeriod.id}:${selectedEmployeeId}`
+            `account-code:${selectedPeriod.id}:${selectedEmployeeId}`
           ] = nextState;
           setPayrollExceptionState(nextState);
           setPayrollExceptionDrafts(
@@ -5661,11 +6348,16 @@ export function PayrollWorkspace({
             } marked stale.`,
           });
         }
-        await refreshPayrollAccountCodeImportBatches(selectedPeriod.id);
+        await refreshPayrollAccountCodeImportBatches(selectedPeriod.id, {
+          force: true,
+        });
         invalidatePayrollResourceCache([
-          `exceptions:${selectedPeriod.id}:`,
+          `account-code:${selectedPeriod.id}:`,
+          `manual:${selectedPeriod.id}:`,
+          `account-code-import-batches:${selectedPeriod.id}`,
           `attendance-summary:${selectedPeriod.id}`,
           `attendance-rows:${selectedPeriod.id}:`,
+          `attendance-hold:${selectedPeriod.id}`,
           ...(selectedRunId
             ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
             : []),
@@ -5691,7 +6383,7 @@ export function PayrollWorkspace({
           };
 
           payrollExceptionCacheRef.current[
-            `exceptions:${selectedPeriod.id}:${selectedEmployeeId}`
+            `account-code:${selectedPeriod.id}:${selectedEmployeeId}`
           ] = nextState;
           setPayrollExceptionState(nextState);
           setPayrollExceptionDrafts(
@@ -5744,7 +6436,7 @@ export function PayrollWorkspace({
         error: null,
       };
       payrollExceptionCacheRef.current[
-        `exceptions:${selectedPeriod.id}:${selectedPayrollAccountCodeEmployee.employeeId}`
+        `account-code:${selectedPeriod.id}:${selectedPayrollAccountCodeEmployee.employeeId}`
       ] = nextState;
       setPayrollExceptionState(nextState);
       setPayrollLoanDraftAmounts(
@@ -5949,6 +6641,9 @@ export function PayrollWorkspace({
         error: null,
       };
 
+      manualPayrollCacheRef.current[
+        `manual:${workspaceForCache.payrollPeriod.id}:${workspaceForCache.employee.employeeId}`
+      ] = nextState;
       setManualPayrollState(nextState);
       setManualPayrollDraft(createManualPayrollDraft(workspaceForCache));
       toast.success("Manual payroll override saved. Recompute when ready to update reports.");
@@ -6010,6 +6705,9 @@ export function PayrollWorkspace({
         error: null,
       };
 
+      manualPayrollCacheRef.current[
+        `manual:${workspaceForCache.payrollPeriod.id}:${workspaceForCache.employee.employeeId}`
+      ] = nextState;
       setManualPayrollState(nextState);
       setManualPayrollDraft(createManualPayrollDraft(workspaceForCache));
       toast.success("Manual payroll override deleted. Recompute when ready to restore computed payroll.");
@@ -6092,7 +6790,7 @@ export function PayrollWorkspace({
         error: null,
       };
       payrollExceptionCacheRef.current[
-        `exceptions:${selectedPeriod.id}:${selectedDtrEmployee.employeeId}`
+        `account-code:${selectedPeriod.id}:${selectedDtrEmployee.employeeId}`
       ] = nextPayrollExceptionState;
 
       if (
@@ -6109,10 +6807,16 @@ export function PayrollWorkspace({
       invalidatePayrollResourceCache([
         `attendance-summary:${selectedPeriod.id}`,
         `attendance-rows:${selectedPeriod.id}:`,
+        `attendance-hold:${selectedPeriod.id}`,
+        `account-code:${selectedPeriod.id}:`,
+        `manual:${selectedPeriod.id}:`,
         ...(selectedRunId
           ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
           : []),
       ]);
+      payrollExceptionCacheRef.current[
+        `account-code:${selectedPeriod.id}:${selectedDtrEmployee.employeeId}`
+      ] = nextPayrollExceptionState;
       setAttendanceDtrReloadKey((current) => current + 1);
       await refreshWorkspaceSnapshot();
       await refreshManualPayrollAfterExternalChange();
@@ -6204,7 +6908,7 @@ export function PayrollWorkspace({
         error: null,
       };
       payrollExceptionCacheRef.current[
-        `exceptions:${selectedPeriod.id}:${selectedDtrEmployee.employeeId}`
+        `account-code:${selectedPeriod.id}:${selectedDtrEmployee.employeeId}`
       ] = nextPayrollExceptionState;
 
       if (
@@ -6222,10 +6926,16 @@ export function PayrollWorkspace({
       invalidatePayrollResourceCache([
         `attendance-summary:${selectedPeriod.id}`,
         `attendance-rows:${selectedPeriod.id}:`,
+        `attendance-hold:${selectedPeriod.id}`,
+        `account-code:${selectedPeriod.id}:`,
+        `manual:${selectedPeriod.id}:`,
         ...(selectedRunId
           ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
           : []),
       ]);
+      payrollExceptionCacheRef.current[
+        `account-code:${selectedPeriod.id}:${selectedDtrEmployee.employeeId}`
+      ] = nextPayrollExceptionState;
       setAttendanceDtrReloadKey((current) => current + 1);
       setAttendanceDtrHeldRowsState((prev) =>
         prev.periodId === selectedPeriod.id
@@ -6463,6 +7173,16 @@ export function PayrollWorkspace({
         setSelectedAttendanceFiles([]);
         setFileInputKey((current) => current + 1);
         setAttendanceDtrReloadKey((current) => current + 1);
+        invalidatePayrollResourceCache([
+          `account-code:${selectedPeriod.id}:`,
+          `manual:${selectedPeriod.id}:`,
+          `attendance-summary:${selectedPeriod.id}`,
+          `attendance-rows:${selectedPeriod.id}:`,
+          `attendance-hold:${selectedPeriod.id}`,
+          ...(selectedRunId
+            ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
+            : []),
+        ]);
 
         if (deniedCount > 0) {
           importSuccessMessage = `Attendance import finished. ${deniedCount} file(s) denied; see details below.`;
@@ -6484,6 +7204,18 @@ export function PayrollWorkspace({
       async () => {
         const result = await revertAttendanceImportBatchAction(batch.id);
         setAttendanceDtrReloadKey((current) => current + 1);
+        if (selectedPeriod) {
+          invalidatePayrollResourceCache([
+            `account-code:${selectedPeriod.id}:`,
+            `manual:${selectedPeriod.id}:`,
+            `attendance-summary:${selectedPeriod.id}`,
+            `attendance-rows:${selectedPeriod.id}:`,
+            `attendance-hold:${selectedPeriod.id}`,
+            ...(selectedRunId
+              ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
+              : []),
+          ]);
+        }
 
         toast.message("Attendance import reverted", {
           description: `${result.sourceFileName}: ${result.rawLogCount} raw log(s) and ${result.summaryCount} daily summary row(s) removed. ${result.staleRunCount} payroll run(s) marked stale.`,
@@ -6505,9 +7237,11 @@ export function PayrollWorkspace({
         const result = await refreshAttendancePeriodSummariesAction(selectedPeriod.id);
         setAttendanceDtrReloadKey((current) => current + 1);
         invalidatePayrollResourceCache([
-          `exceptions:${selectedPeriod.id}:`,
+          `account-code:${selectedPeriod.id}:`,
+          `manual:${selectedPeriod.id}:`,
           `attendance-summary:${selectedPeriod.id}`,
           `attendance-rows:${selectedPeriod.id}:`,
+          `attendance-hold:${selectedPeriod.id}`,
           ...(selectedRunId
             ? [`reports:${selectedRunId}`, `payslip:${selectedRunId}:`]
             : []),
@@ -6515,7 +7249,7 @@ export function PayrollWorkspace({
         await refreshSelectedPayrollAccountCodeWorkspace(selectedPeriod.id);
 
         toast.message("Attendance summaries refreshed", {
-          description: `${result.payrollPeriodCode}: ${result.summaryCount} summary row(s) rebuilt for ${result.employeeCount} employee(s), ${result.generatedAccountCodeRowCount} payroll account-code row(s) regenerated. ${result.staleRunCount} payroll run(s) marked stale.`,
+          description: `${result.payrollPeriodCode}: ${result.summaryCount} summary row(s) rebuilt for ${result.employeeCount} employee(s), ${result.generatedAccountCodeRowCount} payroll account-code row(s) regenerated. Attendance Hold refreshed for ${result.refreshedHoldApprovalCount} unapproved row(s); ${result.deletedHoldApprovalCount} unapproved row(s) and ${result.clearedManualHoldOverrideCount} stale manual Hold override(s) no longer on hold were cleared. Approved hold rows were unchanged. ${result.staleRunCount} payroll run(s) marked stale.`,
         });
       },
       "Attendance summaries refreshed."
@@ -7854,9 +8588,11 @@ export function PayrollWorkspace({
                         async () => {
                           await voidPayrollRun(selectedRun.id, reason);
                           invalidatePayrollResourceCache([
-                            `exceptions:${selectedPeriod.id}:`,
+                            `account-code:${selectedPeriod.id}:`,
+                            `manual:${selectedPeriod.id}:`,
                             `attendance-summary:${selectedPeriod.id}`,
                             `attendance-rows:${selectedPeriod.id}:`,
+                            `attendance-hold:${selectedPeriod.id}`,
                             `reports:${selectedRun.id}`,
                             `payslip:${selectedRun.id}:`,
                           ]);
@@ -9055,7 +9791,7 @@ export function PayrollWorkspace({
                         <div className="grid gap-3 px-6 md:grid-cols-3">
                           <div className="rounded-lg border p-3">
                             <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Line Count
+                              Employee Rows
                             </div>
                             <div className="mt-1 font-semibold">
                               {contributionReportRows.length}
@@ -9078,7 +9814,7 @@ export function PayrollWorkspace({
                             </div>
                           </div>
                         </div>
-                        <PayrollLineReportTable
+                        <PayrollContributionReportTable
                           rows={contributionReportRows}
                           emptyMessage="No contribution or tax lines were posted for this payroll run."
                           onEmployeeSelect={setSelectedEmployeeId}
@@ -9479,30 +10215,48 @@ export function PayrollWorkspace({
                                 onClick={(event) => event.stopPropagation()}
                               >
                                 {approvalDraft ? (
-                                  <Select
-                                    value={approvalDraft.targetPayrollPeriodId}
-                                    onValueChange={(value) =>
-                                      updateAttendanceHoldApprovalDraft(
-                                        employee.employeeId,
-                                        { targetPayrollPeriodId: value }
-                                      )
-                                    }
-                                    disabled={isAttendanceHoldActionBusy}
-                                  >
-                                    <SelectTrigger
-                                      className="h-8"
-                                      aria-label={`Target payroll period for ${employee.employeeName}`}
+                                  <div className="space-y-1">
+                                    <label
+                                      className="text-[10px] font-medium uppercase text-muted-foreground"
+                                      htmlFor={`attendance-hold-target-${employee.employeeId}`}
                                     >
-                                      <SelectValue placeholder="Target period" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      {periods.map((period) => (
-                                        <SelectItem key={period.id} value={period.id}>
-                                          {period.code}
-                                        </SelectItem>
+                                      Target Payroll Period
+                                    </label>
+                                    <select
+                                      id={`attendance-hold-target-${employee.employeeId}`}
+                                      value={
+                                        approvalDraft.targetPayrollPeriodId ||
+                                        selectedPeriodKey ||
+                                        ""
+                                      }
+                                      onChange={(event) =>
+                                        updateAttendanceHoldApprovalDraft(
+                                          employee.employeeId,
+                                          {
+                                            targetPayrollPeriodId:
+                                              event.target.value,
+                                          }
+                                        )
+                                      }
+                                      disabled={
+                                        isAttendanceHoldActionBusy ||
+                                        attendanceHoldTargetPeriods.length === 0
+                                      }
+                                      className="flex h-8 w-full rounded-md border bg-background px-3 py-1 text-sm"
+                                    >
+                                      {attendanceHoldTargetPeriods.length === 0 ? (
+                                        <option value="">
+                                          No target periods available
+                                        </option>
+                                      ) : null}
+                                      {attendanceHoldTargetPeriods.map((period) => (
+                                        <option key={period.id} value={period.id}>
+                                          {period.code} ({period.startDate} -{" "}
+                                          {period.endDate})
+                                        </option>
                                       ))}
-                                    </SelectContent>
-                                  </Select>
+                                    </select>
+                                  </div>
                                 ) : null}
                                 <div className="flex gap-2">
                                   <Button
@@ -9524,7 +10278,7 @@ export function PayrollWorkspace({
                                     }
                                     disabled={isAttendanceHoldActionBusy}
                                   >
-                                    {isSavingApproval ? "Approving..." : "Approve"}
+                                    {isSavingApproval ? "Saving..." : "Save"}
                                   </Button>
                                   {employee.status !== "Hold" ? (
                                     <Button
@@ -10569,36 +11323,52 @@ export function PayrollWorkspace({
                             selectedDtrEmployee.totals.overrides.lateMinutes != null
                           }
                         >
-                          <div className="grid grid-cols-2 gap-2">
-                            <Input
-                              type="number"
-                              min="0"
-                              value={dtrOverrideDraft.lateHours}
-                              onChange={(event) =>
-                                updateDtrOverrideDraft({
-                                  lateHours: event.target.value,
-                                })
-                              }
-                              placeholder="h"
-                              aria-label="Late override hours"
-                              className="h-8"
-                              disabled={savingDtrPeriodOverrides}
-                            />
-                            <Input
-                              type="number"
-                              min="0"
-                              max="59"
-                              value={dtrOverrideDraft.lateMinutes}
-                              onChange={(event) =>
-                                updateDtrOverrideDraft({
-                                  lateMinutes: event.target.value,
-                                })
-                              }
-                              placeholder="m"
-                              aria-label="Late override minutes"
-                              className="h-8"
-                              disabled={savingDtrPeriodOverrides}
-                            />
+                          <div className="space-y-2">
+                            <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,7rem)] items-center gap-2">
+                              <div className="text-xs text-muted-foreground">
+                                Added
+                              </div>
+                              <Input
+                                value={formatMinutes(
+                                  selectedDtrEmployee.totals.latePenaltyMinutes
+                                )}
+                                readOnly
+                                aria-label="Late added penalty"
+                                className="h-8 bg-muted/40 text-right"
+                                disabled={savingDtrPeriodOverrides}
+                              />
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <Input
+                                type="number"
+                                min="0"
+                                value={dtrOverrideDraft.lateHours}
+                                onChange={(event) =>
+                                  updateDtrOverrideDraft({
+                                    lateHours: event.target.value,
+                                  })
+                                }
+                                placeholder="h"
+                                aria-label="Late override hours"
+                                className="h-8"
+                                disabled={savingDtrPeriodOverrides}
+                              />
+                              <Input
+                                type="number"
+                                min="0"
+                                max="59"
+                                value={dtrOverrideDraft.lateMinutes}
+                                onChange={(event) =>
+                                  updateDtrOverrideDraft({
+                                    lateMinutes: event.target.value,
+                                  })
+                                }
+                                placeholder="m"
+                                aria-label="Late override minutes"
+                                className="h-8"
+                                disabled={savingDtrPeriodOverrides}
+                              />
+                            </div>
                           </div>
                         </EditableDtrTotalCard>
                         <EditableDtrTotalCard
@@ -10868,7 +11638,9 @@ export function PayrollWorkspace({
                                       ? `${row.scheduledInTime} - ${row.scheduledOutTime}`
                                       : "-"}
                                   </TableCell>
-                                  <TableCell>{formatMinutes(row.workedMinutes)}</TableCell>
+                                  <TableCell>
+                                    {formatMinutes(getDisplayedDtrWorkedMinutes(row))}
+                                  </TableCell>
                                   <TableCell>{formatMinutes(row.lateMinutes)}</TableCell>
                                   <TableCell>{formatMinutes(row.undertimeMinutes)}</TableCell>
                                   <TableCell>{formatMinutes(row.overtimeMinutes)}</TableCell>
@@ -11599,6 +12371,9 @@ export function PayrollWorkspace({
                                                         {formatEmployeeNoDisplay(
                                                           group.employeeNo
                                                         ) || group.employeeNo}
+                                                      </span>
+                                                      <span className="text-xs text-muted-foreground">
+                                                        {group.reason}
                                                       </span>
                                                       <span className="text-xs text-muted-foreground">
                                                         {group.rowCount} row(s)

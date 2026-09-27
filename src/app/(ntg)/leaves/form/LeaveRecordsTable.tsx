@@ -8,6 +8,7 @@ import {
   useReactTable,
   ColumnFiltersState,
   SortingState,
+  PaginationState,
   getPaginationRowModel,
   getFilteredRowModel,
   getSortedRowModel,
@@ -34,10 +35,7 @@ import {
 import { Button } from "@/components/ui/button";
 import Filter from "@/components/react-table/Filter";
 import { LeaveRecord } from "./types";
-import {
-  formatEmployeeNoDisplay,
-  getEmployeeTypeDisplay,
-} from "@/utils/employeeDisplay";
+import { formatEmployeeNoDisplay } from "@/utils/employeeDisplay";
 
 interface Props {
   records: LeaveRecord[];
@@ -79,6 +77,14 @@ function formatLeaveDuration(start?: string | null, end?: string | null) {
     : `${s.toLocaleDateString()} - ${e.toLocaleDateString()}`;
 }
 
+function formatDepartmentName(record: LeaveRecord) {
+  if (record.departmentCode && record.departmentName) {
+    return `${record.departmentCode} | ${record.departmentName}`;
+  }
+
+  return record.departmentName ?? record.departmentCode ?? "-";
+}
+
 export function LeaveRecordsTable({
   records,
   selectedYear,
@@ -89,6 +95,10 @@ export function LeaveRecordsTable({
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [sorting, setSorting] = useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = useState("");
+  const [pagination, setPagination] = useState<PaginationState>({
+    pageIndex: 0,
+    pageSize: 10,
+  });
 
   const currentYear = new Date().getFullYear();
   const years = Array.from(
@@ -104,18 +114,10 @@ export function LeaveRecordsTable({
         header: "Employee No",
         cell: (info) => formatEmployeeNoDisplay(info.getValue()) || "-",
       }),
-      columnHelper.accessor(
-        (row) =>
-          getEmployeeTypeDisplay({
-            employeeType: row.employeeType,
-            employeeNo: row.employeeNo,
-          }),
-        {
-          id: "employeeType",
-          header: "Type",
-          cell: (info) => info.getValue() || "-",
-        }
-      ),
+      columnHelper.accessor((row) => formatDepartmentName(row), {
+        id: "department",
+        header: "Department",
+      }),
       columnHelper.accessor(
         (row) => [row.lastName, row.firstName].filter(Boolean).join(", "),
         {
@@ -182,13 +184,14 @@ export function LeaveRecordsTable({
       columnFilters,
       globalFilter,
       pagination: {
-        pageIndex: 0,
+        ...pagination,
         pageSize: 10, // 👈 THIS is what you want
       },
     },
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     onGlobalFilterChange: setGlobalFilter,
+    onPaginationChange: setPagination,
     getCoreRowModel: getCoreRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
     getFilteredRowModel: getFilteredRowModel(),

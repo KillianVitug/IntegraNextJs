@@ -9,6 +9,7 @@ export const metadata = {
 }
 
 const PAGE_SIZE = 50;
+const SHOW_ADMIN_PARAM = "showAdmin";
 
 export default async function EmployeeMaster({
     searchParams,
@@ -17,6 +18,7 @@ export default async function EmployeeMaster({
 }) {
     const params = await searchParams;
     const query = parseTableQueryParams(params, { id: "employeeNo", desc: false });
+    const showAdmin = params[SHOW_ADMIN_PARAM] === "true";
 
     const { data, total } = await getOpenEmployees({
         page: query.page,
@@ -24,6 +26,7 @@ export default async function EmployeeMaster({
         search: query.search,
         filters: query.filters,
         sort: query.sort,
+        employeeType: showAdmin ? "ADMIN" : "EMP",
     });
     const hasActiveFilters = Object.keys(query.filters).length > 0;
     const shouldShowTable = data.length > 0 || total > 0 || query.search || hasActiveFilters;
@@ -34,7 +37,7 @@ export default async function EmployeeMaster({
                 title="Employee Master"
                 description="Search, review, and maintain employee records."
             />
-            <EmployeeSearch />
+            <EmployeeSearch showAdmin={showAdmin} />
             {shouldShowTable
                 ? (
                     <>

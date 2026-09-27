@@ -1,4 +1,7 @@
-import { ATTENDANCE_DTR_WORKED_MINUTES_PER_PRESENT_DAY } from "./dtrOverrides";
+import {
+  ATTENDANCE_DTR_WORKED_MINUTES_PER_PRESENT_DAY,
+  computePayrollTardinessMinutes,
+} from "./dtrOverrides";
 
 export type BranchCalendarAccountCodeOverrideLike = {
   attendanceDate: string;
@@ -86,7 +89,7 @@ export function getBranchCalendarRegularMinutes(
   return Math.max(
     0,
     ATTENDANCE_DTR_WORKED_MINUTES_PER_PRESENT_DAY -
-      Math.max(0, Math.round(row.lateMinutes)) -
+      computePayrollTardinessMinutes(row.lateMinutes) -
       Math.max(0, Math.round(row.undertimeMinutes))
   );
 }

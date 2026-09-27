@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { CalendarIcon, X } from "lucide-react";
 import type { SelectShiftTableSchemaType } from "@/zod-schemas/shiftTable";
@@ -98,7 +97,6 @@ export function ManagerScheduleRequestForm({
   requests,
   initialShiftTables = [],
 }: Props) {
-  const router = useRouter();
   const [shiftTables, setShiftTables] =
     useState<SelectShiftTableSchemaType[]>(initialShiftTables);
   const [selectedRequest, setSelectedRequest] = useState<ScheduleRequestRow | null>(null);
@@ -170,6 +168,12 @@ export function ManagerScheduleRequestForm({
     });
   }
 
+  function reloadSchedulePage(status?: string) {
+    const params = new URLSearchParams({ employeeId });
+    if (status) params.set("status", status);
+    window.location.assign(`/managerSchedules?${params.toString()}`);
+  }
+
   function editRequest(request: ScheduleRequestRow) {
     if (!isEditableRequest(request)) return;
 
@@ -233,8 +237,7 @@ export function ManagerScheduleRequestForm({
             ? "Schedule change request updated."
             : "Schedule change request submitted.",
         );
-        resetForm();
-        router.refresh();
+        reloadSchedulePage(selectedRequest ? "request-updated" : "request-created");
       } catch (error) {
         toast.error(
           error instanceof Error
@@ -260,8 +263,7 @@ export function ManagerScheduleRequestForm({
         }
 
         toast.success("Schedule request deleted.");
-        resetForm();
-        router.refresh();
+        reloadSchedulePage("request-cancelled");
       } catch (error) {
         toast.error(
           error instanceof Error
@@ -400,7 +402,7 @@ export function ManagerScheduleRequestForm({
               <Button
                 type="button"
                 variant="outline"
-                onClick={resetForm}
+                onClick={() => reloadSchedulePage()}
                 disabled={isPending}
               >
                 Cancel Edit

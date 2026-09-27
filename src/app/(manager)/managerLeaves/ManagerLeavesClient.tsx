@@ -123,16 +123,10 @@ export function ManagerLeavesClient({
     void refresh();
   }, [refresh]);
 
-  function resetForm() {
-    setSelectedRecord(null);
-    setForm({
-      employeeId: defaultEmployeeId,
-      dateFiled: todayKey(),
-      leaveStartDate: todayKey(),
-      leaveEndDate: "",
-      leaveType: defaultLeaveType,
-      reason: "",
-    });
+  function reloadLeavePage(status?: string) {
+    const params = new URLSearchParams({ year: String(year) });
+    if (status) params.set("status", status);
+    window.location.assign(`/managerLeaves?${params.toString()}`);
   }
 
   function editRecord(record: LeaveRecord) {
@@ -173,8 +167,7 @@ export function ManagerLeavesClient({
         }
 
         toast.success(selectedRecord ? "Leave request updated." : "Leave request submitted.");
-        resetForm();
-        await refresh();
+        reloadLeavePage(selectedRecord ? "updated" : "created");
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "Unable to save leave request.");
       }
@@ -192,8 +185,7 @@ export function ManagerLeavesClient({
           return;
         }
         toast.success("Leave request cancelled.");
-        resetForm();
-        await refresh();
+        reloadLeavePage("cancelled");
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "Unable to cancel leave request.");
       }
@@ -285,7 +277,7 @@ export function ManagerLeavesClient({
           </Button>
           {selectedRecord ? (
             <>
-              <Button type="button" variant="outline" onClick={resetForm}>
+              <Button type="button" variant="outline" onClick={() => reloadLeavePage()}>
                 Cancel Edit
               </Button>
               <Button type="button" variant="destructive" onClick={handleCancelRequest}>

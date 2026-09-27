@@ -148,6 +148,15 @@ function buildLeaveCoverageByEmployeeDate(approvedLeaves: ApprovedLeaveRecord[])
   return coverageByDate;
 }
 
+function isSplitShiftSchedule(
+  shiftCode: string | null | undefined,
+  shiftName: string | null | undefined
+) {
+  return [shiftCode, shiftName].some((value) =>
+    value?.toUpperCase().includes("SPLIT")
+  );
+}
+
 function resolveShiftWindow(args: {
   employee: AttendanceEmployeeRecord;
   assignments: ShiftAssignmentRecord[];
@@ -176,6 +185,18 @@ function resolveShiftWindow(args: {
           args.shiftTableBreaksByShiftTableId.get(resolvedShiftTableId) ?? []
         )
       : [];
+  const requiresSplitPunches =
+    resolvedSchedule.source === "OVERRIDE"
+      ? isSplitShiftSchedule(
+          resolvedSchedule.overrideAssignment?.shiftCode,
+          resolvedSchedule.overrideAssignment?.shiftName
+        )
+      : resolvedSchedule.source === "WEEKLY_PATTERN"
+        ? isSplitShiftSchedule(
+            resolvedSchedule.weeklyPatternDay?.shiftCode,
+            resolvedSchedule.weeklyPatternDay?.shiftName
+          )
+        : false;
 
   return {
     activeShift: resolvedSchedule.overrideAssignment,
@@ -191,6 +212,7 @@ function resolveShiftWindow(args: {
       hoursPerDay,
       restDay: resolvedSchedule.shiftWindow.restDay,
       regularBreakWindows,
+      requiresSplitPunches,
     },
   };
 }

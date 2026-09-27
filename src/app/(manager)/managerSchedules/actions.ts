@@ -21,6 +21,8 @@ const WEEKDAY_ORDER = [
   "Sunday",
 ] as const;
 
+const MANAGER_WEEKLY_SCHEDULE_EFFECTIVE_FROM = "1900-01-01";
+
 function text(formData: FormData, name: string) {
   return String(formData.get(name) ?? "").trim();
 }
@@ -49,11 +51,14 @@ function managerSchedulesRedirect(args: {
   redirect(query ? `/managerSchedules?${query}` : "/managerSchedules");
 }
 
-function parseEffectiveDates(value: string) {
+function parseEffectiveDates(formData: FormData) {
   return [
     ...new Set(
-      value
-        .split(/[\s,;]+/)
+      formData
+        .getAll("effectiveDates")
+        .flatMap((value) =>
+          typeof value === "string" ? value.split(/[\s,;]+/) : [],
+        )
         .map((part) => part.trim())
         .filter(Boolean),
     ),
@@ -61,7 +66,7 @@ function parseEffectiveDates(value: string) {
 }
 
 function buildSchedulePayload(formData: FormData) {
-  const effectiveDates = parseEffectiveDates(text(formData, "effectiveDates"));
+  const effectiveDates = parseEffectiveDates(formData);
   const firstEffectiveDate = effectiveDates[0] ?? "";
   const lastEffectiveDate = effectiveDates[effectiveDates.length - 1] ?? "";
 
@@ -85,8 +90,8 @@ export async function saveManagerWeeklyPatternFromForm(formData: FormData) {
     await saveEmployeeWeeklyShiftPattern({
       id: maybeNumber(text(formData, "id")),
       employeeId,
-      effectiveFrom: text(formData, "effectiveFrom"),
-      effectiveTo: text(formData, "effectiveTo") || null,
+      effectiveFrom: MANAGER_WEEKLY_SCHEDULE_EFFECTIVE_FROM,
+      effectiveTo: null,
       days: WEEKDAY_ORDER.map((weekday) => ({
         weekday,
         shiftTableId: maybeNumber(text(formData, `day-${weekday}`)) ?? null,

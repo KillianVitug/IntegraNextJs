@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG,
   assertAttendanceLogsMatchPayrollPeriod,
   formatAttendanceLogDates,
   formatAttendancePayrollCodeRange,
@@ -104,6 +105,7 @@ function summarizeCustomScheduledDay(args: {
     toTime: string;
     deductMinutes: number;
   }>;
+  requiresSplitPunches?: boolean;
 }) {
   return summarizeEmployeeDay(
     "2026-03-02",
@@ -118,6 +120,40 @@ function summarizeCustomScheduledDay(args: {
       graceMinutes: 0,
       restDay: null,
       regularBreakWindows: args.regularBreakWindows,
+      requiresSplitPunches: args.requiresSplitPunches,
+    }
+  );
+}
+
+function summarizeSplitScheduledDay(args: {
+  firstInTime: string;
+  firstOutTime: string;
+  secondInTime: string;
+  secondOutTime: string;
+  requiresSplitPunches?: boolean;
+}) {
+  return summarizeEmployeeDay(
+    "2026-03-02",
+    [
+      buildScheduledLog(args.firstInTime, "IN", 1),
+      buildScheduledLog(args.firstOutTime, "OUT", 2),
+      buildScheduledLog(args.secondInTime, "IN", 3),
+      buildScheduledLog(args.secondOutTime, "OUT", 4),
+    ],
+    {
+      checkInTime: "08:00",
+      checkOutTime: "17:00",
+      breakMinutes: 60,
+      graceMinutes: 0,
+      restDay: null,
+      regularBreakWindows: [
+        {
+          fromTime: "12:00",
+          toTime: "13:00",
+          deductMinutes: 60,
+        },
+      ],
+      requiresSplitPunches: args.requiresSplitPunches,
     }
   );
 }
@@ -142,16 +178,23 @@ function buildRawScheduledLog(
 }
 
 function buildDoublePunchShiftAssignment(
-  isFlexible: boolean
+  isFlexible: boolean,
+  options?: {
+    id?: number;
+    shiftName?: string;
+    shiftCode?: string;
+  }
 ): ShiftAssignmentRecord {
   const timestamp = new Date("2026-01-01T00:00:00");
 
   return {
-    id: isFlexible ? 2 : 1,
+    id: options?.id ?? (isFlexible ? 2 : 1),
     employeeId: doublePunchEmployee.id,
     shiftTableId: null,
-    shiftName: isFlexible ? "Flexible Test Shift" : "Fixed Test Shift",
-    shiftCode: isFlexible ? "FLEX" : "FIXED",
+    shiftName:
+      options?.shiftName ??
+      (isFlexible ? "Flexible Test Shift" : "Fixed Test Shift"),
+    shiftCode: options?.shiftCode ?? (isFlexible ? "FLEX" : "FIXED"),
     shiftSchedule: "Morning",
     effectiveFrom: "2026-03-01",
     effectiveTo: null,
@@ -624,10 +667,10 @@ assert.equal(
 
 assert.equal(summarizeScheduledDay({ inTime: "08:01", outTime: "17:00" }).lateMinutes, 60);
 assert.equal(summarizeScheduledDay({ inTime: "08:30", outTime: "17:00" }).lateMinutes, 60);
-assert.equal(summarizeScheduledDay({ inTime: "08:31", outTime: "17:00" }).lateMinutes, 60);
-assert.equal(summarizeScheduledDay({ inTime: "08:59", outTime: "17:00" }).lateMinutes, 60);
-assert.equal(summarizeScheduledDay({ inTime: "09:00", outTime: "17:00" }).lateMinutes, 60);
-assert.equal(summarizeScheduledDay({ inTime: "09:10", outTime: "17:00" }).lateMinutes, 60);
+assert.equal(summarizeScheduledDay({ inTime: "08:31", outTime: "17:00" }).lateMinutes, 0);
+assert.equal(summarizeScheduledDay({ inTime: "08:59", outTime: "17:00" }).lateMinutes, 0);
+assert.equal(summarizeScheduledDay({ inTime: "09:00", outTime: "17:00" }).lateMinutes, 0);
+assert.equal(summarizeScheduledDay({ inTime: "09:10", outTime: "17:00" }).lateMinutes, 0);
 assert.equal(
   summarizeScheduledDay({
     inTime: "08:05",
@@ -647,17 +690,17 @@ assert.equal(
 assert.equal(summarizeScheduledDay({ inTime: "08:00", outTime: "17:00" }).undertimeMinutes, 0);
 assert.equal(summarizeScheduledDay({ inTime: "08:01", outTime: "17:00" }).undertimeMinutes, 0);
 assert.equal(summarizeScheduledDay({ inTime: "08:30", outTime: "17:00" }).undertimeMinutes, 0);
-assert.equal(summarizeScheduledDay({ inTime: "08:31", outTime: "17:00" }).undertimeMinutes, 30);
-assert.equal(summarizeScheduledDay({ inTime: "09:00", outTime: "17:00" }).undertimeMinutes, 30);
-assert.equal(summarizeScheduledDay({ inTime: "09:01", outTime: "17:00" }).undertimeMinutes, 60);
-assert.equal(summarizeScheduledDay({ inTime: "09:30", outTime: "17:00" }).undertimeMinutes, 60);
+assert.equal(summarizeScheduledDay({ inTime: "08:31", outTime: "17:00" }).undertimeMinutes, 60);
+assert.equal(summarizeScheduledDay({ inTime: "09:00", outTime: "17:00" }).undertimeMinutes, 60);
+assert.equal(summarizeScheduledDay({ inTime: "09:01", outTime: "17:00" }).undertimeMinutes, 90);
+assert.equal(summarizeScheduledDay({ inTime: "09:30", outTime: "17:00" }).undertimeMinutes, 90);
 assert.equal(
   summarizeScheduledDay({
     inTime: "08:36",
     outTime: "17:00",
     graceMinutes: 5,
   }).undertimeMinutes,
-  30
+  60
 );
 assert.equal(summarizeScheduledDay({ inTime: "08:00", outTime: "16:59" }).undertimeMinutes, 0);
 assert.equal(summarizeScheduledDay({ inTime: "08:00", outTime: "16:01" }).undertimeMinutes, 0);
@@ -691,6 +734,94 @@ assert.equal(
     ],
   }).undertimeMinutes,
   240
+);
+assert.deepEqual(
+  {
+    lateMinutes: summarizeSplitScheduledDay({
+      firstInTime: "08:00",
+      firstOutTime: "12:00",
+      secondInTime: "13:01",
+      secondOutTime: "17:00",
+      requiresSplitPunches: true,
+    }).lateMinutes,
+    undertimeMinutes: summarizeSplitScheduledDay({
+      firstInTime: "08:00",
+      firstOutTime: "12:00",
+      secondInTime: "13:01",
+      secondOutTime: "17:00",
+      requiresSplitPunches: true,
+    }).undertimeMinutes,
+  },
+  {
+    lateMinutes: 60,
+    undertimeMinutes: 0,
+  }
+);
+assert.deepEqual(
+  {
+    lateMinutes: summarizeSplitScheduledDay({
+      firstInTime: "08:00",
+      firstOutTime: "12:00",
+      secondInTime: "13:31",
+      secondOutTime: "17:00",
+      requiresSplitPunches: true,
+    }).lateMinutes,
+    undertimeMinutes: summarizeSplitScheduledDay({
+      firstInTime: "08:00",
+      firstOutTime: "12:00",
+      secondInTime: "13:31",
+      secondOutTime: "17:00",
+      requiresSplitPunches: true,
+    }).undertimeMinutes,
+  },
+  {
+    lateMinutes: 0,
+    undertimeMinutes: 60,
+  }
+);
+assert.deepEqual(
+  {
+    lateMinutes: summarizeSplitScheduledDay({
+      firstInTime: "08:01",
+      firstOutTime: "12:00",
+      secondInTime: "13:01",
+      secondOutTime: "17:00",
+      requiresSplitPunches: true,
+    }).lateMinutes,
+    undertimeMinutes: summarizeSplitScheduledDay({
+      firstInTime: "08:01",
+      firstOutTime: "12:00",
+      secondInTime: "13:01",
+      secondOutTime: "17:00",
+      requiresSplitPunches: true,
+    }).undertimeMinutes,
+  },
+  {
+    lateMinutes: 120,
+    undertimeMinutes: 0,
+  }
+);
+assert.deepEqual(
+  {
+    lateMinutes: summarizeSplitScheduledDay({
+      firstInTime: "08:00",
+      firstOutTime: "12:00",
+      secondInTime: "13:31",
+      secondOutTime: "17:00",
+      requiresSplitPunches: false,
+    }).lateMinutes,
+    undertimeMinutes: summarizeSplitScheduledDay({
+      firstInTime: "08:00",
+      firstOutTime: "12:00",
+      secondInTime: "13:31",
+      secondOutTime: "17:00",
+      requiresSplitPunches: false,
+    }).undertimeMinutes,
+  },
+  {
+    lateMinutes: 0,
+    undertimeMinutes: 0,
+  }
 );
 assert.equal(summarizeScheduledDay({ inTime: "08:00", outTime: "17:59" }).overtimeMinutes, 0);
 assert.equal(summarizeScheduledDay({ inTime: "08:00", outTime: "18:00" }).overtimeMinutes, 60);
@@ -953,6 +1084,109 @@ const oppositeDirectionSuggestions = buildAttendanceCorrectionSuggestionComputat
 assert.equal(
   getCorrectionByType(oppositeDirectionSuggestions, "Same-Direction Duplicate"),
   undefined
+);
+
+const splitShiftAssignment = buildDoublePunchShiftAssignment(false, {
+  id: 3,
+  shiftName: "Split Test Shift",
+  shiftCode: "SPLIT-AMPM",
+});
+const splitIncompleteLogs = [
+  buildRawScheduledLog("08:00", "IN", 101),
+  buildRawScheduledLog("13:00", "IN", 102),
+];
+const splitIncompleteSummaries = buildAttendanceSummaryComputations({
+  employees: [doublePunchEmployee],
+  logs: splitIncompleteLogs,
+  approvedLeaves: [],
+  shiftAssignments: [splitShiftAssignment],
+  weeklyPatterns: [],
+  shiftTableBreaksByShiftTableId: new Map(),
+  allowedAttendanceDateRange: doublePunchRange,
+});
+const splitIncompleteFlags = parseStoredAnomalyFlags(
+  splitIncompleteSummaries[0].anomalyFlags
+);
+const splitIncompleteMetrics = toDtrMetrics(
+  splitIncompleteSummaries[0],
+  splitIncompleteFlags
+);
+const splitIncompleteHeldRow = applyAttendanceDtrEffectiveStatus(
+  splitIncompleteMetrics,
+  null
+);
+
+assert.ok(
+  splitIncompleteFlags.includes(
+    ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG
+  )
+);
+assert.ok(splitIncompleteFlags.includes("MISSING_OUT"));
+assert.equal(getComputedAttendanceDtrStatus(splitIncompleteMetrics), "Hold");
+assert.equal(splitIncompleteHeldRow.workedMinutes, 0);
+assert.equal(splitIncompleteHeldRow.regularMinutes, 0);
+
+const splitIncompleteSuggestions = buildAttendanceCorrectionSuggestionComputations({
+  employees: [doublePunchEmployee],
+  logs: splitIncompleteLogs,
+  approvedLeaves: [],
+  shiftAssignments: [splitShiftAssignment],
+  weeklyPatterns: [],
+  shiftTableBreaksByShiftTableId: new Map(),
+  allowedAttendanceDateRange: doublePunchRange,
+});
+const splitIncompleteCorrection = getCorrectionByType(
+  splitIncompleteSuggestions,
+  "Ambiguous Sequence"
+);
+
+assert.ok(splitIncompleteCorrection);
+assert.notEqual(splitIncompleteCorrection.autoApprove, true);
+
+const splitCompleteSummaries = buildAttendanceSummaryComputations({
+  employees: [doublePunchEmployee],
+  logs: [
+    buildRawScheduledLog("08:00", "IN", 111),
+    buildRawScheduledLog("12:00", "OUT", 112),
+    buildRawScheduledLog("13:00", "IN", 113),
+    buildRawScheduledLog("17:00", "OUT", 114),
+  ],
+  approvedLeaves: [],
+  shiftAssignments: [splitShiftAssignment],
+  weeklyPatterns: [],
+  shiftTableBreaksByShiftTableId: new Map(),
+  allowedAttendanceDateRange: doublePunchRange,
+});
+const splitCompleteFlags = parseStoredAnomalyFlags(
+  splitCompleteSummaries[0].anomalyFlags
+);
+
+assert.equal(
+  splitCompleteFlags.includes(ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG),
+  false
+);
+assert.equal(
+  getComputedAttendanceDtrStatus(toDtrMetrics(splitCompleteSummaries[0])),
+  "Present"
+);
+assert.equal(splitCompleteSummaries[0].workedMinutes, 480);
+
+const nonSplitTwoInSummaries = buildAttendanceSummaryComputations({
+  employees: [doublePunchEmployee],
+  logs: splitIncompleteLogs,
+  approvedLeaves: [],
+  shiftAssignments: [fixedShiftAssignment],
+  weeklyPatterns: [],
+  shiftTableBreaksByShiftTableId: new Map(),
+  allowedAttendanceDateRange: doublePunchRange,
+});
+const nonSplitTwoInFlags = nonSplitTwoInSummaries[0].anomalyFlags
+  ? parseStoredAnomalyFlags(nonSplitTwoInSummaries[0].anomalyFlags)
+  : [];
+
+assert.equal(
+  nonSplitTwoInFlags.includes(ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG),
+  false
 );
 
 const flexibleDoublePunchSuggestions = buildAttendanceCorrectionSuggestionComputations({

@@ -1,8 +1,24 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, FileText, Upload } from "lucide-react";
+import {
+  getManagerAttendanceImportBatchUnmatchedDiagnosticsAction,
+  saveManagerAttendanceDtrDayMetricOverrideAction,
+} from "@/app/actions/attendanceImportAction";
+import {
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  Pencil,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
 import type {
+  AttendanceImportBatchDiagnosticsView,
   AttendanceDtrHeldRowsView,
   AttendanceDtrView,
 } from "@/app/(ntg)/payroll/types";
@@ -23,6 +39,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  computeAttendanceHoldWorkedMinutes,
+  computeDisplayedDtrWorkedMinutes,
+} from "@/lib/payroll/dtrOverrides";
 import { cn } from "@/lib/utils";
 import { formatEmployeeNoDisplay } from "@/utils/employeeDisplay";
 
@@ -51,6 +71,7 @@ type ManagerImportBatch = {
   unmatchedRows: number;
   duplicateRows: number;
   scopedMatchedRows: number;
+  canViewUnmatchedDiagnostics: boolean;
   notes: string | null;
   importedAt: string;
 };
@@ -67,6 +88,18 @@ type Props = {
   importStatus?: string;
   imported?: number;
   denied?: number;
+  unmatched?: number;
+  refreshStatus?: string;
+  summaries?: number;
+  removeStatus?: string;
+  removedLogs?: number;
+  removedSummaries?: number;
+  holdRefreshed?: number;
+  holdDeleted?: number;
+  holdOverridesCleared?: number;
+  payrollRecomputeStatus?: string;
+  payrollRunNumber?: number;
+  payrollRecomputeMessage?: string;
   holdEditEmployeeId?: string;
   holdStatus?: string;
   holdMessage?: string;
@@ -108,6 +141,17 @@ type AttendanceHoldDraft = {
   overtimeMinutes: string;
 };
 
+type ManagerDtrMetricDraft = {
+  lateHours: string;
+  lateMinutes: string;
+  undertimeHours: string;
+  undertimeMinutes: string;
+  overtimeHours: string;
+  overtimeMinutes: string;
+};
+
+type ManagerDtrMetricDraftField = keyof ManagerDtrMetricDraft;
+
 type AttendanceHoldMetric = "worked" | "late" | "undertime" | "overtime";
 
 type AttendanceHoldDraftTimeField =
@@ -127,6 +171,12 @@ type AttendanceHoldDisplayMinutes = {
   overtimeMinutes: number;
 };
 
+type AttendanceBatchDiagnosticsState = {
+  status: "loading" | "ready" | "error";
+  data: AttendanceImportBatchDiagnosticsView | null;
+  error: string | null;
+};
+
 function formatDateTime(value: string) {
   return new Intl.DateTimeFormat("en", {
     year: "numeric",
@@ -135,6 +185,34 @@ function formatDateTime(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function formatDateRange(startDate: string, endDate: string) {
+  if (startDate === endDate) return startDate;
+  return `${startDate} to ${endDate}`;
+}
+
+function formatSourceLineRange(
+  firstSourceLine: number | null,
+  lastSourceLine: number | null
+) {
+  const first = firstSourceLine ?? lastSourceLine;
+  const last = lastSourceLine ?? firstSourceLine;
+
+  if (first == null || last == null) return "Line -";
+  if (first === last) return `Line ${first}`;
+  return `Lines ${first}-${last}`;
+}
+
+function formatDeviceSite(deviceId: string | null, siteCode: string | null) {
+  const parts: string[] = [];
+  if (deviceId) parts.push(deviceId);
+  if (siteCode) parts.push(siteCode);
+  return parts.length > 0 ? parts.join(" / ") : "-";
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }
 
 function formatMinutes(minutes: number) {
@@ -149,25 +227,30 @@ function formatDays(days: number) {
   return days.toFixed(2).replace(/\.00$/, "");
 }
 
-function isFixedScheduleAttendanceHoldRow(
-  row: AttendanceDtrHeldRowsView["rows"][number]
+function getDisplayedDtrWorkedMinutes(
+  row: AttendanceDtrView["employees"][number]["rows"][number]
 ) {
-  return row.workedBaselineSource === "schedule" || row.scheduledMinutes > 0;
+  return computeDisplayedDtrWorkedMinutes({
+    workedMinutes: row.workedMinutes,
+    scheduledMinutes: row.scheduledMinutes,
+    lateMinutes: row.lateMinutes,
+    undertimeMinutes: row.undertimeMinutes,
+  });
 }
 
 function getAttendanceHoldRowDisplayMinutes(
   row: AttendanceDtrHeldRowsView["rows"][number]
 ): AttendanceHoldDisplayMinutes {
-  const isFixedSchedule = isFixedScheduleAttendanceHoldRow(row);
-
   if (row.approvalStatus === "Hold") {
     const lateMinutes = row.lateMinutes;
     const undertimeMinutes = row.undertimeMinutes;
 
     return {
-      workedMinutes: isFixedSchedule
-        ? row.intendedWorkedMinutes
-        : Math.max(0, row.intendedWorkedMinutes - lateMinutes - undertimeMinutes),
+      workedMinutes: computeAttendanceHoldWorkedMinutes({
+        intendedWorkedMinutes: row.intendedWorkedMinutes,
+        lateMinutes,
+        undertimeMinutes,
+      }),
       lateMinutes,
       undertimeMinutes,
       overtimeMinutes: row.overtimeMinutes,
@@ -180,9 +263,11 @@ function getAttendanceHoldRowDisplayMinutes(
   return {
     workedMinutes:
       row.approvedWorkedMinutes ??
-      (isFixedSchedule
-        ? row.intendedWorkedMinutes
-        : Math.max(0, row.intendedWorkedMinutes - lateMinutes - undertimeMinutes)),
+      computeAttendanceHoldWorkedMinutes({
+        intendedWorkedMinutes: row.intendedWorkedMinutes,
+        lateMinutes,
+        undertimeMinutes,
+      }),
     lateMinutes,
     undertimeMinutes,
     overtimeMinutes: row.approvedOvertimeMinutes ?? row.overtimeMinutes,
@@ -221,10 +306,78 @@ function isAttendanceHoldDraftTimeInput(value: string) {
   return /^\d*$/.test(value);
 }
 
+function getManagerDtrMetricDraftKey(employeeId: string, attendanceDate: string) {
+  return `${employeeId}:${attendanceDate}`;
+}
+
+function getManagerDtrMetricBaselineWorkedMinutes(
+  row: AttendanceDtrView["employees"][number]["rows"][number]
+) {
+  if (row.scheduledMinutes > 0) return row.scheduledMinutes;
+  if (row.biometricWorkedMinutes > 0) return row.biometricWorkedMinutes;
+  return row.workedMinutes > 0 ? row.workedMinutes : 8 * 60;
+}
+
+function getManagerDtrMetricComputedWorkedMinutes(args: {
+  row: AttendanceDtrView["employees"][number]["rows"][number];
+  lateMinutes: number;
+  undertimeMinutes: number;
+}) {
+  return Math.max(
+    0,
+    getManagerDtrMetricBaselineWorkedMinutes(args.row) -
+      args.lateMinutes -
+      args.undertimeMinutes
+  );
+}
+
+function createManagerDtrMetricDraft(
+  row: AttendanceDtrView["employees"][number]["rows"][number]
+): ManagerDtrMetricDraft {
+  const late = splitAttendanceHoldDraftMinutes(row.lateMinutes);
+  const undertime = splitAttendanceHoldDraftMinutes(row.undertimeMinutes);
+  const overtime = splitAttendanceHoldDraftMinutes(row.overtimeMinutes);
+
+  return {
+    lateHours: late.hours,
+    lateMinutes: late.minutes,
+    undertimeHours: undertime.hours,
+    undertimeMinutes: undertime.minutes,
+    overtimeHours: overtime.hours,
+    overtimeMinutes: overtime.minutes,
+  };
+}
+
+function getManagerDtrMetricDraftMinutes(draft: ManagerDtrMetricDraft) {
+  const lateMinutes = parseAttendanceHoldDraftTime(
+    draft.lateHours,
+    draft.lateMinutes
+  );
+  const undertimeMinutes = parseAttendanceHoldDraftTime(
+    draft.undertimeHours,
+    draft.undertimeMinutes
+  );
+  const overtimeMinutes = parseAttendanceHoldDraftTime(
+    draft.overtimeHours,
+    draft.overtimeMinutes
+  );
+
+  if (
+    lateMinutes == null ||
+    undertimeMinutes == null ||
+    overtimeMinutes == null
+  ) {
+    return null;
+  }
+
+  return { lateMinutes, undertimeMinutes, overtimeMinutes };
+}
+
 function importResultLabel(args: {
   importStatus?: string;
   imported?: number;
   denied?: number;
+  unmatched?: number;
 }) {
   if (!args.importStatus) return null;
   if (args.importStatus === "missing-files") {
@@ -239,10 +392,80 @@ function importResultLabel(args: {
 
   const imported = args.imported ?? 0;
   const denied = args.denied ?? 0;
+  const unmatched = args.unmatched ?? 0;
+  const unmatchedMessage =
+    unmatched > 0 ? ` ${unmatched} unmatched row(s) need review.` : "";
   if (denied > 0) {
-    return `${imported} DTR file(s) imported. ${denied} file(s) could not be imported.`;
+    return `${imported} DTR file(s) imported. ${denied} file(s) could not be imported.${unmatchedMessage}`;
   }
-  return `${imported} DTR file(s) imported.`;
+  return `${imported} DTR file(s) imported.${unmatchedMessage}`;
+}
+
+function refreshResultLabel(args: {
+  refreshStatus?: string;
+  summaries?: number;
+  holdRefreshed?: number;
+  holdDeleted?: number;
+  holdOverridesCleared?: number;
+}) {
+  if (!args.refreshStatus) return null;
+  if (args.refreshStatus === "missing-period") {
+    return "Select a payroll period before refreshing stored summaries.";
+  }
+  if (args.refreshStatus === "failed") {
+    return "Stored summary refresh failed. No approved Attendance Hold values were changed.";
+  }
+
+  const summaries = args.summaries ?? 0;
+  const holdRefreshed = args.holdRefreshed ?? 0;
+  const holdDeleted = args.holdDeleted ?? 0;
+  const holdOverridesCleared = args.holdOverridesCleared ?? 0;
+  return `${summaries} stored summary row(s) refreshed. Attendance Hold values were refreshed for ${holdRefreshed} unapproved row(s), ${holdDeleted} unapproved row(s) no longer on hold were cleared, and ${holdOverridesCleared} stale manual Hold override(s) without hold flags were removed. Approved Attendance Hold values were unchanged. These shared updates are visible to Admin after reload.`;
+}
+
+function payrollRecomputeResultLabel(args: {
+  payrollRecomputeStatus?: string;
+  payrollRunNumber?: number;
+  payrollRecomputeMessage?: string;
+}) {
+  if (!args.payrollRecomputeStatus) return null;
+
+  if (args.payrollRecomputeStatus === "computed") {
+    return args.payrollRunNumber
+      ? `Payroll recomputed. Admin Payroll now shows Run #${args.payrollRunNumber} with the latest DTR totals.`
+      : "Payroll recomputed. Admin Payroll now shows the latest DTR totals.";
+  }
+
+  if (args.payrollRecomputeStatus === "skipped") {
+    return args.payrollRecomputeMessage ?? "Payroll recompute skipped.";
+  }
+
+  if (args.payrollRecomputeStatus === "failed") {
+    return `Payroll recompute failed. ${
+      args.payrollRecomputeMessage ??
+      "Admin must resolve the payroll run status before totals can be updated."
+    }`;
+  }
+
+  return null;
+}
+
+function removeResultLabel(args: {
+  removeStatus?: string;
+  removedLogs?: number;
+  removedSummaries?: number;
+}) {
+  if (!args.removeStatus) return null;
+  if (args.removeStatus === "missing-batch") {
+    return "Select an imported DTR file before removing it.";
+  }
+  if (args.removeStatus === "failed") {
+    return "DTR file removal failed. Mixed-department files and approved or posted payroll periods must be handled by Admin.";
+  }
+
+  const removedLogs = args.removedLogs ?? 0;
+  const removedSummaries = args.removedSummaries ?? 0;
+  return `DTR file removed. ${removedLogs} raw log(s) and ${removedSummaries} daily summary row(s) were removed.`;
 }
 
 function buildManagerDtrFilesHref(args: {
@@ -273,19 +496,56 @@ export function ManagerDtrFilesClient({
   importStatus,
   imported,
   denied,
+  unmatched,
+  refreshStatus,
+  summaries,
+  removeStatus,
+  removedLogs,
+  removedSummaries,
+  holdRefreshed,
+  holdDeleted,
+  holdOverridesCleared,
+  payrollRecomputeStatus,
+  payrollRunNumber,
+  payrollRecomputeMessage,
   holdEditEmployeeId = "",
   holdStatus,
   holdMessage,
 }: Props) {
   const [heldRowsState, setHeldRowsState] =
     useState<AttendanceDtrHeldRowsView | null>(heldRows);
+  const [expandedAttendanceBatchIds, setExpandedAttendanceBatchIds] =
+    useState<Set<string>>(new Set());
+  const [expandedUnmatchedGroupKeys, setExpandedUnmatchedGroupKeys] =
+    useState<Set<string>>(new Set());
+  const [
+    attendanceBatchDiagnosticsById,
+    setAttendanceBatchDiagnosticsById,
+  ] = useState<Record<string, AttendanceBatchDiagnosticsState>>({});
   const [expandedAttendanceHoldEmployeeIds, setExpandedAttendanceHoldEmployeeIds] =
     useState<Set<string>>(new Set());
   const [attendanceHoldDrafts, setAttendanceHoldDrafts] = useState<
     Record<string, AttendanceHoldDraft>
   >({});
+  const [editingDtrMetricKey, setEditingDtrMetricKey] = useState<string | null>(
+    null
+  );
+  const [dtrMetricDraft, setDtrMetricDraft] =
+    useState<ManagerDtrMetricDraft | null>(null);
+  const [savingDtrMetricKey, setSavingDtrMetricKey] = useState<string | null>(
+    null
+  );
+  const [dtrMetricError, setDtrMetricError] = useState<string | null>(null);
   const selectedPeriod =
     periods.find((period) => period.id === selectedPeriodId) ?? null;
+  const attendanceHoldTargetPeriods = useMemo(() => {
+    if (!selectedPeriod) return [];
+    return periods.filter(
+      (period) =>
+        period.id === selectedPeriod.id ||
+        period.startDate >= selectedPeriod.startDate
+    );
+  }, [periods, selectedPeriod]);
   const employees = dtr?.employees ?? [];
   const selectedEmployee =
     employees.find((employee) => employee.employeeId === employeeId) ??
@@ -295,14 +555,40 @@ export function ManagerDtrFilesClient({
     () => heldRowsState?.rows ?? [],
     [heldRowsState]
   );
-  const resultLabel = importResultLabel({ importStatus, imported, denied });
+  const resultLabel = importResultLabel({
+    importStatus,
+    imported,
+    denied,
+    unmatched,
+  });
   const importSucceeded = importStatus === "success";
+  const refreshLabel = refreshResultLabel({
+    refreshStatus,
+    summaries,
+    holdRefreshed,
+    holdDeleted,
+    holdOverridesCleared,
+  });
+  const refreshSucceeded = refreshStatus === "success";
+  const payrollRecomputeLabel = payrollRecomputeResultLabel({
+    payrollRecomputeStatus,
+    payrollRunNumber,
+    payrollRecomputeMessage,
+  });
+  const payrollRecomputeSucceeded = payrollRecomputeStatus === "computed";
+  const payrollRecomputeFailed = payrollRecomputeStatus === "failed";
+  const removeLabel = removeResultLabel({
+    removeStatus,
+    removedLogs,
+    removedSummaries,
+  });
+  const removeSucceeded = removeStatus === "success";
   const holdResultMessage =
     holdMessage ??
     (holdStatus === "submitted"
-      ? "Attendance Hold submitted to admin."
+      ? "Attendance Hold saved and approved."
       : holdStatus === "failed"
-        ? "Unable to submit Attendance Hold."
+        ? "Unable to save Attendance Hold."
         : null);
   const holdResultSucceeded = holdStatus === "submitted";
   const groupedAttendanceHoldEmployees = useMemo<AttendanceHoldEmployeeGroup[]>(() => {
@@ -310,7 +596,7 @@ export function ManagerDtrFilesClient({
 
     for (const row of visibleHeldRows) {
       const displayMinutes = getAttendanceHoldRowDisplayMinutes(row);
-      const isEditable = row.approvalStatus !== "Approved";
+      const isEditable = true;
       const existing = groupsByEmployeeId.get(row.employeeId);
       const group =
         existing ??
@@ -408,7 +694,94 @@ export function ManagerDtrFilesClient({
     setHeldRowsState(heldRows);
     setAttendanceHoldDrafts({});
     setExpandedAttendanceHoldEmployeeIds(new Set());
+    setExpandedAttendanceBatchIds(new Set());
+    setExpandedUnmatchedGroupKeys(new Set());
+    setAttendanceBatchDiagnosticsById({});
+    setEditingDtrMetricKey(null);
+    setDtrMetricDraft(null);
+    setSavingDtrMetricKey(null);
+    setDtrMetricError(null);
   }, [heldRows, selectedPeriodId]);
+
+  useEffect(() => {
+    setEditingDtrMetricKey(null);
+    setDtrMetricDraft(null);
+    setSavingDtrMetricKey(null);
+    setDtrMetricError(null);
+  }, [selectedEmployee?.employeeId]);
+
+  async function loadAttendanceBatchDiagnostics(batchId: string) {
+    setAttendanceBatchDiagnosticsById((current) => ({
+      ...current,
+      [batchId]: {
+        status: "loading",
+        data: current[batchId]?.data ?? null,
+        error: null,
+      },
+    }));
+
+    try {
+      const data =
+        await getManagerAttendanceImportBatchUnmatchedDiagnosticsAction(batchId);
+
+      setAttendanceBatchDiagnosticsById((current) => ({
+        ...current,
+        [batchId]: {
+          status: "ready",
+          data,
+          error: null,
+        },
+      }));
+    } catch (error) {
+      setAttendanceBatchDiagnosticsById((current) => ({
+        ...current,
+        [batchId]: {
+          status: "error",
+          data: null,
+          error: getErrorMessage(error, "Unable to load unmatched rows."),
+        },
+      }));
+    }
+  }
+
+  function handleToggleAttendanceBatch(batch: ManagerImportBatch) {
+    if (!batch.canViewUnmatchedDiagnostics) return;
+
+    const isExpanded = expandedAttendanceBatchIds.has(batch.id);
+
+    setExpandedAttendanceBatchIds((current) => {
+      const next = new Set(current);
+      if (isExpanded) {
+        next.delete(batch.id);
+      } else {
+        next.add(batch.id);
+      }
+      return next;
+    });
+
+    const diagnosticsState = attendanceBatchDiagnosticsById[batch.id];
+    if (
+      !isExpanded &&
+      diagnosticsState?.status !== "loading" &&
+      diagnosticsState?.status !== "ready"
+    ) {
+      void loadAttendanceBatchDiagnostics(batch.id);
+    }
+  }
+
+  function handleToggleUnmatchedGroup(batchId: string, employeeNo: string, reason: string) {
+    const groupKey = `${batchId}:${employeeNo}:${reason}`;
+
+    setExpandedUnmatchedGroupKeys((current) => {
+      const next = new Set(current);
+      if (next.has(groupKey)) {
+        next.delete(groupKey);
+      } else {
+        next.add(groupKey);
+      }
+      return next;
+    });
+  }
 
   function createAttendanceHoldDraft(
     employee: AttendanceHoldEmployeeGroup
@@ -419,10 +792,7 @@ export function ManagerDtrFilesClient({
       employee.editableUndertimeMinutes
     );
     const overtime = splitAttendanceHoldDraftMinutes(employee.editableOvertimeMinutes);
-    const targetPayrollPeriodId =
-      employee.rows.find(
-        (row) => row.approvalStatus !== "Approved" && row.targetPayrollPeriodId
-      )?.targetPayrollPeriodId ?? "";
+    const targetPayrollPeriodId = selectedPeriodId ?? "";
 
     return {
       targetPayrollPeriodId,
@@ -438,8 +808,6 @@ export function ManagerDtrFilesClient({
   }
 
   function handleEditAttendanceHoldEmployee(employee: AttendanceHoldEmployeeGroup) {
-    if (employee.editableDates.length === 0) return;
-
     setAttendanceHoldDrafts((prev) => ({
       ...prev,
       [employee.employeeId]: createAttendanceHoldDraft(employee),
@@ -480,7 +848,11 @@ export function ManagerDtrFilesClient({
 
     return Math.max(
       0,
-      employee.editableIntendedWorkedMinutes - lateMinutes - undertimeMinutes
+      computeAttendanceHoldWorkedMinutes({
+        intendedWorkedMinutes: employee.editableIntendedWorkedMinutes,
+        lateMinutes,
+        undertimeMinutes,
+      })
     );
   }
 
@@ -595,6 +967,157 @@ export function ManagerDtrFilesClient({
     );
   }
 
+  function refreshManagerDtrPage() {
+    window.location.assign(
+      buildManagerDtrFilesHref({
+        year,
+        periodId: selectedPeriodId,
+        employeeId: selectedEmployee?.employeeId ?? null,
+        holdEditEmployeeId: null,
+      })
+    );
+  }
+
+  function handleEditDtrMetricRow(
+    row: AttendanceDtrView["employees"][number]["rows"][number]
+  ) {
+    if (!selectedEmployee) return;
+
+    setEditingDtrMetricKey(
+      getManagerDtrMetricDraftKey(selectedEmployee.employeeId, row.attendanceDate)
+    );
+    setDtrMetricDraft(createManagerDtrMetricDraft(row));
+    setDtrMetricError(null);
+  }
+
+  function handleCancelDtrMetricRow() {
+    setEditingDtrMetricKey(null);
+    setDtrMetricDraft(null);
+    setDtrMetricError(null);
+  }
+
+  function updateDtrMetricDraft(
+    field: ManagerDtrMetricDraftField,
+    value: string
+  ) {
+    if (!isAttendanceHoldDraftTimeInput(value)) return;
+    setDtrMetricDraft((current) =>
+      current
+        ? {
+            ...current,
+            [field]: value,
+          }
+        : current
+    );
+  }
+
+  async function handleSaveDtrMetricRow(
+    row: AttendanceDtrView["employees"][number]["rows"][number]
+  ) {
+    if (!selectedPeriodId || !selectedEmployee || !dtrMetricDraft) return;
+
+    const minutes = getManagerDtrMetricDraftMinutes(dtrMetricDraft);
+    if (!minutes) {
+      setDtrMetricError("Enter non-negative whole-number hours and minutes from 0 to 59.");
+      return;
+    }
+
+    const rowKey = getManagerDtrMetricDraftKey(
+      selectedEmployee.employeeId,
+      row.attendanceDate
+    );
+    setSavingDtrMetricKey(rowKey);
+    setDtrMetricError(null);
+
+    try {
+      await saveManagerAttendanceDtrDayMetricOverrideAction({
+        payrollPeriodId: selectedPeriodId,
+        employeeId: selectedEmployee.employeeId,
+        attendanceDate: row.attendanceDate,
+        ...minutes,
+      });
+      refreshManagerDtrPage();
+    } catch (error) {
+      setDtrMetricError(
+        getErrorMessage(error, "Unable to save the DTR row override.")
+      );
+      setSavingDtrMetricKey(null);
+    }
+  }
+
+  async function handleResetDtrMetricRow(
+    row: AttendanceDtrView["employees"][number]["rows"][number]
+  ) {
+    if (!selectedPeriodId || !selectedEmployee) return;
+
+    const rowKey = getManagerDtrMetricDraftKey(
+      selectedEmployee.employeeId,
+      row.attendanceDate
+    );
+    setSavingDtrMetricKey(rowKey);
+    setDtrMetricError(null);
+
+    try {
+      await saveManagerAttendanceDtrDayMetricOverrideAction({
+        payrollPeriodId: selectedPeriodId,
+        employeeId: selectedEmployee.employeeId,
+        attendanceDate: row.attendanceDate,
+        lateMinutes: null,
+        undertimeMinutes: null,
+        overtimeMinutes: null,
+      });
+      refreshManagerDtrPage();
+    } catch (error) {
+      setDtrMetricError(
+        getErrorMessage(error, "Unable to reset the DTR row override.")
+      );
+      setSavingDtrMetricKey(null);
+    }
+  }
+
+  function renderDtrMetricDraftInputs(
+    row: AttendanceDtrView["employees"][number]["rows"][number],
+    metric: "late" | "undertime" | "overtime",
+    label: string
+  ) {
+    if (!dtrMetricDraft) return null;
+
+    const hoursKey = `${metric}Hours` as ManagerDtrMetricDraftField;
+    const minutesKey = `${metric}Minutes` as ManagerDtrMetricDraftField;
+    const rowKey = selectedEmployee
+      ? getManagerDtrMetricDraftKey(selectedEmployee.employeeId, row.attendanceDate)
+      : "";
+    const disabled = savingDtrMetricKey === rowKey;
+
+    return (
+      <div className="grid min-w-[120px] grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1">
+        <Input
+          type="text"
+          inputMode="numeric"
+          value={dtrMetricDraft[hoursKey]}
+          onChange={(event) => updateDtrMetricDraft(hoursKey, event.target.value)}
+          placeholder="h"
+          className="h-8 w-14"
+          aria-label={`${label} hours for ${row.attendanceDate}`}
+          disabled={disabled}
+        />
+        <span className="text-center text-xs font-medium text-muted-foreground">
+          :
+        </span>
+        <Input
+          type="text"
+          inputMode="numeric"
+          value={dtrMetricDraft[minutesKey]}
+          onChange={(event) => updateDtrMetricDraft(minutesKey, event.target.value)}
+          placeholder="m"
+          className="h-8 w-14"
+          aria-label={`${label} minutes for ${row.attendanceDate}`}
+          disabled={disabled}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       <Card>
@@ -701,6 +1224,23 @@ export function ManagerDtrFilesClient({
               </Button>
             </div>
           </form>
+          <form
+            action="/managerDtrFiles/refresh-summaries"
+            method="post"
+            className="flex justify-end"
+          >
+            <input type="hidden" name="year" value={year} />
+            <input type="hidden" name="periodId" value={selectedPeriodId ?? ""} />
+            <input
+              type="hidden"
+              name="employeeId"
+              value={selectedEmployee?.employeeId ?? ""}
+            />
+            <Button type="submit" variant="outline" disabled={!selectedPeriod}>
+              <RefreshCw className="h-4 w-4" />
+              Refresh Stored Summaries
+            </Button>
+          </form>
 
           {resultLabel ? (
             <div
@@ -714,15 +1254,298 @@ export function ManagerDtrFilesClient({
               {resultLabel}
             </div>
           ) : null}
+          {refreshLabel ? (
+            <div
+              className={cn(
+                "rounded-md border px-3 py-2 text-sm",
+                refreshSucceeded
+                  ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+                  : "border-destructive/30 bg-destructive/10 text-destructive",
+              )}
+            >
+              {refreshLabel}
+            </div>
+          ) : null}
+          {payrollRecomputeLabel ? (
+            <div
+              className={cn(
+                "rounded-md border px-3 py-2 text-sm",
+                payrollRecomputeSucceeded
+                  ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+                  : payrollRecomputeFailed
+                    ? "border-destructive/30 bg-destructive/10 text-destructive"
+                    : "border-amber-300 bg-amber-50 text-amber-900",
+              )}
+            >
+              {payrollRecomputeLabel}
+            </div>
+          ) : null}
+          {removeLabel ? (
+            <div
+              className={cn(
+                "rounded-md border px-3 py-2 text-sm",
+                removeSucceeded
+                  ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+                  : "border-destructive/30 bg-destructive/10 text-destructive",
+              )}
+            >
+              {removeLabel}
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <Card>
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle>Imported Files</CardTitle>
+          <CardDescription>
+            Branch-visible DTR batches for this period.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {batches.map((batch) => {
+            const canRemove = batch.status === "Processed";
+            const isBatchExpanded = expandedAttendanceBatchIds.has(batch.id);
+            const diagnosticsState = attendanceBatchDiagnosticsById[batch.id];
+            const unmatchedGroups = diagnosticsState?.data?.groups ?? [];
+            const totalUnmatchedRows =
+              diagnosticsState?.data?.totalUnmatchedRows ?? 0;
+            const detailId = `manager-attendance-batch-${batch.id}-diagnostics`;
+
+            return (
+              <div key={batch.id} className="rounded-md border p-3 text-sm">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <div className="font-medium">{batch.sourceFileName}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {formatDateTime(batch.importedAt)} | {batch.status}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {batch.canViewUnmatchedDiagnostics ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleToggleAttendanceBatch(batch)}
+                        aria-expanded={isBatchExpanded}
+                        aria-controls={detailId}
+                        title={`${
+                          isBatchExpanded ? "Collapse" : "Expand"
+                        } unmatched rows for ${batch.sourceFileName}`}
+                      >
+                        {isBatchExpanded ? (
+                          <ChevronDown className="h-4 w-4" aria-hidden="true" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                        )}
+                        Unmatched
+                      </Button>
+                    ) : null}
+                    <form action="/managerDtrFiles/remove" method="post">
+                      <input type="hidden" name="year" value={year} />
+                      <input
+                        type="hidden"
+                        name="periodId"
+                        value={selectedPeriodId ?? ""}
+                      />
+                      <input
+                        type="hidden"
+                        name="employeeId"
+                        value={selectedEmployee?.employeeId ?? ""}
+                      />
+                      <input type="hidden" name="batchId" value={batch.id} />
+                      <Button
+                        type="submit"
+                        variant="destructive"
+                        size="sm"
+                        disabled={!canRemove}
+                        title={
+                          canRemove
+                            ? `Remove ${batch.sourceFileName}`
+                            : "Only processed DTR files can be removed."
+                        }
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        Remove
+                      </Button>
+                    </form>
+                  </div>
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-2 text-xs md:grid-cols-5">
+                  <span>Total: {batch.totalRows}</span>
+                  <span>Matched: {batch.matchedRows}</span>
+                  <span>Unmatched: {batch.unmatchedRows}</span>
+                  <span>Branch rows: {batch.scopedMatchedRows}</span>
+                  <span>Duplicates: {batch.duplicateRows}</span>
+                </div>
+                {batch.notes ? (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {batch.notes}
+                  </p>
+                ) : null}
+                {isBatchExpanded ? (
+                  <div id={detailId} className="mt-3 border-t pt-3">
+                    {diagnosticsState?.status === "error" ? (
+                      <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                        {diagnosticsState.error ?? "Unable to load unmatched rows."}
+                      </div>
+                    ) : diagnosticsState?.status === "ready" ? (
+                      unmatchedGroups.length === 0 ? (
+                        <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
+                          No unmatched rows were saved for this batch.
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <div className="text-sm font-medium">
+                            Unmatched rows ({totalUnmatchedRows})
+                          </div>
+                          <div className="overflow-hidden rounded-md border bg-background">
+                            {unmatchedGroups.map((group) => {
+                              const groupKey = `${batch.id}:${group.employeeNo}:${group.reason}`;
+                              const isGroupExpanded =
+                                expandedUnmatchedGroupKeys.has(groupKey);
+
+                              return (
+                                <div
+                                  key={groupKey}
+                                  className="border-t first:border-t-0"
+                                >
+                                  <button
+                                    type="button"
+                                    className="flex w-full items-start gap-3 px-3 py-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                    onClick={() =>
+                                      handleToggleUnmatchedGroup(
+                                        batch.id,
+                                        group.employeeNo,
+                                        group.reason
+                                      )
+                                    }
+                                    aria-expanded={isGroupExpanded}
+                                    title={`${
+                                      isGroupExpanded ? "Collapse" : "Expand"
+                                    } rows for ${
+                                      formatEmployeeNoDisplay(group.employeeNo) ||
+                                      group.employeeNo
+                                    }`}
+                                  >
+                                    {isGroupExpanded ? (
+                                      <ChevronDown
+                                        className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
+                                        aria-hidden="true"
+                                      />
+                                    ) : (
+                                      <ChevronRight
+                                        className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
+                                        aria-hidden="true"
+                                      />
+                                    )}
+                                    <span className="min-w-0 flex-1">
+                                      <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                                        <span className="font-medium">
+                                          {formatEmployeeNoDisplay(
+                                            group.employeeNo
+                                          ) || group.employeeNo}
+                                        </span>
+                                        <span className="text-xs text-muted-foreground">
+                                          {group.reason}
+                                        </span>
+                                        <span className="text-xs text-muted-foreground">
+                                          {group.rowCount} row(s)
+                                        </span>
+                                        <span className="text-xs text-muted-foreground">
+                                          {formatDateRange(
+                                            group.startDate,
+                                            group.endDate
+                                          )}
+                                        </span>
+                                        <span className="text-xs text-muted-foreground">
+                                          {formatSourceLineRange(
+                                            group.firstSourceLine,
+                                            group.lastSourceLine
+                                          )}
+                                        </span>
+                                      </span>
+                                      {group.sampleRawText ? (
+                                        <span className="mt-1 block whitespace-normal break-words text-xs text-muted-foreground">
+                                          {group.sampleRawText}
+                                        </span>
+                                      ) : null}
+                                    </span>
+                                  </button>
+                                  {isGroupExpanded ? (
+                                    <div className="border-t bg-muted/20 p-3">
+                                      <Table className="min-w-[760px] table-fixed bg-background">
+                                        <TableHeader>
+                                          <TableRow>
+                                            <TableHead className="w-20">
+                                              Line
+                                            </TableHead>
+                                            <TableHead className="w-28">
+                                              Date
+                                            </TableHead>
+                                            <TableHead className="w-24">
+                                              Time
+                                            </TableHead>
+                                            <TableHead className="w-40">
+                                              Device / Site
+                                            </TableHead>
+                                            <TableHead>Raw text</TableHead>
+                                          </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                          {group.rows.map((row) => (
+                                            <TableRow key={row.id}>
+                                              <TableCell>
+                                                {row.sourceLine ?? "-"}
+                                              </TableCell>
+                                              <TableCell>{row.logDate}</TableCell>
+                                              <TableCell>{row.logTime}</TableCell>
+                                              <TableCell className="text-xs text-muted-foreground">
+                                                {formatDeviceSite(
+                                                  row.deviceId,
+                                                  row.siteCode
+                                                )}
+                                              </TableCell>
+                                              <TableCell className="whitespace-normal break-words text-xs text-muted-foreground">
+                                                {row.rawText ?? "-"}
+                                              </TableCell>
+                                            </TableRow>
+                                          ))}
+                                        </TableBody>
+                                      </Table>
+                                    </div>
+                                  ) : null}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )
+                    ) : (
+                      <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
+                        Loading unmatched rows...
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+          {batches.length === 0 ? (
+            <div className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
+              No branch-visible DTR files imported for this period.
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
           <CardHeader className="pb-3">
             <CardTitle>Semimonthly DTR</CardTitle>
             <CardDescription>
-              Read-only DTR summaries for employees in your assigned departments.
+              Review DTR summaries and override row Late, Undertime, and OT for
+              employees in your assigned departments.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -761,7 +1584,7 @@ export function ManagerDtrFilesClient({
 
             {selectedEmployee ? (
               <>
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
                   <div className="rounded-md border p-3">
                     <div className="text-xs uppercase text-muted-foreground">
                       Present Days
@@ -785,6 +1608,16 @@ export function ManagerDtrFilesClient({
                     <div className="mt-1 font-semibold">
                       {formatMinutes(selectedEmployee.totals.lateMinutes)} /{" "}
                       {formatMinutes(selectedEmployee.totals.undertimeMinutes)}
+                    </div>
+                  </div>
+                  <div className="rounded-md border p-3">
+                    <div className="text-xs uppercase text-muted-foreground">
+                      Computed Overtime
+                    </div>
+                    <div className="mt-1 font-semibold">
+                      {formatMinutes(
+                        selectedEmployee.totals.computed.overtimeMinutes
+                      )}
                     </div>
                   </div>
                   <div className="rounded-md border p-3">
@@ -823,6 +1656,12 @@ export function ManagerDtrFilesClient({
                   </div>
                 </div>
 
+                {dtrMetricError ? (
+                  <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    {dtrMetricError}
+                  </div>
+                ) : null}
+
                 <div className="max-h-[520px] overflow-auto rounded-md border">
                   <Table>
                     <TableHeader>
@@ -835,10 +1674,41 @@ export function ManagerDtrFilesClient({
                         <TableHead>UT</TableHead>
                         <TableHead>OT</TableHead>
                         <TableHead>Status</TableHead>
+                        <TableHead>Action</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {selectedEmployee.rows.map((row) => (
+                      {selectedEmployee.rows.map((row) => {
+                        const rowKey = getManagerDtrMetricDraftKey(
+                          selectedEmployee.employeeId,
+                          row.attendanceDate
+                        );
+                        const isEditing = editingDtrMetricKey === rowKey;
+                        const isSaving = savingDtrMetricKey === rowKey;
+                        const draftMinutes =
+                          isEditing && dtrMetricDraft
+                            ? getManagerDtrMetricDraftMinutes(dtrMetricDraft)
+                            : null;
+                        const displayLateMinutes =
+                          draftMinutes?.lateMinutes ?? row.lateMinutes;
+                        const displayUndertimeMinutes =
+                          draftMinutes?.undertimeMinutes ?? row.undertimeMinutes;
+                        const displayOvertimeMinutes =
+                          draftMinutes?.overtimeMinutes ?? row.overtimeMinutes;
+                        const displayWorkedMinutes =
+                          draftMinutes != null
+                            ? getManagerDtrMetricComputedWorkedMinutes({
+                                row,
+                                lateMinutes: draftMinutes.lateMinutes,
+                                undertimeMinutes: draftMinutes.undertimeMinutes,
+                              })
+                            : getDisplayedDtrWorkedMinutes(row);
+                        const hasMetricOverride =
+                          row.isLateOverridden ||
+                          row.isUndertimeOverridden ||
+                          row.isOvertimeOverridden;
+
+                        return (
                         <TableRow key={row.attendanceDate}>
                           <TableCell>
                             <div className="font-medium">{row.attendanceDate}</div>
@@ -855,10 +1725,62 @@ export function ManagerDtrFilesClient({
                             {row.scheduledInTime ?? "-"} -{" "}
                             {row.scheduledOutTime ?? "-"}
                           </TableCell>
-                          <TableCell>{formatMinutes(row.workedMinutes)}</TableCell>
-                          <TableCell>{formatMinutes(row.lateMinutes)}</TableCell>
-                          <TableCell>{formatMinutes(row.undertimeMinutes)}</TableCell>
-                          <TableCell>{formatMinutes(row.overtimeMinutes)}</TableCell>
+                          <TableCell>
+                            <div className="font-medium">
+                              {formatMinutes(displayWorkedMinutes)}
+                            </div>
+                            {isEditing ? (
+                              <div className="text-[10px] font-medium uppercase text-muted-foreground">
+                                Auto
+                              </div>
+                            ) : null}
+                          </TableCell>
+                          <TableCell>
+                            {isEditing
+                              ? renderDtrMetricDraftInputs(row, "late", "Late")
+                              : (
+                                  <div>
+                                    {formatMinutes(displayLateMinutes)}
+                                    {row.isLateOverridden ? (
+                                      <div className="text-[10px] font-medium uppercase text-sky-700">
+                                        Edited
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                )}
+                          </TableCell>
+                          <TableCell>
+                            {isEditing
+                              ? renderDtrMetricDraftInputs(
+                                  row,
+                                  "undertime",
+                                  "Undertime"
+                                )
+                              : (
+                                  <div>
+                                    {formatMinutes(displayUndertimeMinutes)}
+                                    {row.isUndertimeOverridden ? (
+                                      <div className="text-[10px] font-medium uppercase text-sky-700">
+                                        Edited
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                )}
+                          </TableCell>
+                          <TableCell>
+                            {isEditing
+                              ? renderDtrMetricDraftInputs(row, "overtime", "OT")
+                              : (
+                                  <div>
+                                    {formatMinutes(displayOvertimeMinutes)}
+                                    {row.isOvertimeOverridden ? (
+                                      <div className="text-[10px] font-medium uppercase text-sky-700">
+                                        Edited
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                )}
+                          </TableCell>
                           <TableCell>
                             <div className="font-medium">{row.effectiveStatus}</div>
                             {row.anomalyFlags.length > 0 ? (
@@ -867,12 +1789,69 @@ export function ManagerDtrFilesClient({
                               </div>
                             ) : null}
                           </TableCell>
+                          <TableCell>
+                            <div className="flex flex-wrap gap-1">
+                              {isEditing ? (
+                                <>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    className="h-8 px-2"
+                                    onClick={() => void handleSaveDtrMetricRow(row)}
+                                    disabled={isSaving || draftMinutes == null}
+                                    aria-label={`Save DTR override for ${row.attendanceDate}`}
+                                  >
+                                    <Save className="h-4 w-4" />
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-8 px-2"
+                                    onClick={handleCancelDtrMetricRow}
+                                    disabled={isSaving}
+                                    aria-label={`Cancel DTR override for ${row.attendanceDate}`}
+                                  >
+                                    <X className="h-4 w-4" />
+                                  </Button>
+                                </>
+                              ) : (
+                                <>
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-8 px-2"
+                                    onClick={() => handleEditDtrMetricRow(row)}
+                                    disabled={savingDtrMetricKey != null}
+                                    aria-label={`Edit DTR override for ${row.attendanceDate}`}
+                                  >
+                                    <Pencil className="h-4 w-4" />
+                                  </Button>
+                                  {hasMetricOverride ? (
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-8 px-2"
+                                      onClick={() => void handleResetDtrMetricRow(row)}
+                                      disabled={savingDtrMetricKey != null}
+                                      aria-label={`Reset DTR override for ${row.attendanceDate}`}
+                                    >
+                                      <RotateCcw className="h-4 w-4" />
+                                    </Button>
+                                  ) : null}
+                                </>
+                              )}
+                            </div>
+                          </TableCell>
                         </TableRow>
-                      ))}
+                        );
+                      })}
                       {selectedEmployee.rows.length === 0 ? (
                         <TableRow>
                           <TableCell
-                            colSpan={8}
+                            colSpan={9}
                             className="py-8 text-center text-muted-foreground"
                           >
                             No DTR summary rows for this employee and period.
@@ -891,47 +1870,11 @@ export function ManagerDtrFilesClient({
           </CardContent>
         </Card>
 
-        <div className="space-y-4">
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle>Imported Files</CardTitle>
-              <CardDescription>
-                Branch-visible DTR batches for this period.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {batches.map((batch) => (
-                <div key={batch.id} className="rounded-md border p-3 text-sm">
-                  <div className="font-medium">{batch.sourceFileName}</div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {formatDateTime(batch.importedAt)} | {batch.status}
-                  </div>
-                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                    <span>Branch rows: {batch.scopedMatchedRows}</span>
-                    <span>Duplicates: {batch.duplicateRows}</span>
-                  </div>
-                  {batch.notes ? (
-                    <p className="mt-2 text-xs text-muted-foreground">
-                      {batch.notes}
-                    </p>
-                  ) : null}
-                </div>
-              ))}
-              {batches.length === 0 ? (
-                <div className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
-                  No branch-visible DTR files imported for this period.
-                </div>
-              ) : null}
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-
       <Card>
         <CardHeader className="pb-3">
           <CardTitle>Attendance Hold</CardTitle>
           <CardDescription>
-            Enter Held DTR values and submit them to admin for approval.
+            Enter Held DTR values and save them as approved for the selected payroll period.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -980,7 +1923,6 @@ export function ManagerDtrFilesClient({
                         ? createAttendanceHoldDraft(employee)
                         : null);
                     const isSaving = false;
-                    const isApproved = employee.editableDates.length === 0;
                     const formId = `attendance-hold-form-${employee.employeeId}`;
                     const detailsId = `attendance-hold-details-${employee.employeeId}`;
                     const detailsOpen = isExpanded || Boolean(draft);
@@ -1050,7 +1992,7 @@ export function ManagerDtrFilesClient({
                           </TableCell>
                           <TableCell className="align-top pt-2">
                             <div className="flex items-center gap-2">
-                              {isSaving || isApproved ? (
+                              {isSaving ? (
                                 <Button
                                   type="button"
                                   variant="outline"
@@ -1212,9 +2154,13 @@ export function ManagerDtrFilesClient({
                                         </label>
                                         <select
                                           id={`${formId}-target-period`}
-                                          value={draft.targetPayrollPeriodId}
                                           name="targetPayrollPeriodId"
                                           form={formId}
+                                          value={
+                                            draft.targetPayrollPeriodId ||
+                                            selectedPeriodId ||
+                                            ""
+                                          }
                                           onChange={(event) =>
                                             updateAttendanceHoldDraft(
                                               employee.employeeId,
@@ -1224,22 +2170,30 @@ export function ManagerDtrFilesClient({
                                               }
                                             )
                                           }
-                                          disabled={isSaving}
-                                          className="flex h-9 w-52 rounded-md border bg-background px-3 py-1 text-sm"
-                                          aria-label={`Target payroll period for ${employee.employeeName}`}
+                                          disabled={
+                                            isSaving ||
+                                            attendanceHoldTargetPeriods.length === 0
+                                          }
+                                          className="flex h-9 w-64 rounded-md border bg-background px-3 py-1 text-sm"
                                         >
-                                          <option value="">
-                                            Select target period...
-                                          </option>
-                                          {periods.map((period) => (
-                                            <option
-                                              key={period.id}
-                                              value={period.id}
-                                            >
-                                              {period.code} ({period.startDate}{" "}
-                                              - {period.endDate})
+                                          {attendanceHoldTargetPeriods.length ===
+                                          0 ? (
+                                            <option value="">
+                                              No target periods available
                                             </option>
-                                          ))}
+                                          ) : null}
+                                          {attendanceHoldTargetPeriods.map(
+                                            (period) => (
+                                              <option
+                                                key={period.id}
+                                                value={period.id}
+                                              >
+                                                {period.code} (
+                                                {period.startDate} -{" "}
+                                                {period.endDate})
+                                              </option>
+                                            )
+                                          )}
                                         </select>
                                       </div>
 
@@ -1248,11 +2202,9 @@ export function ManagerDtrFilesClient({
                                           type="submit"
                                           form={formId}
                                           size="sm"
-                                          disabled={
-                                            isSaving || isApproved || !draft
-                                          }
+                                          disabled={isSaving || !draft}
                                         >
-                                          {isSaving ? "Submitting..." : "Submit"}
+                                          {isSaving ? "Saving..." : "Save"}
                                         </Button>
                                         <Button
                                           asChild

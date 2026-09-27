@@ -67,7 +67,7 @@ export function AuthPanel({
     token: string;
   } | null>(null);
 
-  const [passwordLoginState] = useActionState(
+  const [passwordLoginState, passwordLoginFormAction] = useActionState(
     passwordLoginAction,
     initialAuthActionState,
   );
@@ -207,7 +207,7 @@ export function AuthPanel({
           </div>
         ) : view === "login" ? (
           <div className="space-y-5">
-            <form action="/auth/login" method="post" className="space-y-4">
+            <form action={passwordLoginFormAction} className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="login-email">Email</Label>
                 <Input

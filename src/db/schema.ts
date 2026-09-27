@@ -144,6 +144,24 @@ export const accountTypeEnum = pgEnum("account_type_enum", [
   "Loan",
   "Other Deduction",
 ]);
+export const birTaxCategoryEnum = pgEnum("bir_tax_category", [
+  "RegularTaxable",
+  "SupplementalTaxable",
+  "ThirteenthMonthOtherBenefits",
+  "DeMinimis",
+  "NonTaxable",
+]);
+export const birDeMinimisTypeEnum = pgEnum("bir_de_minimis_type", [
+  "MonetizedLeavePrivate",
+  "MedicalCashAllowance",
+  "RiceSubsidy",
+  "UniformClothing",
+  "MedicalBenefits",
+  "LaundryAllowance",
+  "EmployeeAchievementAward",
+  "ChristmasMajorAnniversaryGift",
+  "OvertimeMealAllowance",
+]);
 export const payrollExceptionDtrOverrideSourceEnum = pgEnum(
   "payroll_exception_dtr_override_source",
   [
@@ -480,6 +498,8 @@ export const accountCode = pgTable("accountCode", {
   month13thPay: boolean("month_13th_pay").notNull().default(false),
   nonTaxable: boolean("non_taxable").notNull().default(false),
   deminimis: boolean("deminimis").notNull().default(false),
+  birTaxCategory: birTaxCategoryEnum("bir_tax_category"),
+  birDeMinimisType: birDeMinimisTypeEnum("bir_de_minimis_type"),
   healthInsurance: boolean("health_insurance").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at")
@@ -2059,6 +2079,40 @@ export const employeeAttendanceDayTypeOverrides = pgTable(
   ]
 );
 
+export const employeeAttendanceDayMetricOverrides = pgTable(
+  "employee_attendance_day_metric_overrides",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    payrollPeriodId: uuid("payroll_period_id")
+      .notNull()
+      .references(() => payrollPeriods.id, { onDelete: "cascade" }),
+    employeeId: uuid("employee_id")
+      .notNull()
+      .references(() => employees.id, { onDelete: "cascade" }),
+    attendanceDate: date("attendance_date").notNull(),
+    lateMinutes: integer("late_minutes"),
+    undertimeMinutes: integer("undertime_minutes"),
+    overtimeMinutes: integer("overtime_minutes"),
+    remarks: text("remarks"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("uq_employee_attendance_day_metric_override").on(
+      table.payrollPeriodId,
+      table.employeeId,
+      table.attendanceDate
+    ),
+    index("idx_employee_attendance_day_metric_override_employee_date").on(
+      table.employeeId,
+      table.attendanceDate
+    ),
+  ]
+);
+
 // HOLIDAY CALENDAR
 export const holidayCalendar = pgTable(
   "holiday_calendar",
@@ -2916,6 +2970,8 @@ export const payrollRunLines = pgTable(
     rate: decimal("rate", { precision: 12, scale: 4 }),
     taxable: boolean("taxable").notNull().default(false),
     month13thEligible: boolean("month_13th_eligible").notNull().default(false),
+    birTaxCategory: birTaxCategoryEnum("bir_tax_category"),
+    birDeMinimisType: birDeMinimisTypeEnum("bir_de_minimis_type"),
     sourceTable: varchar("source_table", { length: 50 }),
     sourceId: varchar("source_id", { length: 50 }),
     createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -3070,6 +3126,8 @@ export const manualPayrollEntryLines = pgTable(
     month13thEligible: boolean("month_13th_eligible").notNull().default(false),
     nonTaxable: boolean("non_taxable").notNull().default(false),
     deminimis: boolean("deminimis").notNull().default(false),
+    birTaxCategory: birTaxCategoryEnum("bir_tax_category"),
+    birDeMinimisType: birDeMinimisTypeEnum("bir_de_minimis_type"),
     sourceTable: varchar("source_table", { length: 50 }),
     sourceId: varchar("source_id", { length: 50 }),
     sortOrder: integer("sort_order").notNull().default(0),

@@ -9,6 +9,7 @@ import {
   employeeShiftAssignments,
   employeeWeeklyShiftPatterns,
   employees,
+  employeesGeneralInfo,
   manualPayrollEntries,
   overtimeRules,
   payrollAccountCodeImportBatches,
@@ -21,6 +22,10 @@ import {
 import { recordAdminAuditEvent, recordPayrollRunEvent } from "@/lib/admin";
 import { fetchConfirmedHolidayRowsForRange } from "@/lib/holidays";
 import { and, asc, desc, eq, gte, inArray, isNull, like, lte, or, sql } from "drizzle-orm";
+import {
+  isPayrollEligibleEmploymentStatus,
+  payrollEligibleEmploymentStatusCondition,
+} from "@/lib/employmentStatus";
 import {
   computeManualPayrollLatestBaseline,
   getDailyRate,
@@ -246,7 +251,7 @@ export async function importPayrollAccountCodeRows(args: {
     return false;
   });
 
-  const [employeeRows, accountCodeRows] = await Promise.all([
+  const [employeeRows, allEmployeeRows, accountCodeRows] = await Promise.all([
     db
       .select({
         id: employees.id,
@@ -254,17 +259,38 @@ export async function importPayrollAccountCodeRows(args: {
         employeeType: employees.employeeType,
       })
       .from(employees)
+      .leftJoin(
+        employeesGeneralInfo,
+        eq(employeesGeneralInfo.employeeId, employees.id)
+      )
       .where(
         and(
           eq(employees.employeeType, DEFAULT_EMPLOYEE_TYPE),
-          isNull(employees.deletedAt)
+          isNull(employees.deletedAt),
+          isNull(employeesGeneralInfo.deletedAt),
+          payrollEligibleEmploymentStatusCondition()
         )
       ),
+    db.query.employees.findMany({
+      where: and(
+        eq(employees.employeeType, DEFAULT_EMPLOYEE_TYPE),
+        isNull(employees.deletedAt)
+      ),
+      with: {
+        generalInfo: true,
+      },
+    }),
     getPayrollExceptionAccountCodeOptions(),
   ]);
 
   const { employeeByNormalizedKey, ambiguousEmployeeKeys } =
     buildPayrollAccountCodeImportEmployeeLookup(employeeRows);
+  const separatedEmployeeLookup = buildPayrollAccountCodeImportEmployeeLookup(
+    allEmployeeRows.filter(
+      (employee) =>
+        !isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus)
+    )
+  );
 
   const accountCodeByCode = new Map(
     accountCodeRows.map((row) => [normalizeImportAccountCode(row.code), row] as const)
@@ -298,9 +324,13 @@ export async function importPayrollAccountCodeRows(args: {
 
     const employee = employeeByNormalizedKey.get(normalizedEmployeeKey);
     if (!employee) {
+      const separatedEmployee =
+        separatedEmployeeLookup.employeeByNormalizedKey.get(normalizedEmployeeKey);
       appendPayrollAccountCodeImportDiagnostic(skippedRows, {
         ...baseSkippedRow,
-        reason: "Employee No was not found.",
+        reason: separatedEmployee
+          ? "Employee is not payroll-eligible because their employment status is separated."
+          : "Employee No was not found.",
       });
       continue;
     }
@@ -979,6 +1009,8 @@ export async function getPayrollExceptionAccountCodeOptions() {
       description: accountCode.description,
       month13thPay: accountCode.month13thPay,
       nonTaxable: accountCode.nonTaxable,
+      birTaxCategory: accountCode.birTaxCategory,
+      birDeMinimisType: accountCode.birDeMinimisType,
       dailyRate: accountCode.dailyRate,
       monthlyRate: accountCode.monthlyRate,
     })
@@ -1136,12 +1168,16 @@ export async function getEmployeePayrollExceptionRows(args: {
   const employee = await db.query.employees.findFirst({
     where: eq(employees.id, args.employeeId),
     with: {
+      generalInfo: true,
       salary: true,
       timekeeping: true,
     },
   });
 
-  if (!employee) {
+  if (
+    !employee ||
+    !isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus)
+  ) {
     throw new Error("Employee not found.");
   }
 
@@ -1388,12 +1424,28 @@ export async function saveEmployeePayrollExceptionRows(args: {
   employeeId: string;
   rows: PayrollExceptionInputRow[];
 }) {
-  const payrollPeriod = await db.query.payrollPeriods.findFirst({
-    where: eq(payrollPeriods.id, args.payrollPeriodId),
-  });
+  const [payrollPeriod, employee] = await Promise.all([
+    db.query.payrollPeriods.findFirst({
+      where: eq(payrollPeriods.id, args.payrollPeriodId),
+    }),
+    db.query.employees.findFirst({
+      where: eq(employees.id, args.employeeId),
+      with: {
+        generalInfo: true,
+      },
+    }),
+  ]);
 
   if (!payrollPeriod) {
     throw new Error("Payroll period not found.");
+  }
+
+  if (
+    !employee ||
+    employee.deletedAt ||
+    !isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus)
+  ) {
+    throw new Error("Employee not found.");
   }
 
   const existingExceptionRows = await db

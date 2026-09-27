@@ -58,6 +58,10 @@ export function isScheduleApplicable(
   return false;
 }
 
+export function isSssEcApplicableForCycle(cycle: "A" | "B") {
+  return cycle === "A";
+}
+
 export function distributeScheduledAmount(
   totalAmount: number,
   cycle: "A" | "B",

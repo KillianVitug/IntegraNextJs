@@ -28,7 +28,6 @@ import { desc, eq } from "drizzle-orm";
 import {
   buildWeeklyPatternDayValues,
   ensureNoShiftOverlap,
-  ensureNoWeeklyPatternOverlap,
   getAffectedScheduleRange,
   getLatestImportedAttendanceDate,
   getRebuildRange,
@@ -107,8 +106,6 @@ export async function saveEmployeeWeeklyShiftPattern(input: unknown) {
       ...payload,
       effectiveTo,
     };
-
-    await ensureNoWeeklyPatternOverlap(tx, normalizedPayload);
 
     const shiftTablesById = await loadShiftTablesById(
       tx,
@@ -213,6 +210,7 @@ export async function saveEmployeeWeeklyShiftPattern(input: unknown) {
 
     return {
       message: payload.id ? "Weekly schedule updated." : "Weekly schedule created.",
+      patternId,
       rebuiltSummaryCount,
     };
   });

@@ -20,6 +20,11 @@ function parseLeaveId(value: string | undefined) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+function parseEmployeeId(value: string | undefined) {
+  const employeeId = value?.trim();
+  return employeeId ? employeeId : null;
+}
+
 export default async function LeavePage({
   searchParams,
 }: {
@@ -31,6 +36,7 @@ export default async function LeavePage({
     ? Number(params.year)
     : currentYear;
   const initialSelectedLeaveId = parseLeaveId(params.leaveId);
+  const initialEmployeeId = parseEmployeeId(params.employeeId);
 
   await ensureDefaultLeaveTypes();
 
@@ -48,6 +54,7 @@ export default async function LeavePage({
       }))}
       initialYear={initialYear}
       initialSelectedLeaveId={initialSelectedLeaveId}
+      initialEmployeeId={initialEmployeeId}
     />
   );
 }

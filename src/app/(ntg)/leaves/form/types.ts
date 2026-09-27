@@ -7,6 +7,8 @@ export type LeaveRecord = {
     employeeType: string | null;
     firstName: string | null;
     lastName: string | null;
+    departmentName: string | null;
+    departmentCode: string | null;
     dateFiled: string;
     leaveStartDate: string;
     leaveEndDate: string | null;

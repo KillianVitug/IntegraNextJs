@@ -1,6 +1,7 @@
 import { db } from "@/db";
 import {
   accountCode,
+  attendanceDtrHoldApprovals,
   attendanceDailySummaries,
   customPayrollDefinitions,
   employeeAttendanceDayStatusOverrides,
@@ -36,6 +37,7 @@ import {
   gte,
   inArray,
   isNull,
+  lt,
   lte,
   ne,
   notInArray,
@@ -73,10 +75,25 @@ import {
   distributeScheduledAmount,
   getActiveStatutoryRuleBundle,
   isScheduleApplicable,
+  isSssEcApplicableForCycle,
   roundMoney,
   type ActiveStatutoryRuleBundle,
   type ScheduleFlagsLike,
 } from "./statutory";
+import {
+  getEffectiveRateDivisor,
+  resolvePhilhealthMonthlyCompensationBase,
+} from "./philhealthAnnualization";
+import {
+  collectBirGrossBuckets,
+  computeAnnualBirTax2023Onward,
+  computeBirTaxableCompensation,
+  inferBirTaxCategory,
+  isFinalDecemberSemiMonthlyPayroll,
+  type BirDeMinimisType,
+  type BirTaxCategory,
+  type BirYearToDateTaxContext,
+} from "./birTax";
 import {
   buildResolvedSalaryByEmployeeId,
   type ResolvedSalaryForPeriod,
@@ -84,9 +101,12 @@ import {
 } from "./salaryResolver";
 import {
   applyAttendanceDtrEffectiveStatus,
+  computeAccumulatedLatePenaltyMinutes,
   computeNetDtrWorkedMinutes,
+  computePayrollTardinessMinutes,
   getAttendanceDtrDayTypeFromHolidayType,
   isAttendanceDtrNonWorkingDayType,
+  normalizeAttendanceDtrAnomalyFlags,
   normalizeAttendanceDtrPeriodOverride,
   type AttendanceDtrDayType,
   type AttendanceDtrManualStatus,
@@ -101,6 +121,7 @@ import {
   buildManualPayrollRunLines,
   loadManualPayrollEntriesForPeriod,
 } from "./manualPayroll";
+import { isPayrollEligibleEmploymentStatus } from "@/lib/employmentStatus";
 import { getManualPayrollAccountRateMultiplier } from "./manualPayrollRate";
 import type { ManualPayrollBaselineSnapshot } from "./manualPayroll";
 import { applyLoanPaymentToBalance } from "./loan";
@@ -126,6 +147,8 @@ type PayrollLineDraft = {
   rate?: number | null;
   taxable?: boolean;
   month13thEligible?: boolean;
+  birTaxCategory?: BirTaxCategory | null;
+  birDeMinimisType?: BirDeMinimisType | null;
   loanRefNo?: string | null;
   sourceTable?: string | null;
   sourceId?: string | null;
@@ -212,6 +235,7 @@ const MONTHLY_RATE_REG_NOTE =
   "Monthly-rate REG uses half of monthly salary; absences and unpaid leave are deducted separately.";
 const MONTHLY_RATE_DTR_IGNORED_NOTE = "Monthly Rate DTR ignored";
 const STATUTORY_MONTHLY_BASE_NOTE_PREFIX = "Statutory Monthly Base: ";
+const PHILHEALTH_MONTHLY_BASE_NOTE_PREFIX = "PhilHealth Monthly Base: ";
 const SSS_SOURCE_NOTE_PREFIX = "SSS Source: ";
 const SSS_SALARY_CREDIT_NOTE_PREFIX = "SSS Salary Credit: ";
 const SSS_BRACKET_NOTE_PREFIX = "SSS Bracket: ";
@@ -255,9 +279,10 @@ function formatPayrollNoteNumber(value: number) {
   return Number.isFinite(value) ? String(value) : "0";
 }
 
-function getRateDivisor(salary: ResolvedSalaryRecord | undefined) {
-  const explicitDivisor = toAmount(salary?.rateDivisor);
-  return explicitDivisor > 0 ? explicitDivisor : 26;
+function getRateDivisor(
+  salary: { rateDivisor?: string | number | null } | undefined
+) {
+  return getEffectiveRateDivisor(salary);
 }
 
 export function getDailyRate(salary: ResolvedSalaryRecord | undefined) {
@@ -276,10 +301,12 @@ function buildPayrollBreakdownNotes(args: {
   hasSeparatePaidLeaveLine: boolean;
   unresolvedLeaveCount: number;
   statutoryMonthlyCompensationBase: number | null;
+  philhealthMonthlyCompensationBase: number | null;
   sssContributionSource: string | null;
   sssSalaryCredit: number | null;
   sssRangeFrom: number | null;
   sssRangeTo: number | null;
+  birNotes?: string[];
 }) {
   const notes = [`${PAYROLL_BASIS_NOTE_PREFIX}${args.payComputationMode}`];
 
@@ -297,6 +324,14 @@ function buildPayrollBreakdownNotes(args: {
     notes.push(
       `${STATUTORY_MONTHLY_BASE_NOTE_PREFIX}${formatPayrollNoteNumber(
         args.statutoryMonthlyCompensationBase
+      )}`
+    );
+  }
+
+  if (args.philhealthMonthlyCompensationBase != null) {
+    notes.push(
+      `${PHILHEALTH_MONTHLY_BASE_NOTE_PREFIX}${formatPayrollNoteNumber(
+        args.philhealthMonthlyCompensationBase
       )}`
     );
   }
@@ -325,6 +360,10 @@ function buildPayrollBreakdownNotes(args: {
     );
   }
 
+  for (const note of args.birNotes ?? []) {
+    if (note) notes.push(note);
+  }
+
   if (!args.monthlyRateDtrIgnored && args.derivedAbsentDays > 0) {
     notes.push(`Derived absent days: ${formatPayrollNoteNumber(args.derivedAbsentDays)}`);
   }
@@ -339,6 +378,7 @@ export function parsePayrollBreakdownNotes(
   isManualPayrollOverride: boolean;
   breakdownNotes: string | null;
   statutoryMonthlyCompensationBase: string | null;
+  philhealthMonthlyCompensationBase: string | null;
   sssContributionSource: string | null;
   sssSalaryCredit: string | null;
   sssBracketLabel: string | null;
@@ -349,6 +389,7 @@ export function parsePayrollBreakdownNotes(
       isManualPayrollOverride: false,
       breakdownNotes: null,
       statutoryMonthlyCompensationBase: null,
+      philhealthMonthlyCompensationBase: null,
       sssContributionSource: null,
       sssSalaryCredit: null,
       sssBracketLabel: null,
@@ -362,6 +403,7 @@ export function parsePayrollBreakdownNotes(
 
   let payComputationMode: PayrollComputationMode | null = null;
   let statutoryMonthlyCompensationBase: string | null = null;
+  let philhealthMonthlyCompensationBase: string | null = null;
   let sssContributionSource: string | null = null;
   let sssSalaryCredit: string | null = null;
   let sssBracketLabel: string | null = null;
@@ -382,6 +424,13 @@ export function parsePayrollBreakdownNotes(
     if (part.startsWith(STATUTORY_MONTHLY_BASE_NOTE_PREFIX)) {
       statutoryMonthlyCompensationBase = part
         .slice(STATUTORY_MONTHLY_BASE_NOTE_PREFIX.length)
+        .trim();
+      continue;
+    }
+
+    if (part.startsWith(PHILHEALTH_MONTHLY_BASE_NOTE_PREFIX)) {
+      philhealthMonthlyCompensationBase = part
+        .slice(PHILHEALTH_MONTHLY_BASE_NOTE_PREFIX.length)
         .trim();
       continue;
     }
@@ -414,6 +463,7 @@ export function parsePayrollBreakdownNotes(
     isManualPayrollOverride,
     breakdownNotes: remainingNotes.length > 0 ? remainingNotes.join(" | ") : null,
     statutoryMonthlyCompensationBase,
+    philhealthMonthlyCompensationBase,
     sssContributionSource,
     sssSalaryCredit,
     sssBracketLabel,
@@ -882,16 +932,18 @@ function summarizeLateUndertimeDeduction(args: {
   const hasMinuteOverride =
     args.lateMinutesOverride != null || args.undertimeMinutesOverride != null;
   const effectiveLateMinutes = args.lateMinutesOverride ?? totalLateMinutes;
+  const payrollTardinessMinutes =
+    computePayrollTardinessMinutes(effectiveLateMinutes);
   const effectiveUndertimeMinutes =
     args.undertimeMinutesOverride ?? totalUndertimeMinutes;
 
   if (hasMinuteOverride) {
-    totalMinutes = effectiveLateMinutes + effectiveUndertimeMinutes;
+    totalMinutes = payrollTardinessMinutes + effectiveUndertimeMinutes;
     const hourlyRate =
       args.fallbackHoursPerDay > 0 ? args.dailyRate / args.fallbackHoursPerDay : 0;
 
     return {
-      totalLateMinutes: effectiveLateMinutes,
+      totalLateMinutes: payrollTardinessMinutes,
       totalUndertimeMinutes: effectiveUndertimeMinutes,
       totalMinutes,
       totalAmount: roundMoney((totalMinutes / 60) * hourlyRate),
@@ -916,8 +968,19 @@ function summarizeLateUndertimeDeduction(args: {
     rateValues.add(String(hourlyRate));
   }
 
+  const extraLatePenaltyMinutes =
+    computeAccumulatedLatePenaltyMinutes(totalLateMinutes);
+  if (extraLatePenaltyMinutes > 0) {
+    const penaltyHourlyRate =
+      args.fallbackHoursPerDay > 0 ? args.dailyRate / args.fallbackHoursPerDay : 0;
+
+    totalMinutes += extraLatePenaltyMinutes;
+    totalAmount += (extraLatePenaltyMinutes / 60) * penaltyHourlyRate;
+    if (penaltyHourlyRate > 0) rateValues.add(String(penaltyHourlyRate));
+  }
+
   return {
-    totalLateMinutes,
+    totalLateMinutes: computePayrollTardinessMinutes(totalLateMinutes),
     totalUndertimeMinutes,
     totalMinutes,
     totalAmount: roundMoney(totalAmount),
@@ -1100,6 +1163,44 @@ function getAccountCodeById(
   return null;
 }
 
+function getPayrollLineAccountCode(
+  line: PayrollLineDraft,
+  accountCodes: Map<string, typeof accountCode.$inferSelect>
+) {
+  return (
+    getAccountCodeById(accountCodes, line.accountCodeId) ??
+    accountCodes.get(line.code) ??
+    null
+  );
+}
+
+function resolvePayrollLineBirMetadata(
+  line: PayrollLineDraft,
+  accountCodes: Map<string, typeof accountCode.$inferSelect>
+) {
+  const account = getPayrollLineAccountCode(line, accountCodes);
+  const category =
+    line.birTaxCategory ??
+    account?.birTaxCategory ??
+    inferBirTaxCategory({
+      lineType: line.lineType,
+      accountType: line.accountType ?? account?.accountType ?? null,
+      code: line.code,
+      amount: line.amount,
+      taxable: line.taxable,
+      nonTaxable: account?.nonTaxable ?? line.taxable === false,
+      deminimis: account?.deminimis ?? false,
+    });
+
+  return {
+    birTaxCategory: category,
+    birDeMinimisType:
+      category === "DeMinimis"
+        ? line.birDeMinimisType ?? account?.birDeMinimisType ?? null
+        : null,
+  };
+}
+
 function buildLoanDeductionLine(args: {
   installment: LoanInstallmentWithLoan;
   accountCodes: Map<string, typeof accountCode.$inferSelect>;
@@ -1213,6 +1314,15 @@ async function getPriorCycleTaxContext(
 
 type PriorCycleTaxContext = { previousTaxable: number; previousTaxWithheld: number };
 
+function emptyBirYearToDateContext(): BirYearToDateTaxContext {
+  return {
+    priorTaxableCompensation: 0,
+    priorTaxWithheld: 0,
+    thirteenthMonthOtherBenefits: 0,
+    deMinimisByType: {},
+  };
+}
+
 async function batchLoadPriorCycleTaxContext(
   period: typeof payrollPeriods.$inferSelect,
   employeeIds: string[]
@@ -1280,6 +1390,101 @@ async function batchLoadPriorCycleTaxContext(
   return result;
 }
 
+async function batchLoadBirYearToDateTaxContext(
+  period: typeof payrollPeriods.$inferSelect,
+  employeeIds: string[]
+): Promise<Map<string, BirYearToDateTaxContext>> {
+  const result = new Map<string, BirYearToDateTaxContext>();
+  if (employeeIds.length === 0) return result;
+
+  const priorRunRows = await db
+    .select({
+      employeeId: payrollRunEmployees.employeeId,
+      taxablePay: payrollRunEmployees.taxablePay,
+      runEmployeeId: payrollRunEmployees.id,
+      periodId: payrollPeriods.id,
+      runCreatedAt: payrollRuns.createdAt,
+    })
+    .from(payrollRunEmployees)
+    .innerJoin(payrollRuns, eq(payrollRunEmployees.payrollRunId, payrollRuns.id))
+    .innerJoin(payrollPeriods, eq(payrollRuns.payrollPeriodId, payrollPeriods.id))
+    .where(
+      and(
+        inArray(payrollRunEmployees.employeeId, employeeIds),
+        eq(payrollPeriods.year, period.year),
+        lt(payrollPeriods.startDate, period.startDate),
+        ne(payrollRuns.status, "Void")
+      )
+    )
+    .orderBy(desc(payrollRuns.createdAt));
+
+  const latestByEmployeePeriod = new Map<string, typeof priorRunRows[number]>();
+  for (const row of priorRunRows) {
+    const key = `${row.employeeId}:${row.periodId}`;
+    if (!latestByEmployeePeriod.has(key)) {
+      latestByEmployeePeriod.set(key, row);
+    }
+  }
+
+  const latestRows = [...latestByEmployeePeriod.values()];
+  const runEmployeeIds = latestRows.map((row) => row.runEmployeeId);
+  if (runEmployeeIds.length === 0) return result;
+
+  const priorLines = await db
+    .select({
+      payrollRunEmployeeId: payrollRunLines.payrollRunEmployeeId,
+      lineType: payrollRunLines.lineType,
+      accountType: sql<string | null>`NULL`,
+      code: payrollRunLines.code,
+      amount: payrollRunLines.amount,
+      taxable: payrollRunLines.taxable,
+      month13thEligible: payrollRunLines.month13thEligible,
+      birTaxCategory: payrollRunLines.birTaxCategory,
+      birDeMinimisType: payrollRunLines.birDeMinimisType,
+    })
+    .from(payrollRunLines)
+    .where(inArray(payrollRunLines.payrollRunEmployeeId, runEmployeeIds));
+
+  const linesByRunEmployee = new Map<string, typeof priorLines>();
+  for (const line of priorLines) {
+    const current = linesByRunEmployee.get(line.payrollRunEmployeeId) ?? [];
+    current.push(line);
+    linesByRunEmployee.set(line.payrollRunEmployeeId, current);
+  }
+
+  for (const row of latestRows) {
+    const context = result.get(row.employeeId) ?? emptyBirYearToDateContext();
+    context.priorTaxableCompensation = roundMoney(
+      context.priorTaxableCompensation + toAmount(row.taxablePay)
+    );
+
+    const lines = linesByRunEmployee.get(row.runEmployeeId) ?? [];
+    context.priorTaxWithheld = roundMoney(
+      context.priorTaxWithheld +
+        lines
+          .filter((line) => line.code.toUpperCase() === "TAX")
+          .reduce((total, line) => total + toAmount(line.amount), 0)
+    );
+
+    const buckets = collectBirGrossBuckets(lines);
+    context.thirteenthMonthOtherBenefits = roundMoney(
+      context.thirteenthMonthOtherBenefits +
+        buckets.thirteenthMonthOtherBenefits
+    );
+
+    for (const [type, amount] of Object.entries(buckets.deMinimisByType)) {
+      const birType = type as BirDeMinimisType;
+      context.deMinimisByType[birType] = roundMoney(
+        (context.deMinimisByType[birType] ?? 0) + toAmount(amount)
+      );
+    }
+
+    result.set(row.employeeId, context);
+  }
+
+  return result;
+}
+
 async function computeEmployeePayroll({
   employee,
   resolvedSalary,
@@ -1302,6 +1507,7 @@ async function computeEmployeePayroll({
   customPayrollMap,
   statutoryBundle,
   priorCycleTaxContext,
+  birYearToDateTaxContext,
 }: {
   employee: EmployeeRecord;
   resolvedSalary: ResolvedSalaryForPeriod;
@@ -1329,6 +1535,7 @@ async function computeEmployeePayroll({
   customPayrollMap: Map<number, { id: number; code: string; groups: ContributionGroupWithFlags[] }>;
   statutoryBundle: ActiveStatutoryRuleBundle;
   priorCycleTaxContext?: Map<string, PriorCycleTaxContext>;
+  birYearToDateTaxContext?: Map<string, BirYearToDateTaxContext>;
 }): Promise<EmployeePayrollComputation> {
   const salary = resolvedSalary.salary ?? (employee.salary ?? undefined);
   const primaryResolvedSchedule = getPrimaryResolvedScheduleForPeriod({
@@ -1822,6 +2029,8 @@ async function computeEmployeePayroll({
     ].includes(accountType);
 
     lines.push({
+      accountCodeId: mappedAccount?.id ?? null,
+      accountType: mappedAccount?.accountType ?? accountType,
       lineType: isEarning ? "Earning" : "Deduction",
       code: entry.accountCode ?? "RECUR",
       description: entry.description ?? mappedAccount?.description ?? "Recurring Entry",
@@ -1838,6 +2047,14 @@ async function computeEmployeePayroll({
     if (loanLine) lines.push(loanLine);
   }
 
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    lines[index] = {
+      ...line,
+      ...resolvePayrollLineBirMetadata(line, accountCodes),
+    };
+  }
+
   const customPayroll =
     salary?.customPayrollId != null
       ? customPayrollMap.get(salary.customPayrollId)
@@ -1847,18 +2064,29 @@ async function computeEmployeePayroll({
       .filter((line) => line.lineType === "Earning")
       .reduce((total, line) => total + line.amount, 0)
   );
-  const nonTaxablePay = roundMoney(
-    lines
-      .filter((line) => line.lineType === "Earning" && !line.taxable)
-      .reduce((total, line) => total + line.amount, 0)
-  );
-  const taxableEarningsBeforeGov = roundMoney(grossPay - nonTaxablePay);
   // Statutory deductions stay on a monthly compensation basis, even when the
   // employee is paid semi-monthly or is on a daily-rate payroll setup.
   const monthlyCompensationBase = monthlyRate || roundMoney(dailyRate * getRateDivisor(salary));
+  const philhealthMonthlyCompensation = resolvePhilhealthMonthlyCompensationBase({
+    salary,
+    dailyRate,
+    monthlyRate,
+    monthlyCompensationBase,
+  });
   const contributionGroups = new Map(
     (customPayroll?.groups ?? []).map((group) => [group.contributionType, group])
   );
+  const sssGroup = contributionGroups.get("SSS");
+  const phGroup = contributionGroups.get("PHILHEALTH");
+  const pgGroup = contributionGroups.get("PAGIBIG");
+  const hasCustomFixed = (group: ContributionGroupWithFlags | undefined) =>
+    group
+      ? [
+          group.fixedEmployeeShare,
+          group.fixedEmployerShare,
+          group.fixedECShare,
+        ].some((value) => toAmount(value) > 0)
+      : false;
   const contributionBasis: ContributionBasisSnapshot = {};
   for (const contributionType of [
     "SSS",
@@ -1883,6 +2111,13 @@ async function computeEmployeePayroll({
       contributionBasis[contributionType] = roundMoney(basis);
     }
   }
+  if (
+    !ignoreContributionDeduction &&
+    philhealthMonthlyCompensation.usesAnnualizedDailyRateBasis &&
+    !hasCustomFixed(phGroup)
+  ) {
+    contributionBasis.PHILHEALTH = philhealthMonthlyCompensation.monthlyCompensationBase;
+  }
   let sssEmployee = 0;
   let sssEmployer = 0;
   let sssEc = 0;
@@ -1902,17 +2137,15 @@ async function computeEmployeePayroll({
   ];
 
   // Pre-fetch all three statutory DB lookups in parallel to avoid sequential awaits in the loop
-  const sssGroup = contributionGroups.get("SSS");
-  const phGroup = contributionGroups.get("PHILHEALTH");
-  const pgGroup = contributionGroups.get("PAGIBIG");
-  const hasCustomFixed = (g: typeof sssGroup) =>
-    g ? [g.fixedEmployeeShare, g.fixedEmployerShare, g.fixedECShare].some((v) => toAmount(v) > 0) : false;
   const [sssStatutoryResult, philhealthStatutoryResult, pagibigStatutoryResult] = await Promise.all([
     !ignoreContributionDeduction && !hasCustomFixed(sssGroup) && statutoryBundle.sssVersionId
       ? computeSssContribution(monthlyCompensationBase, statutoryBundle.sssVersionId)
       : Promise.resolve(null),
     !ignoreContributionDeduction && !hasCustomFixed(phGroup) && statutoryBundle.philhealthVersionId
-      ? computePhilhealthContribution(monthlyCompensationBase, statutoryBundle.philhealthVersionId)
+      ? computePhilhealthContribution(
+          philhealthMonthlyCompensation.monthlyCompensationBase,
+          statutoryBundle.philhealthVersionId
+        )
       : Promise.resolve(null),
     !ignoreContributionDeduction && !hasCustomFixed(pgGroup) && statutoryBundle.pagibigVersionId
       ? computePagibigContribution(monthlyCompensationBase, statutoryBundle.pagibigVersionId)
@@ -1970,8 +2203,10 @@ async function computeEmployeePayroll({
     const employeePeriodShare = distributeContributionAmount(employeeShare, period.cycle, flags);
     const employerPeriodShare = distributeContributionAmount(employerShare, period.cycle, flags);
     const ecPeriodShare =
-      config.type === "SSS" && !hasCustomFixedShares
-        ? roundMoney(ecShare)
+      config.type === "SSS"
+        ? isSssEcApplicableForCycle(period.cycle)
+          ? roundMoney(ecShare)
+          : 0
         : distributeContributionAmount(ecShare, period.cycle, flags);
 
     if (employeePeriodShare > 0) {
@@ -2022,15 +2257,40 @@ async function computeEmployeePayroll({
     }
   }
 
-  const taxableCompensation = Math.max(
-    0,
-    roundMoney(
-      taxableEarningsBeforeGov - sssEmployee - philhealthEmployee - pagibigEmployee
-    )
-  );
+  const birYearToDate =
+    birYearToDateTaxContext?.get(employee.id) ?? emptyBirYearToDateContext();
+  const birTaxBreakdown = computeBirTaxableCompensation({
+    lines,
+    employeeDeductions: {
+      sssEmployee,
+      philhealthEmployee,
+      pagibigEmployee,
+    },
+    yearToDate: birYearToDate,
+  });
+  const taxableCompensation = birTaxBreakdown.taxableCompensation;
+  const nonTaxablePay = birTaxBreakdown.nonTaxable;
   const taxGroup = contributionGroups.get("TAX");
   const taxFlags = taxGroup ? getCustomPayrollScheduleFlags(taxGroup) : undefined;
   let taxAmount = 0;
+  let withholdingTaxBasis = taxableCompensation;
+  const birNotes: string[] = [];
+
+  if (birTaxBreakdown.benefitTaxableExcess > 0) {
+    birNotes.push(
+      `BIR 13th/Other Benefits Taxable Excess: ${formatPayrollNoteNumber(
+        birTaxBreakdown.benefitTaxableExcess
+      )}`
+    );
+  }
+
+  if (birTaxBreakdown.deMinimisExcessToBenefits > 0) {
+    birNotes.push(
+      `BIR De Minimis Excess Applied To Benefits: ${formatPayrollNoteNumber(
+        birTaxBreakdown.deMinimisExcessToBenefits
+      )}`
+    );
+  }
 
   if (!ignoreContributionDeduction && (!taxGroup || isScheduleApplicable(period.cycle, taxFlags))) {
     if (taxGroup?.flags?.taxFixedPercentage) {
@@ -2045,6 +2305,7 @@ async function computeEmployeePayroll({
         period.cycle,
         taxFlags
       );
+      withholdingTaxBasis = contributionBasis.TAX ?? taxableCompensation;
     } else if (taxGroup && toAmount(taxGroup.percentage) > 0) {
       const basis = getBasisAmount({
         basisOfComputation: taxGroup.basisOfComputation,
@@ -2053,9 +2314,33 @@ async function computeEmployeePayroll({
         regularPay,
         monthlyRate: monthlyCompensationBase,
       });
+      withholdingTaxBasis = basis;
       taxAmount = roundMoney(basis * toAmount(taxGroup.percentage));
     } else if (statutoryBundle.taxVersionId) {
-      if (taxGroup?.flags?.taxMonthEndAdjustment && period.cycle === "B") {
+      if (isFinalDecemberSemiMonthlyPayroll(period)) {
+        const annualTaxableCompensation = roundMoney(
+          birYearToDate.priorTaxableCompensation + taxableCompensation
+        );
+        const annualTaxDue = computeAnnualBirTax2023Onward(
+          annualTaxableCompensation
+        );
+        taxAmount = roundMoney(
+          Math.max(0, annualTaxDue - birYearToDate.priorTaxWithheld)
+        );
+        birNotes.push(
+          `BIR Year-End Annual Taxable Compensation: ${formatPayrollNoteNumber(
+            annualTaxableCompensation
+          )}`
+        );
+        birNotes.push(
+          `BIR Year-End Annual Tax Due: ${formatPayrollNoteNumber(annualTaxDue)}`
+        );
+        birNotes.push(
+          `BIR Year-End Prior Tax Withheld: ${formatPayrollNoteNumber(
+            birYearToDate.priorTaxWithheld
+          )}`
+        );
+      } else if (taxGroup?.flags?.taxMonthEndAdjustment && period.cycle === "B") {
         const previous =
           priorCycleTaxContext?.get(employee.id) ??
           (await getPriorCycleTaxContext(period, employee.id));
@@ -2077,6 +2362,9 @@ async function computeEmployeePayroll({
       }
     }
   }
+  contributionBasis.TAX = ignoreContributionDeduction
+    ? 0
+    : roundMoney(withholdingTaxBasis);
 
   if (taxAmount > 0) {
     lines.push({
@@ -2132,10 +2420,16 @@ async function computeEmployeePayroll({
       unresolvedLeaveCount,
       statutoryMonthlyCompensationBase:
         monthlyCompensationBase > 0 ? monthlyCompensationBase : null,
+      philhealthMonthlyCompensationBase:
+        philhealthMonthlyCompensation.monthlyCompensationBase !== monthlyCompensationBase &&
+        philhealthMonthlyCompensation.monthlyCompensationBase > 0
+          ? philhealthMonthlyCompensation.monthlyCompensationBase
+          : null,
       sssContributionSource,
       sssSalaryCredit,
       sssRangeFrom,
       sssRangeTo,
+      birNotes,
     }),
     contributionBasis,
     lines,
@@ -2145,14 +2439,15 @@ async function computeEmployeePayroll({
 function buildManualPayrollComputation(
   entry: Awaited<ReturnType<typeof loadManualPayrollEntriesForPeriod>>[number],
   dueInstallments: LoanInstallmentWithLoan[],
-  accountCodes: Map<string, typeof accountCode.$inferSelect>
+  accountCodes: Map<string, typeof accountCode.$inferSelect>,
+  cycle: "A" | "B"
 ): EmployeePayrollComputation {
   const payComputationMode =
     entry.payComputationMode === "Daily Rate" ||
     entry.payComputationMode === "Monthly Rate"
       ? entry.payComputationMode
       : null;
-  const lines = buildManualPayrollRunLines(entry).map((line) => ({
+  const lines = buildManualPayrollRunLines(entry, cycle).map((line) => ({
     accountCodeId: line.accountCodeId,
     lineType: line.lineType,
     code: line.code,
@@ -2162,6 +2457,8 @@ function buildManualPayrollComputation(
     rate: line.rate,
     taxable: line.taxable,
     month13thEligible: line.month13thEligible,
+    birTaxCategory: "birTaxCategory" in line ? line.birTaxCategory : null,
+    birDeMinimisType: "birDeMinimisType" in line ? line.birDeMinimisType : null,
     loanRefNo: line.loanRefNo,
     sourceTable: line.sourceTable,
     sourceId: line.sourceId,
@@ -2177,6 +2474,14 @@ function buildManualPayrollComputation(
     .filter((line): line is PayrollLineDraft => line != null);
   const autoLoanDeductionTotal = roundMoney(
     autoLoanLines.reduce((total, line) => total + line.amount, 0)
+  );
+  const sssEc = isSssEcApplicableForCycle(cycle) ? toAmount(entry.sssEc) : 0;
+  const employerContributions = roundMoney(
+    toAmount(entry.sssEmployer) +
+      sssEc +
+      toAmount(entry.philhealthEmployer) +
+      toAmount(entry.pagibigEmployer) +
+      toAmount(entry.peraaEmployer)
   );
   const breakdownNotes = [
     payComputationMode ? `${PAYROLL_BASIS_NOTE_PREFIX}${payComputationMode}` : null,
@@ -2201,7 +2506,7 @@ function buildManualPayrollComputation(
       toAmount(entry.totalDeductions) + autoLoanDeductionTotal
     ),
     employeeContributions: toAmount(entry.employeeContributions),
-    employerContributions: toAmount(entry.employerContributions),
+    employerContributions,
     netPay: roundMoney(toAmount(entry.netPay) - autoLoanDeductionTotal),
     payComputationMode,
     breakdownNotes,
@@ -2242,7 +2547,11 @@ export async function computeManualPayrollLatestBaseline(
 
   const payrollTerms = employee.generalInfo?.payrollTerms;
   const separated = employee.generalInfo?.separationDate;
-  if (payrollTerms !== "Semi-Monthly" || (separated && separated < period.startDate)) {
+  if (
+    !isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus) ||
+    payrollTerms !== "Semi-Monthly" ||
+    (separated && separated < period.startDate)
+  ) {
     return null;
   }
 
@@ -2305,6 +2614,8 @@ export async function computeManualPayrollLatestBaseline(
       monthlyRate: accountCode.monthlyRate,
       nonTaxable: accountCode.nonTaxable,
       deminimis: accountCode.deminimis,
+      birTaxCategory: accountCode.birTaxCategory,
+      birDeMinimisType: accountCode.birDeMinimisType,
       healthInsurance: accountCode.healthInsurance,
       month13thPay: accountCode.month13thPay,
       createdAt: accountCode.createdAt,
@@ -2470,6 +2781,8 @@ export async function computeManualPayrollLatestBaseline(
       month13thPay: item.month13thPay,
       nonTaxable: item.nonTaxable,
       deminimis: item.deminimis,
+      birTaxCategory: item.birTaxCategory,
+      birDeMinimisType: item.birDeMinimisType,
       dailyRate: item.dailyRate,
       monthlyRate: item.monthlyRate,
     })),
@@ -2510,6 +2823,110 @@ function ensurePayrollTransitionAllowed(
   }
 
   throw new Error(`Cannot move payroll run from ${currentStatus} to ${nextStatus}.`);
+}
+
+async function getUnresolvedHeldDtrRowsForPeriod(period: {
+  id: string;
+  code: string;
+  startDate: string;
+  endDate: string;
+}) {
+  const [manualHeldRows, flaggedSummaryRows, approvedHoldRows] =
+    await Promise.all([
+      db
+        .select({
+          employeeId: employeeAttendanceDayStatusOverrides.employeeId,
+          attendanceDate: employeeAttendanceDayStatusOverrides.attendanceDate,
+        })
+        .from(employeeAttendanceDayStatusOverrides)
+        .where(
+          and(
+            eq(employeeAttendanceDayStatusOverrides.payrollPeriodId, period.id),
+            eq(employeeAttendanceDayStatusOverrides.status, "Hold"),
+            gte(employeeAttendanceDayStatusOverrides.attendanceDate, period.startDate),
+            lte(employeeAttendanceDayStatusOverrides.attendanceDate, period.endDate)
+          )
+        ),
+      db
+        .select({
+          employeeId: attendanceDailySummaries.employeeId,
+          attendanceDate: attendanceDailySummaries.attendanceDate,
+          anomalyFlags: attendanceDailySummaries.anomalyFlags,
+        })
+        .from(attendanceDailySummaries)
+        .where(
+          and(
+            gte(attendanceDailySummaries.attendanceDate, period.startDate),
+            lte(attendanceDailySummaries.attendanceDate, period.endDate),
+            or(
+              sql`${attendanceDailySummaries.anomalyFlags} like '%ODD_PUNCH_COUNT%'`,
+              sql`${attendanceDailySummaries.anomalyFlags} like '%MISSING_OUT%'`
+            )
+          )
+        ),
+      db
+        .select({
+          employeeId: attendanceDtrHoldApprovals.employeeId,
+          attendanceDate: attendanceDtrHoldApprovals.attendanceDate,
+        })
+        .from(attendanceDtrHoldApprovals)
+        .where(
+          and(
+            eq(attendanceDtrHoldApprovals.sourcePayrollPeriodId, period.id),
+            eq(attendanceDtrHoldApprovals.status, "Approved")
+          )
+        ),
+    ]);
+
+  const approvedKeys = new Set(
+    approvedHoldRows.map((row) => `${row.employeeId}|${row.attendanceDate}`)
+  );
+  const heldKeys = new Set<string>();
+
+  for (const row of manualHeldRows) {
+    heldKeys.add(`${row.employeeId}|${row.attendanceDate}`);
+  }
+
+  for (const row of flaggedSummaryRows) {
+    const flags = normalizeAttendanceDtrAnomalyFlags(row.anomalyFlags ?? null);
+    const requiresHold =
+      flags.includes("ODD_PUNCH_COUNT") || flags.includes("MISSING_OUT");
+
+    if (requiresHold && !flags.includes("DOUBLE_PUNCH")) {
+      heldKeys.add(`${row.employeeId}|${row.attendanceDate}`);
+    }
+  }
+
+  return [...heldKeys]
+    .filter((key) => !approvedKeys.has(key))
+    .map((key) => {
+      const [employeeId, attendanceDate] = key.split("|");
+      return { employeeId, attendanceDate };
+    })
+    .sort((left, right) =>
+      left.attendanceDate.localeCompare(right.attendanceDate) ||
+      left.employeeId.localeCompare(right.employeeId)
+    );
+}
+
+async function assertNoUnresolvedHeldDtrRowsForPayrollTransition(period: {
+  id: string;
+  code: string;
+  startDate: string;
+  endDate: string;
+}) {
+  const unresolvedRows = await getUnresolvedHeldDtrRowsForPeriod(period);
+
+  if (unresolvedRows.length === 0) return;
+
+  const sample = unresolvedRows
+    .slice(0, 5)
+    .map((row) => `${row.employeeId}:${row.attendanceDate}`)
+    .join(", ");
+
+  throw new Error(
+    `Payroll period ${period.code} has ${unresolvedRows.length} unresolved held DTR row(s). Resolve or approve held DTR before reviewing, approving, or posting payroll. Sample: ${sample}.`
+  );
 }
 
 export async function ensureSemiMonthlyPayrollPeriods(year: number) {
@@ -2584,6 +3001,7 @@ export async function createOrRecomputePayrollRun(
     const payrollTerms = employee.generalInfo?.payrollTerms;
     const separated = employee.generalInfo?.separationDate;
     return (
+      isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus) &&
       payrollTerms === "Semi-Monthly" &&
       (!separated || separated >= period.startDate)
     );
@@ -2653,6 +3071,8 @@ export async function createOrRecomputePayrollRun(
       monthlyRate: accountCode.monthlyRate,
       nonTaxable: accountCode.nonTaxable,
       deminimis: accountCode.deminimis,
+      birTaxCategory: accountCode.birTaxCategory,
+      birDeMinimisType: accountCode.birDeMinimisType,
       healthInsurance: accountCode.healthInsurance,
       month13thPay: accountCode.month13thPay,
       createdAt: accountCode.createdAt,
@@ -2856,10 +3276,11 @@ export async function createOrRecomputePayrollRun(
   }
 
   const accountCodeMap = new Map(allAccountCodes.map((item) => [item.accountCode, item]));
-  const [statutoryBundle, priorCycleTaxContextMap] = await Promise.all([
+  const [statutoryBundle, priorCycleTaxContextMap, birYearToDateTaxContextMap] = await Promise.all([
     getActiveStatutoryRuleBundle(period.adjustedPayDate),
     // Batch-load Cycle A tax data for all employees in a single pass (eliminates N×2 queries on Cycle B runs)
     batchLoadPriorCycleTaxContext(period, employeesToCompute.map((e) => e.id)),
+    batchLoadBirYearToDateTaxContext(period, employeesToCompute.map((e) => e.id)),
   ]);
 
   const computations: EmployeePayrollComputation[] = [];
@@ -2899,6 +3320,7 @@ export async function createOrRecomputePayrollRun(
           customPayrollMap,
           statutoryBundle,
           priorCycleTaxContext: priorCycleTaxContextMap,
+          birYearToDateTaxContext: birYearToDateTaxContextMap,
         })
       )
     );
@@ -2909,7 +3331,8 @@ export async function createOrRecomputePayrollRun(
       buildManualPayrollComputation(
         entry,
         installmentsByEmployee.get(entry.employeeId) ?? [],
-        accountCodeMap
+        accountCodeMap,
+        period.cycle
       )
     )
   );
@@ -3032,6 +3455,8 @@ export async function createOrRecomputePayrollRun(
         rate: line.rate != null ? line.rate.toFixed(4) : null,
         taxable: line.taxable ?? false,
         month13thEligible: line.month13thEligible ?? false,
+        birTaxCategory: line.birTaxCategory ?? null,
+        birDeMinimisType: line.birDeMinimisType ?? null,
         sourceTable: line.sourceTable ?? null,
         sourceId: line.sourceId ?? null,
       }));
@@ -3092,6 +3517,12 @@ export async function transitionPayrollRunStatus(
   }
 
   ensurePayrollTransitionAllowed(run.status, nextStatus);
+  if (nextStatus !== "Void") {
+    if (!run.payrollPeriod) {
+      throw new Error("Payroll period not found.");
+    }
+    await assertNoUnresolvedHeldDtrRowsForPayrollTransition(run.payrollPeriod);
+  }
 
   if (nextStatus === "Posted") {
     return db.transaction(async (tx) => {
@@ -3118,6 +3549,12 @@ export async function transitionPayrollRunStatus(
       }
 
       ensurePayrollTransitionAllowed(lockedRun.status, nextStatus);
+      if (!lockedRun.payrollPeriod) {
+        throw new Error("Payroll period not found.");
+      }
+      await assertNoUnresolvedHeldDtrRowsForPayrollTransition(
+        lockedRun.payrollPeriod
+      );
 
       const loanLines = lockedRun.employees.flatMap((employeeRun) =>
         employeeRun.lines

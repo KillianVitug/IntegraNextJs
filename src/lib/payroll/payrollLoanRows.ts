@@ -1,6 +1,8 @@
 import { db } from "@/db";
 import {
   accountCode,
+  employees,
+  employeesGeneralInfo,
   employeesLoans,
   loanInstallments,
   loanPayments,
@@ -22,6 +24,7 @@ import {
 } from "./calendar";
 import { ensureSemiMonthlyPayrollPeriods } from "./engine";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { payrollEligibleEmploymentStatusCondition } from "@/lib/employmentStatus";
 
 type DbLike = Pick<typeof db, "insert" | "query" | "select" | "update">;
 
@@ -187,12 +190,33 @@ export async function getEmployeePayrollScheduledLoanRows(args: {
   database?: DbLike;
 }): Promise<PayrollScheduledLoanDeductionView[]> {
   const database = args.database ?? db;
-  const payrollPeriod = await database.query.payrollPeriods.findFirst({
-    where: eq(payrollPeriods.id, args.payrollPeriodId),
-  });
+  const [payrollPeriod, eligibleEmployeeRows] = await Promise.all([
+    database.query.payrollPeriods.findFirst({
+      where: eq(payrollPeriods.id, args.payrollPeriodId),
+    }),
+    database
+      .select({ id: employees.id })
+      .from(employees)
+      .leftJoin(
+        employeesGeneralInfo,
+        eq(employeesGeneralInfo.employeeId, employees.id)
+      )
+      .where(
+        and(
+          eq(employees.id, args.employeeId),
+          isNull(employees.deletedAt),
+          isNull(employeesGeneralInfo.deletedAt),
+          payrollEligibleEmploymentStatusCondition()
+        )
+      )
+      .limit(1),
+  ]);
 
   if (!payrollPeriod) {
     throw new Error("Payroll period not found.");
+  }
+  if (eligibleEmployeeRows.length === 0) {
+    throw new Error("Employee not found.");
   }
 
   const rows: ScheduledLoanRow[] = await database
@@ -288,6 +312,27 @@ export async function updateEmployeePayrollLoanInstallmentAmount(args: {
 
     if (!selectedRow) {
       throw new Error("Loan installment was not found for this employee and payroll period.");
+    }
+
+    const [eligibleEmployee] = await tx
+      .select({ id: employees.id })
+      .from(employees)
+      .leftJoin(
+        employeesGeneralInfo,
+        eq(employeesGeneralInfo.employeeId, employees.id)
+      )
+      .where(
+        and(
+          eq(employees.id, selectedRow.loan.employeeId),
+          isNull(employees.deletedAt),
+          isNull(employeesGeneralInfo.deletedAt),
+          payrollEligibleEmploymentStatusCondition()
+        )
+      )
+      .limit(1);
+
+    if (!eligibleEmployee) {
+      throw new Error("Employee not found.");
     }
 
     if (selectedRow.loan.status !== "Active") {

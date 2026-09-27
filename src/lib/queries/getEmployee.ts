@@ -4,6 +4,11 @@ import { employeeCodeSql } from "@/lib/employeeCodeSql";
 import { normalizeTableQueryOptions, type TableQueryOptions, type TableSort } from "@/lib/queries/tableQuery";
 import { and, asc, desc, eq, ilike, isNull, or, sql, type SQL } from "drizzle-orm";
 
+type EmployeeTypeFilter = "EMP" | "ADMIN";
+type EmployeeTableQueryOptions = TableQueryOptions & {
+    employeeType?: EmployeeTypeFilter;
+};
+
 export async function getEmployee(id: string) {
     const employee = await db.query.employees.findFirst({
         where: eq(employees.id, id),
@@ -81,10 +86,10 @@ const employeeSortColumns = {
     Email: employeesOtherReferences.email,
 } as const;
 
-export async function getOpenEmployees(options: TableQueryOptions | number = {}, pageSizeArg = 50) {
+export async function getOpenEmployees(options: EmployeeTableQueryOptions | number = {}, pageSizeArg = 50) {
     const query = normalizeEmployeeQueryOptions(options, pageSizeArg);
     const offset = (query.page - 1) * query.pageSize;
-    const whereClause = buildEmployeeWhereClause(query.search, query.filters);
+    const whereClause = buildEmployeeWhereClause(query.search, query.filters, query.employeeType);
     const orderBy = buildEmployeeOrderBy(query.sort);
 
     const [data, [countRow]] = await Promise.all([
@@ -110,19 +115,31 @@ export async function getOpenEmployees(options: TableQueryOptions | number = {},
     return { data, total: Number(countRow.total) };
 }
 
-function normalizeEmployeeQueryOptions(options: TableQueryOptions | number, pageSizeArg: number) {
+function normalizeEmployeeQueryOptions(options: EmployeeTableQueryOptions | number, pageSizeArg: number) {
     if (typeof options === "number") {
-        return normalizeTableQueryOptions(
+        const query = normalizeTableQueryOptions(
             { page: options, pageSize: pageSizeArg },
             { id: "employeeNo", desc: false }
         );
+
+        return { ...query, employeeType: "EMP" as EmployeeTypeFilter };
     }
 
-    return normalizeTableQueryOptions(options, { id: "employeeNo", desc: false });
+    return {
+        ...normalizeTableQueryOptions(options, { id: "employeeNo", desc: false }),
+        employeeType: options.employeeType ?? "EMP",
+    };
 }
 
-function buildEmployeeWhereClause(search: string, filters: Record<string, string>) {
-    const conditions: SQL[] = [isNull(employees.deletedAt)];
+function buildEmployeeWhereClause(
+    search: string,
+    filters: Record<string, string>,
+    employeeType: EmployeeTypeFilter
+) {
+    const conditions: SQL[] = [
+        isNull(employees.deletedAt),
+        eq(employees.employeeType, employeeType),
+    ];
 
     if (search) {
         const pattern = toLikePattern(search);

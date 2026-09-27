@@ -82,6 +82,8 @@ export default function SickandLeaveTable({ data, total, pageSize }: Props) {
 
   usePolling(searchParams.get("search") ?? searchParams.get("searchText"), 300000)
   const [asOfDate, setAsOfDate] = useState(new Date());
+  const selectedYear =
+    searchParams.get("year") ?? String(new Date().getFullYear());
 
   const computedData = useMemo<RowType[]>(() => {
     return data.map(item => {
@@ -254,7 +256,7 @@ export default function SickandLeaveTable({ data, total, pageSize }: Props) {
                 className="cursor-pointer hover:bg-border/25 dark:hover:bg-ring/40"
                 onClick={() =>
                   router.push(
-                    `/employeeMaster/form?employeeId=${row.original.id}`
+                    `/leaves/form?employeeId=${encodeURIComponent(row.original.id)}&year=${encodeURIComponent(selectedYear)}`
                   )
                 }
               >

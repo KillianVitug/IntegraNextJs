@@ -9,14 +9,13 @@ import {
   getRoleForAccount,
 } from "@/lib/auth/server";
 import { normalizeEmail, verifyPassword } from "@/lib/auth/crypto";
+import {
+  buildRequestHostUrl,
+  redirectToRequestHost,
+} from "@/lib/http/redirect";
 
 function redirectToInvalidLogin(request: NextRequest) {
-  const url = request.nextUrl.clone();
-  url.pathname = "/";
-  url.search = "";
-  url.searchParams.set("loginStatus", "invalid");
-
-  return NextResponse.redirect(url, 303);
+  return redirectToRequestHost(request, "/", { loginStatus: "invalid" });
 }
 
 export async function POST(request: NextRequest) {
@@ -66,7 +65,10 @@ export async function POST(request: NextRequest) {
 
     await createSession(account.id);
 
-    return NextResponse.redirect(new URL(getRedirectForRole(role), request.url), 303);
+    return NextResponse.redirect(
+      buildRequestHostUrl(request, getRedirectForRole(role)),
+      303,
+    );
   } catch (error) {
     console.error(error);
     return redirectToInvalidLogin(request);

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import {
+  getLeaveDayExclusionReason,
   getMappedLeavePayrollAccountCode,
   normalizeLeavePayrollAccountKey,
-} from "@/lib/payroll/leaveAccountCodes";
+} from "@/lib/payroll/leave";
 import {
   APPROVED_PAID_LEAVE_SOURCE_LABEL,
   buildApprovedPaidLeaveAccountCodeRows,
@@ -297,5 +298,47 @@ assert.equal(shouldChargeLeaveDay({
   isRestDay: true,
   holidayType: "Company",
 }), true);
+
+const sundayRestDayExclusion = getLeaveDayExclusionReason({
+  excludeRestDaysAndHolidays: true,
+  hasScheduledHours: false,
+  isRestDay: true,
+  isNonWorkingHoliday: false,
+});
+const mondayAfterRestDayExclusion = getLeaveDayExclusionReason({
+  excludeRestDaysAndHolidays: true,
+  hasScheduledHours: true,
+  isRestDay: false,
+  isNonWorkingHoliday: false,
+});
+const managerSundayRestDayExclusion = getLeaveDayExclusionReason({
+  excludeRestDaysAndHolidays: true,
+  chargeRestDays: true,
+  hasScheduledHours: false,
+  isRestDay: true,
+  isNonWorkingHoliday: false,
+});
+const managerNonWorkingHolidayExclusion = getLeaveDayExclusionReason({
+  excludeRestDaysAndHolidays: true,
+  chargeRestDays: true,
+  hasScheduledHours: false,
+  isRestDay: true,
+  isNonWorkingHoliday: true,
+});
+const sundayMondayChargeableDays = [
+  sundayRestDayExclusion,
+  mondayAfterRestDayExclusion,
+].filter((exclusionReason) => exclusionReason == null).length;
+const managerSundayMondayChargeableDays = [
+  managerSundayRestDayExclusion,
+  mondayAfterRestDayExclusion,
+].filter((exclusionReason) => exclusionReason == null).length;
+
+assert.equal(sundayRestDayExclusion, "NoScheduledHours");
+assert.equal(mondayAfterRestDayExclusion, null);
+assert.equal(sundayMondayChargeableDays, 1);
+assert.equal(managerSundayRestDayExclusion, null);
+assert.equal(managerSundayMondayChargeableDays, 2);
+assert.equal(managerNonWorkingHolidayExclusion, "NonWorkingHoliday");
 
 console.log("Leave functionality fixtures passed.");

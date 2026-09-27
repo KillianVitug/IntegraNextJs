@@ -18,11 +18,6 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { formatEmployeeNoDisplay } from "@/utils/employeeDisplay";
-import {
-  cancelManagerLeaveRecordFromForm,
-  createManagerLeaveRecordFromForm,
-  updateManagerLeaveRecordFromForm,
-} from "./actions";
 
 export const metadata = {
   title: "Manager Leave Requests",
@@ -190,12 +185,9 @@ export default async function ManagerLeavesPage({
       </form>
 
       <form
-        action={
-          editRecord
-            ? updateManagerLeaveRecordFromForm
-            : createManagerLeaveRecordFromForm
-        }
+        action="/managerLeaves/request"
         className="space-y-3 rounded-md border p-3"
+        method="post"
       >
         <input type="hidden" name="year" value={year} />
         {editRecord ? <input type="hidden" name="id" value={editRecord.id} /> : null}
@@ -300,7 +292,7 @@ export default async function ManagerLeavesPage({
                 <a href={`/managerLeaves?year=${year}`}>Cancel Edit</a>
               </Button>
               <Button
-                formAction={cancelManagerLeaveRecordFromForm}
+                formAction="/managerLeaves/request/cancel"
                 type="submit"
                 variant="destructive"
               >

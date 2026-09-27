@@ -1,4 +1,7 @@
-import { computeNetDtrWorkedMinutes } from "./dtrOverrides";
+import {
+  computeNetDtrWorkedMinutes,
+  computePayrollTardinessMinutes,
+} from "./dtrOverrides";
 
 export type GeneratedDtrHolidayMinutesRow = {
   scheduledMinutes: number;
@@ -85,7 +88,7 @@ export function getGeneratedDtrHolidayCheckNetWorkedMinutes(
     return Math.max(
       0,
       Math.round(row.workedMinutes) -
-        Math.max(0, Math.round(row.lateMinutes)) -
+        computePayrollTardinessMinutes(row.lateMinutes) -
         Math.max(0, Math.round(row.undertimeMinutes))
     );
   }
@@ -93,7 +96,7 @@ export function getGeneratedDtrHolidayCheckNetWorkedMinutes(
   return Math.max(
     0,
     Math.round(row.regularMinutes) -
-      Math.max(0, Math.round(row.lateMinutes)) -
+      computePayrollTardinessMinutes(row.lateMinutes) -
       Math.max(0, Math.round(row.undertimeMinutes))
   );
 }

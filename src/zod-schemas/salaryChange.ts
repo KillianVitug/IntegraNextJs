@@ -17,6 +17,26 @@ const requiredRateNumericString = requiredNumericString.refine(
   "Must have at most 4 decimal places"
 );
 
+const optionalNumericString = z.preprocess((value) => {
+  if (value == null) return undefined;
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") {
+    const normalized = value.replace(/,/g, "").trim();
+    return normalized === "" ? undefined : normalized;
+  }
+  return value;
+}, z.string().regex(/^\d*\.?\d*$/, "Must be a number").optional());
+
+const optionalRateNumericString = optionalNumericString.refine(
+  (value) => value === undefined || (value.split(".")[1]?.length ?? 0) <= 4,
+  "Must have at most 4 decimal places"
+);
+
+const optionalMoneyNumericString = optionalNumericString.refine(
+  (value) => value === undefined || (value.split(".")[1]?.length ?? 0) <= 2,
+  "Must have at most 2 decimal places"
+);
+
 export const salaryChangeModeSchema = z.enum([
   "OnePeriodOverride",
   "ForwardEffective",
@@ -138,10 +158,15 @@ export const createSalaryRateSalaryChangesSchema = z.object({
     .transform((value) => (value ? value : undefined)),
   rows: z
     .array(
-      z.object({
-        employeeId: z.string().uuid(),
-        rate: requiredRateNumericString,
-      })
+      z
+        .object({
+          employeeId: z.string().uuid(),
+          rate: optionalRateNumericString,
+          rateDivisor: optionalMoneyNumericString,
+        })
+        .refine((row) => row.rate !== undefined || row.rateDivisor !== undefined, {
+          message: "Enter a salary rate or rate divisor",
+        })
     )
     .min(1, "Select at least one employee"),
 });
@@ -168,6 +193,7 @@ export const dailyRateSalaryAdjustmentRowSchema = z.object({
   employeeId: z.string().uuid(),
   previousDailyRate: z.string(),
   previousMonthlyRate: z.string(),
+  previousRateDivisor: z.string(),
 });
 
 export const salaryChangeHistoryReadSchema = z.object({
@@ -187,6 +213,7 @@ export const salaryChangeHistoryReadSchema = z.object({
   mode: salaryChangeModeSchema,
   status: salaryChangeStatusSchema,
   reason: z.string(),
+  cancelReason: z.string().nullable(),
   notes: z.string().nullable(),
   createdByUserId: z.string(),
   createdAt: z.date(),

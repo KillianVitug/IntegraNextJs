@@ -33,6 +33,18 @@ export default async function ManagerDtrFilesPage({
     importStatus?: string;
     imported?: string;
     denied?: string;
+    unmatched?: string;
+    refreshStatus?: string;
+    summaries?: string;
+    removeStatus?: string;
+    removedLogs?: string;
+    removedSummaries?: string;
+    holdRefreshed?: string;
+    holdDeleted?: string;
+    holdOverridesCleared?: string;
+    payrollRecomputeStatus?: string;
+    payrollRunNumber?: string;
+    payrollRecomputeMessage?: string;
     holdEditEmployeeId?: string;
     holdStatus?: string;
     holdMessage?: string;
@@ -75,6 +87,18 @@ export default async function ManagerDtrFilesPage({
         importStatus={params.importStatus}
         imported={readCount(params.imported)}
         denied={readCount(params.denied)}
+        unmatched={readCount(params.unmatched)}
+        refreshStatus={params.refreshStatus}
+        summaries={readCount(params.summaries)}
+        removeStatus={params.removeStatus}
+        removedLogs={readCount(params.removedLogs)}
+        removedSummaries={readCount(params.removedSummaries)}
+        holdRefreshed={readCount(params.holdRefreshed)}
+        holdDeleted={readCount(params.holdDeleted)}
+        holdOverridesCleared={readCount(params.holdOverridesCleared)}
+        payrollRecomputeStatus={params.payrollRecomputeStatus}
+        payrollRunNumber={readCount(params.payrollRunNumber)}
+        payrollRecomputeMessage={params.payrollRecomputeMessage}
         holdEditEmployeeId={params.holdEditEmployeeId?.trim() || ""}
         holdStatus={params.holdStatus}
         holdMessage={params.holdMessage}

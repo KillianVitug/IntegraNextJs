@@ -1,5 +1,10 @@
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
-import { accountCode, accountTypeEnum } from "@/db/schema";
+import {
+  accountCode,
+  accountTypeEnum,
+  birDeMinimisTypeEnum,
+  birTaxCategoryEnum,
+} from "@/db/schema";
 import { z } from "zod";
 
 const decimalStringUpTo4 = z.preprocess((value) => {
@@ -19,6 +24,8 @@ const decimalStringUpTo4 = z.preprocess((value) => {
 export const insertAccountCodeSchema = createInsertSchema(accountCode, {
   id: z.coerce.number().optional(),
   accountType: z.enum(accountTypeEnum.enumValues).nullable().optional(),
+  birTaxCategory: z.enum(birTaxCategoryEnum.enumValues).nullable().optional(),
+  birDeMinimisType: z.enum(birDeMinimisTypeEnum.enumValues).nullable().optional(),
   dailyRate: decimalStringUpTo4.optional(),
   monthlyRate: decimalStringUpTo4.optional(),
   createdAt: z.coerce.date().optional(),
@@ -28,6 +35,8 @@ export const insertAccountCodeSchema = createInsertSchema(accountCode, {
 export const selectAccountCodeSchema = createSelectSchema(accountCode, {
   id: z.coerce.number().optional(),
   accountType: z.enum(accountTypeEnum.enumValues).nullable(),
+  birTaxCategory: z.enum(birTaxCategoryEnum.enumValues).nullable(),
+  birDeMinimisType: z.enum(birDeMinimisTypeEnum.enumValues).nullable(),
   dailyRate: decimalStringUpTo4,
   monthlyRate: decimalStringUpTo4,
   createdAt: z.coerce.date().optional(),

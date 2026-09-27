@@ -31,11 +31,19 @@ import type {
 import { recordAdminAuditEvent, recordPayrollRunEvent } from "@/lib/admin";
 import type { SaveManualPayrollEntrySchemaType } from "@/zod-schemas/manualPayroll";
 import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
+import { payrollEligibleEmploymentStatusCondition } from "@/lib/employmentStatus";
 import { formatEmployeeCode } from "@/utils/employeeCode";
 import { resolveEmployeeSalaryForPeriod } from "./salaryResolver";
 import { getPrimaryResolvedScheduleForPeriod } from "./scheduleResolver";
 import { computeManualPayrollLineAmount } from "./manualPayrollRate";
 import { getManualPayrollBucketFromAccountCodeOrType } from "./manualPayrollBuckets";
+import { isSssEcApplicableForCycle } from "./statutory";
+import {
+  computeBirTaxableCompensation,
+  inferBirTaxCategory,
+  type BirDeMinimisType,
+  type BirTaxCategory,
+} from "./birTax";
 
 export const MANUAL_PAYROLL_SOURCE_TABLE = "manual_payroll_entry_lines";
 const MANUAL_PAYROLL_ENTRY_SOURCE_TABLE = "manual_payroll_entries";
@@ -64,6 +72,7 @@ type ManualPayrollAccountCodeLookup = {
   byId: Map<number, ManualPayrollAccountCodeOptionView>;
   byCode: Map<string, ManualPayrollAccountCodeOptionView>;
 };
+type PayrollCycle = PayrollRunPeriodView["cycle"];
 
 export type ManualPayrollBaselineSnapshot = {
   version: 1;
@@ -83,6 +92,8 @@ type ComputedPayrollLineLike = {
   rate?: string | number | null;
   taxable?: boolean | null;
   month13thEligible?: boolean | null;
+  birTaxCategory?: BirTaxCategory | null;
+  birDeMinimisType?: BirDeMinimisType | null;
   loanRefNo?: string | null;
   sourceTable?: string | null;
   sourceId?: string | null;
@@ -116,6 +127,37 @@ function roundMoney(value: number) {
 
 function normalizeManualCodeKey(value: string | null | undefined) {
   return value?.trim().toUpperCase() ?? "";
+}
+
+function getSssEcAmountForCycle(
+  value: string | number | null | undefined,
+  cycle: PayrollCycle
+) {
+  return isSssEcApplicableForCycle(cycle) ? toAmount(value) : 0;
+}
+
+function normalizeManualFieldsForPeriodCycle(
+  fields: ManualPayrollEntryFieldsView,
+  cycle: PayrollCycle
+): ManualPayrollEntryFieldsView {
+  if (isSssEcApplicableForCycle(cycle)) return fields;
+
+  return {
+    ...fields,
+    sssEc: "0.00",
+  };
+}
+
+function normalizeManualPayrollPayloadForPeriodCycle(
+  payload: SaveManualPayrollEntrySchemaType,
+  cycle: PayrollCycle
+): SaveManualPayrollEntrySchemaType {
+  if (isSssEcApplicableForCycle(cycle)) return payload;
+
+  return {
+    ...payload,
+    sssEc: 0,
+  };
 }
 
 function compareManualPayrollLineCode(
@@ -248,7 +290,14 @@ async function getEmployeeForManualPayroll(employeeId: string) {
       eq(employeesGeneralInfo.employeeId, employees.id)
     )
     .leftJoin(department, eq(employeesGeneralInfo.departmentId, department.id))
-    .where(and(eq(employees.id, employeeId), isNull(employees.deletedAt)))
+    .where(
+      and(
+        eq(employees.id, employeeId),
+        isNull(employees.deletedAt),
+        isNull(employeesGeneralInfo.deletedAt),
+        payrollEligibleEmploymentStatusCondition()
+      )
+    )
     .limit(1);
 
   if (!employee) return null;
@@ -366,6 +415,8 @@ export async function getManualAccountCodeOptions(): Promise<
       month13thPay: accountCode.month13thPay,
       nonTaxable: accountCode.nonTaxable,
       deminimis: accountCode.deminimis,
+      birTaxCategory: accountCode.birTaxCategory,
+      birDeMinimisType: accountCode.birDeMinimisType,
       dailyRate: accountCode.dailyRate,
       monthlyRate: accountCode.monthlyRate,
     })
@@ -375,11 +426,27 @@ export async function getManualAccountCodeOptions(): Promise<
   return rows;
 }
 
+function parsePayrollMoneyNote(
+  notes: string | null | undefined,
+  prefix: string
+) {
+  const note = (notes ?? "")
+    .split("|")
+    .map((part) => part.trim())
+    .find((part) => part.toLowerCase().startsWith(prefix.toLowerCase()));
+
+  if (!note) return null;
+
+  const value = note.slice(prefix.length).trim();
+  return value ? money(value.replaceAll(",", "")) : null;
+}
+
 function parseStatutoryBase(notes: string | null | undefined) {
-  const match = /Statutory Monthly Base:\s*([0-9,]+(?:\.[0-9]+)?)/i.exec(
-    notes ?? ""
-  );
-  return match ? money(match[1].replaceAll(",", "")) : "0.00";
+  return parsePayrollMoneyNote(notes, "Statutory Monthly Base: ") ?? "0.00";
+}
+
+function parsePhilhealthBase(notes: string | null | undefined) {
+  return parsePayrollMoneyNote(notes, "PhilHealth Monthly Base: ");
 }
 
 function parsePayComputationMode(
@@ -488,6 +555,8 @@ function serializeManualLine(
     month13thEligible: line.month13thEligible,
     nonTaxable: line.nonTaxable,
     deminimis: line.deminimis,
+    birTaxCategory: line.birTaxCategory,
+    birDeMinimisType: line.birDeMinimisType,
     sourceTable: line.sourceTable,
     sourceId: line.sourceId,
     sortOrder: line.sortOrder,
@@ -514,6 +583,18 @@ function serializeComputedLine(
   const quantity = splitComputedLineQuantityToHoursMinutes(line);
   const account = getManualLineAccountCode(line, lookup);
   const accountType = line.accountType ?? account?.accountType ?? null;
+  const birTaxCategory =
+    line.birTaxCategory ??
+    account?.birTaxCategory ??
+    inferBirTaxCategory({
+      lineType: line.lineType,
+      accountType,
+      code: line.code,
+      amount: line.amount,
+      taxable: line.taxable,
+      nonTaxable: line.lineType === "Earning" && !line.taxable,
+      deminimis: account?.deminimis ?? false,
+    });
 
   return {
     id: null,
@@ -530,6 +611,11 @@ function serializeComputedLine(
     month13thEligible: line.month13thEligible ?? false,
     nonTaxable: line.lineType === "Earning" && !line.taxable,
     deminimis: false,
+    birTaxCategory,
+    birDeMinimisType:
+      birTaxCategory === "DeMinimis"
+        ? line.birDeMinimisType ?? account?.birDeMinimisType ?? null
+        : null,
     sourceTable: line.sourceTable ?? null,
     sourceId: line.sourceId ?? null,
     sortOrder,
@@ -577,27 +663,11 @@ function contributionBasisAmount(
   return value == null ? fallback : money(value);
 }
 
-function contributionBasisValue(
-  employeeRun: ComputedPayrollEntryLike,
-  type: keyof ContributionBasisSnapshot,
-  fallback: string | number
-) {
-  const value = employeeRun.contributionBasis?.[type];
-  return value == null ? toAmount(fallback) : toAmount(value);
-}
-
-function semiMonthlyContributionBasisAmount(
-  employeeRun: ComputedPayrollEntryLike,
-  type: keyof ContributionBasisSnapshot,
-  fallback: string | number
-) {
-  return money(roundMoney(contributionBasisValue(employeeRun, type, fallback) / 2));
-}
-
 function getComputedEntryFields(
   employeeRun: ComputedPayrollEntryLike
 ): ManualPayrollEntryFieldsView {
   const basis = parseStatutoryBase(employeeRun.breakdownNotes);
+  const philhealthBasis = parsePhilhealthBase(employeeRun.breakdownNotes) ?? basis;
 
   return {
     sssEmployee: lineAmount(employeeRun.lines, "SSS"),
@@ -606,15 +676,19 @@ function getComputedEntryFields(
     sssBasis: contributionBasisAmount(employeeRun, "SSS", basis),
     philhealthEmployee: lineAmount(employeeRun.lines, "PHILHEALTH"),
     philhealthEmployer: lineAmount(employeeRun.lines, "PHILHEALTH-ER"),
-    philhealthBasis: contributionBasisAmount(employeeRun, "PHILHEALTH", basis),
+    philhealthBasis: contributionBasisAmount(
+      employeeRun,
+      "PHILHEALTH",
+      philhealthBasis
+    ),
     pagibigEmployee: lineAmount(employeeRun.lines, "PAGIBIG"),
     pagibigEmployer: lineAmount(employeeRun.lines, "PAGIBIG-ER"),
     pagibigBasis: contributionBasisAmount(employeeRun, "PAGIBIG", basis),
     withholdingTax: lineAmount(employeeRun.lines, "TAX"),
-    withholdingTaxBasis: semiMonthlyContributionBasisAmount(
+    withholdingTaxBasis: contributionBasisAmount(
       employeeRun,
       "TAX",
-      employeeRun.taxablePay
+      money(employeeRun.taxablePay)
     ),
     peraaEmployee: lineAmount(employeeRun.lines, "PERAA"),
     peraaEmployer: lineAmount(employeeRun.lines, "PERAA-ER"),
@@ -685,6 +759,8 @@ function normalizeManualLineForCompare(
     month13thEligible: !!line.month13thEligible,
     nonTaxable: !!line.nonTaxable,
     deminimis: !!line.deminimis,
+    birTaxCategory: line.birTaxCategory ?? null,
+    birDeMinimisType: line.birDeMinimisType ?? null,
     sourceTable: line.sourceTable?.trim() || null,
     sourceId: line.sourceId?.trim() || null,
   };
@@ -963,6 +1039,18 @@ function normalizeBaselineSnapshot(
   };
 }
 
+function normalizeManualPayrollBaselineForPeriodCycle(
+  baseline: ManualPayrollBaselineSnapshot | null,
+  cycle: PayrollCycle
+): ManualPayrollBaselineSnapshot | null {
+  if (!baseline || isSssEcApplicableForCycle(cycle)) return baseline;
+
+  return {
+    ...baseline,
+    fields: normalizeManualFieldsForPeriodCycle(baseline.fields, cycle),
+  };
+}
+
 function getManualEntryBaselineSnapshot(
   entry: typeof manualPayrollEntries.$inferSelect
 ) {
@@ -1007,21 +1095,31 @@ function serializeManualEntry(
     latestBaseline: ManualPayrollBaselineSnapshot | null;
   }
 ): ManualPayrollEntryWorkspaceView {
-  const savedFields = getManualEntryFields(entry);
+  const savedFields = normalizeManualFieldsForPeriodCycle(
+    getManualEntryFields(entry),
+    args.payrollPeriod.cycle
+  );
   const accountCodeLookup = buildAccountCodeLookup(args.accountCodeOptions);
   const savedLines = [...entry.lines]
     .sort((left, right) => left.sortOrder - right.sortOrder)
     .map((line) => serializeManualLine(line, accountCodeLookup));
-  const oldBaseline = getManualEntryBaselineSnapshot(entry);
+  const oldBaseline = normalizeManualPayrollBaselineForPeriodCycle(
+    getManualEntryBaselineSnapshot(entry),
+    args.payrollPeriod.cycle
+  );
+  const latestBaseline = normalizeManualPayrollBaselineForPeriodCycle(
+    args.latestBaseline,
+    args.payrollPeriod.cycle
+  );
   const mergedFields = mergeManualFields({
     saved: savedFields,
     oldBaseline: oldBaseline?.fields ?? null,
-    latestBaseline: args.latestBaseline?.fields ?? null,
+    latestBaseline: latestBaseline?.fields ?? null,
   });
   const mergedLines = mergeManualLines({
     saved: savedLines,
     oldBaseline: oldBaseline?.lines ?? null,
-    latestBaseline: args.latestBaseline?.lines ?? null,
+    latestBaseline: latestBaseline?.lines ?? null,
   });
   const sortedLines = sortManualPayrollLinesByCode(mergedLines).map(
     (line, index) => ({
@@ -1040,7 +1138,7 @@ function serializeManualEntry(
     employee: args.employee,
     rateContext: args.rateContext,
     accountCodeOptions: args.accountCodeOptions,
-    ...mergedFields,
+    ...normalizeManualFieldsForPeriodCycle(mergedFields, args.payrollPeriod.cycle),
     lines: sortedLines,
   };
 }
@@ -1068,6 +1166,10 @@ function serializeComputedEntry(
       accountCodeOptions: args.accountCodeOptions,
     }
   );
+  const fields = normalizeManualFieldsForPeriodCycle(
+    baseline.fields,
+    args.payrollPeriod.cycle
+  );
   const accountCodeLookup = buildAccountCodeLookup(args.accountCodeOptions);
   const computedLines = employeeRun.lines
     .map((line, index) => serializeComputedLine(line, index, accountCodeLookup))
@@ -1090,7 +1192,7 @@ function serializeComputedEntry(
     employee: args.employee,
     rateContext: args.rateContext,
     accountCodeOptions: args.accountCodeOptions,
-    ...baseline.fields,
+    ...fields,
     lines: sortedComputedLines,
   };
 }
@@ -1106,6 +1208,11 @@ function serializeBaselineEntry(
     editBlockReason: string | null;
   }
 ): ManualPayrollEntryWorkspaceView {
+  const normalizedBaseline = normalizeManualPayrollBaselineForPeriodCycle(
+    baseline,
+    args.payrollPeriod.cycle
+  )!;
+
   return {
     entryId: null,
     source: "computed",
@@ -1116,8 +1223,8 @@ function serializeBaselineEntry(
     employee: args.employee,
     rateContext: args.rateContext,
     accountCodeOptions: args.accountCodeOptions,
-    ...baseline.fields,
-    lines: sortManualPayrollLinesByCode(baseline.lines).map((line, index) => ({
+    ...normalizedBaseline.fields,
+    lines: sortManualPayrollLinesByCode(normalizedBaseline.lines).map((line, index) => ({
       ...line,
       sortOrder: index,
     })),
@@ -1308,8 +1415,25 @@ function normalizeManualLines(args: {
       const nonTaxable =
         selectedAccount?.nonTaxable ?? row.nonTaxable ?? row.taxable === false;
       const deminimis = selectedAccount?.deminimis ?? row.deminimis ?? false;
+      const birTaxCategory =
+        selectedAccount?.birTaxCategory ??
+        row.birTaxCategory ??
+        inferBirTaxCategory({
+          lineType,
+          accountType: selectedAccount?.accountType ?? null,
+          code: selectedAccount?.code ?? row.code,
+          amount,
+          taxable: row.taxable,
+          nonTaxable,
+          deminimis,
+        });
       const taxable =
-        lineType === "Earning" ? !(nonTaxable || deminimis) && !!row.taxable : false;
+        lineType === "Earning"
+          ? birTaxCategory === "RegularTaxable" ||
+            birTaxCategory === "SupplementalTaxable" ||
+            birTaxCategory === "ThirteenthMonthOtherBenefits" ||
+            birTaxCategory === "DeMinimis"
+          : false;
 
       return {
         accountCodeId: selectedAccount?.id ?? row.accountCodeId ?? null,
@@ -1332,6 +1456,11 @@ function normalizeManualLines(args: {
             : false,
         nonTaxable,
         deminimis,
+        birTaxCategory,
+        birDeMinimisType:
+          birTaxCategory === "DeMinimis"
+            ? selectedAccount?.birDeMinimisType ?? row.birDeMinimisType ?? null
+            : null,
         sourceTable: row.sourceTable?.trim() || null,
         sourceId: row.sourceId?.trim() || null,
         sortOrder: row.sortOrder ?? index,
@@ -1418,16 +1547,16 @@ function computeEntryTotals(args: {
       .filter((line) => line.lineType === "Earning" && line.summaryBucket === "basicPay")
       .reduce((total, line) => total + toAmount(line.amount), 0)
   );
-  const nonTaxablePay = roundMoney(
-    args.lines
-      .filter(
-        (line) =>
-          line.lineType === "Earning" &&
-          (!line.taxable || line.nonTaxable || line.deminimis)
-      )
-      .reduce((total, line) => total + toAmount(line.amount), 0)
-  );
-  const taxableEarnings = roundMoney(grossPay - nonTaxablePay);
+  const birTax = computeBirTaxableCompensation({
+    lines: args.lines,
+    employeeDeductions: {
+      sssEmployee: args.payload.sssEmployee,
+      philhealthEmployee: args.payload.philhealthEmployee,
+      pagibigEmployee: args.payload.pagibigEmployee,
+      peraaEmployee: args.payload.peraaEmployee,
+    },
+  });
+  const nonTaxablePay = birTax.nonTaxable;
   const otherDeductions = roundMoney(
     args.lines
       .filter((line) => line.lineType === "Deduction")
@@ -1448,16 +1577,7 @@ function computeEntryTotals(args: {
       args.payload.peraaEmployer
   );
   const totalDeductions = roundMoney(otherDeductions + employeeContributions);
-  const taxablePay = roundMoney(
-    Math.max(
-      0,
-      taxableEarnings -
-        args.payload.sssEmployee -
-        args.payload.philhealthEmployee -
-        args.payload.pagibigEmployee -
-        args.payload.peraaEmployee
-    )
-  );
+  const taxablePay = birTax.taxableCompensation;
 
   return {
     regularPay: regularPay.toFixed(2),
@@ -1509,7 +1629,7 @@ export async function refreshManualPayrollAttendanceLinesFromBaseline(args: {
   refreshableExceptionRowIds?: string[];
   refreshHeldDtrLines?: boolean;
 }) {
-  const latestBaseline = await sanitizeManualPayrollBaselineSnapshot(
+  const sanitizedLatestBaseline = await sanitizeManualPayrollBaselineSnapshot(
     args.latestBaseline
   );
 
@@ -1521,9 +1641,9 @@ export async function refreshManualPayrollAttendanceLinesFromBaseline(args: {
     preservedLineCount: 0,
   };
 
-  if (!latestBaseline) return emptyResult;
+  if (!sanitizedLatestBaseline) return emptyResult;
 
-  const [entry, accountCodeOptions, rateContext] = await Promise.all([
+  const [entry, period, accountCodeOptions, rateContext] = await Promise.all([
     db.query.manualPayrollEntries.findFirst({
       where: and(
         eq(manualPayrollEntries.payrollPeriodId, args.payrollPeriodId),
@@ -1533,11 +1653,23 @@ export async function refreshManualPayrollAttendanceLinesFromBaseline(args: {
         lines: true,
       },
     }),
+    db.query.payrollPeriods.findFirst({
+      where: eq(payrollPeriods.id, args.payrollPeriodId),
+    }),
     getManualAccountCodeOptions(),
     getManualPayrollRateContext(args.payrollPeriodId, args.employeeId),
   ]);
 
+  if (!period) {
+    throw new Error("Payroll period not found.");
+  }
+
   if (!entry) return emptyResult;
+
+  const latestBaseline = normalizeManualPayrollBaselineForPeriodCycle(
+    sanitizedLatestBaseline,
+    period.cycle
+  )!;
 
   const accountCodeLookup = buildAccountCodeLookup(accountCodeOptions);
   const savedLines = [...entry.lines]
@@ -1554,10 +1686,13 @@ export async function refreshManualPayrollAttendanceLinesFromBaseline(args: {
     isAttendanceRefreshableLine,
   });
   const accountCodeById = new Map(accountCodeOptions.map((option) => [option.id, option]));
-  const payload = buildManualPayrollPayloadFromEntry({
-    entry,
-    lines: mergedLines,
-  });
+  const payload = normalizeManualPayrollPayloadForPeriodCycle(
+    buildManualPayrollPayloadFromEntry({
+      entry,
+      lines: mergedLines,
+    }),
+    period.cycle
+  );
   const normalizedLines = sortManualPayrollLinesByCode(
     await filterActiveLoanInstallmentLines(
       normalizeManualLines({
@@ -1587,6 +1722,7 @@ export async function refreshManualPayrollAttendanceLinesFromBaseline(args: {
           null,
         baselineSnapshot: latestBaseline,
         ...totals,
+        sssEc: money(payload.sssEc),
         updatedByUserId: args.actorUserId,
         updatedAt: new Date(),
       })
@@ -1723,12 +1859,17 @@ export async function saveManualPayrollEntry(args: {
       })
     )
   );
-  const latestBaseline = await sanitizeManualPayrollBaselineSnapshot(
-    args.latestBaseline
+  const payload = normalizeManualPayrollPayloadForPeriodCycle(
+    args.payload,
+    period.cycle
+  );
+  const latestBaseline = normalizeManualPayrollBaselineForPeriodCycle(
+    await sanitizeManualPayrollBaselineSnapshot(args.latestBaseline),
+    period.cycle
   );
   const totals = computeEntryTotals({
     lines: normalizedLines,
-    payload: args.payload,
+    payload,
   });
 
   await db.transaction(async (tx) => {
@@ -1737,16 +1878,16 @@ export async function saveManualPayrollEntry(args: {
       .from(manualPayrollEntries)
       .where(
         and(
-          eq(manualPayrollEntries.payrollPeriodId, args.payload.payrollPeriodId),
-          eq(manualPayrollEntries.employeeId, args.payload.employeeId)
+          eq(manualPayrollEntries.payrollPeriodId, payload.payrollPeriodId),
+          eq(manualPayrollEntries.employeeId, payload.employeeId)
         )
       )
       .limit(1);
 
     let entryId = existingEntry?.id ?? null;
     const entryValues = {
-      payrollPeriodId: args.payload.payrollPeriodId,
-      employeeId: args.payload.employeeId,
+      payrollPeriodId: payload.payrollPeriodId,
+      employeeId: payload.employeeId,
       employeeNoSnapshot: formatEmployeeCode({
         employeeType: employee.employeeType,
         employeeNo: employee.employeeNo,
@@ -1758,25 +1899,28 @@ export async function saveManualPayrollEntry(args: {
         null,
       baselineSnapshot:
         latestBaseline ??
-        normalizeBaselineSnapshot(existingEntry?.baselineSnapshot) ??
+        normalizeManualPayrollBaselineForPeriodCycle(
+          normalizeBaselineSnapshot(existingEntry?.baselineSnapshot),
+          period.cycle
+        ) ??
         null,
       ...totals,
-      sssEmployee: money(args.payload.sssEmployee),
-      sssEmployer: money(args.payload.sssEmployer),
-      sssEc: money(args.payload.sssEc),
-      sssBasis: money(args.payload.sssBasis),
-      philhealthEmployee: money(args.payload.philhealthEmployee),
-      philhealthEmployer: money(args.payload.philhealthEmployer),
-      philhealthBasis: money(args.payload.philhealthBasis),
-      pagibigEmployee: money(args.payload.pagibigEmployee),
-      pagibigEmployer: money(args.payload.pagibigEmployer),
-      pagibigBasis: money(args.payload.pagibigBasis),
-      withholdingTax: money(args.payload.withholdingTax),
-      withholdingTaxBasis: money(args.payload.withholdingTaxBasis),
-      peraaEmployee: money(args.payload.peraaEmployee),
-      peraaEmployer: money(args.payload.peraaEmployer),
-      peraaBasis: money(args.payload.peraaBasis),
-      remarks: args.payload.remarks?.trim() || null,
+      sssEmployee: money(payload.sssEmployee),
+      sssEmployer: money(payload.sssEmployer),
+      sssEc: money(payload.sssEc),
+      sssBasis: money(payload.sssBasis),
+      philhealthEmployee: money(payload.philhealthEmployee),
+      philhealthEmployer: money(payload.philhealthEmployer),
+      philhealthBasis: money(payload.philhealthBasis),
+      pagibigEmployee: money(payload.pagibigEmployee),
+      pagibigEmployer: money(payload.pagibigEmployer),
+      pagibigBasis: money(payload.pagibigBasis),
+      withholdingTax: money(payload.withholdingTax),
+      withholdingTaxBasis: money(payload.withholdingTaxBasis),
+      peraaEmployee: money(payload.peraaEmployee),
+      peraaEmployer: money(payload.peraaEmployer),
+      peraaBasis: money(payload.peraaBasis),
+      remarks: payload.remarks?.trim() || null,
       updatedByUserId: args.actorUserId,
       updatedAt: new Date(),
     };
@@ -1898,17 +2042,43 @@ export async function loadManualPayrollEntriesForPeriod(
   payrollPeriodId: string,
   database: DbLike = db
 ): Promise<ManualPayrollEntryWithLines[]> {
-  return database.query.manualPayrollEntries.findMany({
+  const entries = await database.query.manualPayrollEntries.findMany({
     where: eq(manualPayrollEntries.payrollPeriodId, payrollPeriodId),
     with: {
       lines: true,
     },
   });
+
+  const employeeIds = [...new Set(entries.map((entry) => entry.employeeId))];
+  if (employeeIds.length === 0) return entries;
+
+  const eligibleEmployeeRows = await database
+    .select({ id: employees.id })
+    .from(employees)
+    .leftJoin(
+      employeesGeneralInfo,
+      eq(employeesGeneralInfo.employeeId, employees.id)
+    )
+    .where(
+      and(
+        inArray(employees.id, employeeIds),
+        isNull(employees.deletedAt),
+        isNull(employeesGeneralInfo.deletedAt),
+        payrollEligibleEmploymentStatusCondition()
+      )
+    );
+  const eligibleEmployeeIds = new Set(
+    eligibleEmployeeRows.map((employee) => employee.id)
+  );
+
+  return entries.filter((entry) => eligibleEmployeeIds.has(entry.employeeId));
 }
 
 export function buildManualPayrollContributionLines(
-  entry: typeof manualPayrollEntries.$inferSelect
+  entry: typeof manualPayrollEntries.$inferSelect,
+  cycle: PayrollCycle
 ) {
+  const sssEc = getSssEcAmountForCycle(entry.sssEc, cycle);
   const lineBase = {
     accountCodeId: null,
     loanRefNo: null,
@@ -1939,7 +2109,7 @@ export function buildManualPayrollContributionLines(
       lineType: "Employer Contribution" as const,
       code: "SSS-EC",
       description: "SSS EC Share",
-      amount: toAmount(entry.sssEc),
+      amount: sssEc,
       ...lineBase,
     },
     {
@@ -1994,7 +2164,10 @@ export function buildManualPayrollContributionLines(
   ].filter((line) => line.amount > 0);
 }
 
-export function buildManualPayrollRunLines(entry: ManualPayrollEntryWithLines) {
+export function buildManualPayrollRunLines(
+  entry: ManualPayrollEntryWithLines,
+  cycle: PayrollCycle
+) {
   const detailLines = [...entry.lines]
     .sort((left, right) => left.sortOrder - right.sortOrder)
     .map((line) => ({
@@ -2011,9 +2184,11 @@ export function buildManualPayrollRunLines(entry: ManualPayrollEntryWithLines) {
       rate: null,
       taxable: line.taxable,
       month13thEligible: line.month13thEligible,
+      birTaxCategory: line.birTaxCategory,
+      birDeMinimisType: line.birDeMinimisType,
       sourceTable: line.sourceTable === "loan_installments" ? line.sourceTable : MANUAL_PAYROLL_SOURCE_TABLE,
       sourceId: line.sourceTable === "loan_installments" ? line.sourceId : line.id,
     }));
 
-  return [...detailLines, ...buildManualPayrollContributionLines(entry)];
+  return [...detailLines, ...buildManualPayrollContributionLines(entry, cycle)];
 }

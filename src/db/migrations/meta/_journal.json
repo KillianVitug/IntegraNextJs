@@ -785,6 +785,27 @@
       "when": 1784270400000,
       "tag": "0115_loan_performance_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 116,
+      "version": "7",
+      "when": 1785888000000,
+      "tag": "0116_rate_only_salary_adjustments",
+      "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1785974400000,
+      "tag": "0117_bir_tax_classification",
+      "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1786060800000,
+      "tag": "0118_manager_dtr_day_metric_overrides",
+      "breakpoints": true
     }
   ]
 }

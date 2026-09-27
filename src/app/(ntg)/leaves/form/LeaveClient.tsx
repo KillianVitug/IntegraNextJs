@@ -12,6 +12,7 @@ type Employee = {
   employeeNo: string;
   employeeType?: string | null;
   firstName: string;
+  middleName?: string | null;
   lastName: string;
 };
 
@@ -25,6 +26,7 @@ interface Props {
   leaveTypeOptions: LeaveTypeOption[];
   initialYear: number;
   initialSelectedLeaveId?: number | null;
+  initialEmployeeId?: string | null;
 }
 
 export default function LeaveClient({
@@ -32,6 +34,7 @@ export default function LeaveClient({
   leaveTypeOptions,
   initialYear,
   initialSelectedLeaveId = null,
+  initialEmployeeId = null,
 }: Props) {
   const [selectedRecord, setSelectedRecord] = useState<LeaveRecord | null>(null);
   const [routeSelectedLeaveId, setRouteSelectedLeaveId] = useState<number | null>(
@@ -89,6 +92,7 @@ export default function LeaveClient({
         employees={employees}
         leaveTypeOptions={leaveTypeOptions}
         initialData={selectedRecord}
+        initialEmployeeId={initialEmployeeId}
         selectedYear={year}
         onCancelEdit={handleCancelEdit}
         onSuccess={refreshRecords}

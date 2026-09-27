@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { submitManagerAttendanceDtrHoldRowsAction } from "@/app/actions/attendanceImportAction";
+import { buildRequestHostUrl } from "@/lib/http/redirect";
 
 function readText(formData: FormData, name: string) {
   const value = formData.get(name);
@@ -37,7 +38,7 @@ function buildRedirectUrl(
   request: NextRequest,
   params: Record<string, string | number | null | undefined>
 ) {
-  const url = new URL("/managerDtrFiles", request.url);
+  const url = buildRequestHostUrl(request, "/managerDtrFiles");
 
   for (const [key, value] of Object.entries(params)) {
     if (value != null && value !== "") {
@@ -54,6 +55,7 @@ export async function POST(request: NextRequest) {
   const periodId = readText(formData, "periodId");
   const selectedEmployeeId = readText(formData, "selectedEmployeeId");
   const employeeId = readText(formData, "employeeId");
+  const targetPayrollPeriodId = readText(formData, "targetPayrollPeriodId");
   const baseParams = {
     year,
     periodId,
@@ -61,13 +63,9 @@ export async function POST(request: NextRequest) {
   };
 
   try {
-    const targetPayrollPeriodId = readText(formData, "targetPayrollPeriodId");
     const attendanceDates = readTextList(formData, "attendanceDates");
 
     if (!periodId) throw new Error("Select a payroll period first.");
-    if (!targetPayrollPeriodId) {
-      throw new Error("Select a target payroll period before submitting.");
-    }
     if (!employeeId) throw new Error("Select an employee first.");
     if (attendanceDates.length === 0) {
       throw new Error("No editable Attendance Hold dates were found.");
@@ -75,7 +73,7 @@ export async function POST(request: NextRequest) {
 
     const result = await submitManagerAttendanceDtrHoldRowsAction({
       sourcePayrollPeriodId: periodId,
-      targetPayrollPeriodId,
+      targetPayrollPeriodId: targetPayrollPeriodId || periodId,
       employeeId,
       attendanceDates,
       workedMinutes: readMinutes(formData, "workedHours", "workedMinutes"),
@@ -92,7 +90,7 @@ export async function POST(request: NextRequest) {
       buildRedirectUrl(request, {
         ...baseParams,
         holdStatus: "submitted",
-        holdMessage: `Attendance Hold submitted for ${result.targetPayrollPeriodCode}.`,
+        holdMessage: `Attendance Hold saved and approved for ${result.targetPayrollPeriodCode}.`,
       }),
       303
     );
@@ -105,7 +103,7 @@ export async function POST(request: NextRequest) {
         holdMessage:
           error instanceof Error
             ? error.message
-            : "Unable to submit Attendance Hold.",
+            : "Unable to save Attendance Hold.",
       }),
       303
     );

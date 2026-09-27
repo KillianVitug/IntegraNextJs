@@ -24,6 +24,9 @@ export type ParsedAttendanceLog = {
   isSyntheticCorrection?: boolean;
 };
 
+export const ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG =
+  "SPLIT_SHIFT_INCOMPLETE_PUNCHES";
+
 export type ShiftWindow = {
   checkInTime: string | null;
   checkOutTime: string | null;
@@ -32,6 +35,7 @@ export type ShiftWindow = {
   hoursPerDay?: number;
   restDay?: string | null;
   regularBreakWindows?: ShiftBreakWindow[];
+  requiresSplitPunches?: boolean;
 };
 
 export type ShiftBreakWindow = {
@@ -1215,6 +1219,110 @@ function getRemainingPayableMinutesAfterOut(args: {
   );
 }
 
+function getSplitSecondScheduledInMinutes(args: {
+  shift: ShiftWindow;
+  scheduledInMinutes: number;
+  scheduledEndMinutes: number;
+}) {
+  const breakWindows = (args.shift.regularBreakWindows ?? [])
+    .flatMap((breakWindow) => {
+      if (breakWindow.deductMinutes <= 0) return [];
+
+      const breakStartMinutes = mapTimeValueToAttendanceMinutes({
+        timeValue: breakWindow.fromTime,
+        shift: args.shift,
+        scheduledInMinutes: args.scheduledInMinutes,
+      });
+      const breakEndBaseMinutes = mapTimeValueToAttendanceMinutes({
+        timeValue: breakWindow.toTime,
+        shift: args.shift,
+        scheduledInMinutes: args.scheduledInMinutes,
+      });
+
+      if (breakStartMinutes == null || breakEndBaseMinutes == null) {
+        return [];
+      }
+
+      const breakEndMinutes =
+        breakEndBaseMinutes <= breakStartMinutes
+          ? breakEndBaseMinutes + 1440
+          : breakEndBaseMinutes;
+
+      if (
+        breakStartMinutes < args.scheduledInMinutes ||
+        breakEndMinutes <= args.scheduledInMinutes ||
+        breakStartMinutes >= args.scheduledEndMinutes ||
+        breakEndMinutes > args.scheduledEndMinutes
+      ) {
+        return [];
+      }
+
+      return [
+        {
+          startMinutes: breakStartMinutes,
+          endMinutes: breakEndMinutes,
+        } satisfies TimelineWindow,
+      ];
+    })
+    .sort((left, right) => left.startMinutes - right.startMinutes);
+
+  return breakWindows[0]?.endMinutes ?? null;
+}
+
+function getSplitSecondInLateMinutes(args: {
+  attendanceDate: string;
+  shift: ShiftWindow;
+  scheduledInMinutes: number | null;
+  scheduledEndMinutes: number | null;
+  workedSegments: WorkedSegment[];
+}) {
+  if (
+    args.shift.requiresSplitPunches !== true ||
+    args.scheduledInMinutes == null ||
+    args.scheduledEndMinutes == null ||
+    args.workedSegments.length < 2
+  ) {
+    return 0;
+  }
+
+  const secondScheduledInMinutes = getSplitSecondScheduledInMinutes({
+    shift: args.shift,
+    scheduledInMinutes: args.scheduledInMinutes,
+    scheduledEndMinutes: args.scheduledEndMinutes,
+  });
+  if (secondScheduledInMinutes == null) return 0;
+
+  const secondActualInMinutes = mapLoggedAtToAttendanceMinutes({
+    loggedAt: args.workedSegments[1].inAt,
+    attendanceDate: args.attendanceDate,
+    shift: args.shift,
+  });
+
+  return Math.max(0, secondActualInMinutes - secondScheduledInMinutes);
+}
+
+function hasInvalidSplitPunchSequence(logs: ParsedAttendanceLog[]) {
+  if (logs.length < 4) return true;
+
+  const expectedDirections: ParsedAttendanceDirection[] = [
+    "IN",
+    "OUT",
+    "IN",
+    "OUT",
+  ];
+  const firstFourLogs = logs.slice(0, expectedDirections.length);
+  const allDirectionsKnown = firstFourLogs.every(
+    (log) => log.direction !== "UNSPECIFIED"
+  );
+
+  return (
+    allDirectionsKnown &&
+    firstFourLogs.some(
+      (log, index) => log.direction !== expectedDirections[index]
+    )
+  );
+}
+
 export function summarizeEmployeeDay(
   attendanceDate: string,
   logs: ParsedAttendanceLog[],
@@ -1316,6 +1424,17 @@ export function summarizeEmployeeDay(
     anomalyFlags.push("MISSING_OUT");
   }
 
+  if (
+    shift.requiresSplitPunches === true &&
+    !isRestDay &&
+    orderedLogs.length > 0 &&
+    scheduledMinutes > 0 &&
+    hasInvalidSplitPunchSequence(orderedLogs)
+  ) {
+    anomalyFlags.push(ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG);
+    anomalyFlags.push("MISSING_OUT");
+  }
+
   const actualInMinutes =
     firstInAt != null
       ? mapLoggedAtToAttendanceMinutes({
@@ -1340,6 +1459,16 @@ export function summarizeEmployeeDay(
     actualInMinutes > scheduledInMinutes + graceMinutes
       ? actualInMinutes - scheduledInMinutes - graceMinutes
       : 0;
+  const rawSplitSecondInLateMinutes =
+    !isRestDay
+      ? getSplitSecondInLateMinutes({
+          attendanceDate,
+          shift,
+          scheduledInMinutes,
+          scheduledEndMinutes,
+          workedSegments,
+        })
+      : 0;
 
   const rawUndertimeMinutes =
     !isRestDay &&
@@ -1361,10 +1490,15 @@ export function summarizeEmployeeDay(
       ? actualOutMinutes - scheduledEndMinutes
       : 0;
   const lateArrival = splitDtrLateArrivalMinutes(rawLateMinutes);
-  const lateMinutes = lateArrival.lateMinutes;
+  const splitSecondInLateArrival = splitDtrLateArrivalMinutes(
+    rawSplitSecondInLateMinutes
+  );
+  const lateMinutes =
+    lateArrival.lateMinutes + splitSecondInLateArrival.lateMinutes;
   const undertimeMinutes = Math.min(
     roundDtrUndertimeMinutes(rawUndertimeMinutes) +
-      lateArrival.undertimeMinutes,
+      lateArrival.undertimeMinutes +
+      splitSecondInLateArrival.undertimeMinutes,
     scheduledMinutes
   );
   const overtimeMinutes = roundDtrOvertimeMinutes(rawOvertimeMinutes);

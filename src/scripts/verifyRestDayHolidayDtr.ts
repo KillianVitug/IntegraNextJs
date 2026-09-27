@@ -13,8 +13,39 @@ import {
   buildHolidayCheckDateAssignments,
   buildHolidayCheckDateBackfillUpdates,
 } from "@/lib/holidayCheckDates";
+import { computeAttendanceHoldWorkedMinutes } from "@/lib/payroll/dtrOverrides";
 import { resolveOvertimeCategory } from "@/lib/payroll/overtime";
 import { saveHolidayTypeAccountCodeSchema } from "@/zod-schemas/holidayTypeAccountCode";
+
+assert.equal(
+  computeAttendanceHoldWorkedMinutes({
+    intendedWorkedMinutes: 480,
+    lateMinutes: 15,
+    undertimeMinutes: 15,
+  }),
+  450,
+  "Attendance Hold auto-worked minutes should subtract late and undertime."
+);
+
+assert.equal(
+  computeAttendanceHoldWorkedMinutes({
+    intendedWorkedMinutes: 480,
+    lateMinutes: 0,
+    undertimeMinutes: 0,
+  }),
+  480,
+  "Attendance Hold auto-worked minutes should keep intended work when no Late/UT exists."
+);
+
+assert.equal(
+  computeAttendanceHoldWorkedMinutes({
+    intendedWorkedMinutes: 120,
+    lateMinutes: 180,
+    undertimeMinutes: 0,
+  }),
+  0,
+  "Attendance Hold auto-worked minutes should never go below zero."
+);
 
 const regularHolidayWorkday = {
   scheduledMinutes: 480,

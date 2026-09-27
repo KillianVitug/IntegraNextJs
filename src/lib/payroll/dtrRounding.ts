@@ -21,11 +21,16 @@ export function splitDtrLateArrivalMinutes(minutes: number | null | undefined) {
     };
   }
 
+  if (normalizedMinutes <= 30) {
+    return {
+      lateMinutes: 60,
+      undertimeMinutes: 0,
+    };
+  }
+
   return {
-    lateMinutes: 60,
-    undertimeMinutes: roundDtrUndertimeMinutes(
-      Math.max(0, normalizedMinutes - 30)
-    ),
+    lateMinutes: 0,
+    undertimeMinutes: roundDtrUndertimeMinutes(normalizedMinutes),
   };
 }
 

@@ -1,11 +1,10 @@
-import Link from "next/link";
 import {
   getManagerEmployees,
-  getManagerScheduleRequests,
+  getManagerPayrollPeriodScheduleGridData,
+  getManagerWeeklyScheduleGridData,
   listManagerWeeklyShiftPatterns,
 } from "@/app/actions/managerAction";
 import { fetchShiftTables } from "@/lib/queries/fetchLookupData";
-import { buildShiftAssignmentSnapshotFromTable } from "@/lib/shifts";
 import { PageHeader } from "@/components/layout/page-layout";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,7 +14,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -24,29 +22,28 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Textarea } from "@/components/ui/textarea";
 import { formatEmployeeNoDisplay } from "@/utils/employeeDisplay";
+import { PayrollPeriodScheduleGrid } from "./PayrollPeriodScheduleGrid";
 import {
-  cancelManagerScheduleRequestFromForm,
-  deleteManagerWeeklyPatternFromForm,
-  saveManagerWeeklyPatternFromForm,
-  submitManagerScheduleRequestFromForm,
-  updateManagerScheduleRequestFromForm,
-} from "./actions";
+  WeeklyBaseScheduleGrid,
+  type WeeklyBaseScheduleGridRow,
+} from "./WeeklyBaseScheduleGrid";
+import type { WeeklyScheduleShiftOption } from "./WeeklyScheduleGridSelect";
+import {
+  WEEKLY_BASE_SCHEDULE_WEEKDAYS,
+  type WeeklyBaseScheduleWeekday,
+} from "./weekdays";
 
 export const metadata = {
   title: "Manager Schedules",
 };
 
-const WEEKDAY_ORDER = [
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
-  "Sunday",
-] as const;
+const WEEKDAY_ORDER = WEEKLY_BASE_SCHEDULE_WEEKDAYS;
+type WeekdayName = WeeklyBaseScheduleWeekday;
+
+type PayrollPeriodScheduleGridData = Awaited<
+  ReturnType<typeof getManagerPayrollPeriodScheduleGridData>
+>;
 
 function buildEmployeeLabel(employee: {
   employeeNo: string;
@@ -59,16 +56,12 @@ function buildEmployeeLabel(employee: {
   }${employee.middleName ? ` ${employee.middleName}` : ""}`;
 }
 
-function todayKey() {
-  return new Date().toISOString().slice(0, 10);
-}
-
 function statusMessage(status: string | undefined) {
   if (status === "weekly-saved") return "Weekly schedule saved.";
+  if (status === "weekly-grid-saved") return "Weekly base schedule saved.";
+  if (status === "period-grid-saved") return "Payroll period schedule saved.";
+  if (status === "period-grid-unchanged") return "No payroll period schedule changes to save.";
   if (status === "weekly-deleted") return "Weekly schedule deleted.";
-  if (status === "request-created") return "Schedule request submitted.";
-  if (status === "request-updated") return "Schedule request updated.";
-  if (status === "request-cancelled") return "Schedule request cancelled.";
   return null;
 }
 
@@ -91,70 +84,20 @@ function formatDaySummary(day: {
   return "Off";
 }
 
-function normalizeDateKeys(values: string[]) {
-  return [...new Set(values.filter(Boolean))].sort();
-}
-
-function expandDateRange(startDate: string, endDate: string | null | undefined) {
-  if (!endDate || endDate <= startDate) return [startDate];
-
-  const dates: string[] = [];
-  const current = new Date(`${startDate}T00:00:00`);
-  const end = new Date(`${endDate}T00:00:00`);
-
-  while (current <= end && dates.length < 370) {
-    dates.push(
-      `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(
-        2,
-        "0",
-      )}-${String(current.getDate()).padStart(2, "0")}`,
-    );
-    current.setDate(current.getDate() + 1);
-  }
-
-  return dates;
-}
-
-function getRequestEffectiveDates(request: {
-  payload: {
-    effectiveDates?: string[];
-    effectiveFrom: string;
-    effectiveTo?: string | null;
-  };
-}) {
-  return normalizeDateKeys(
-    request.payload.effectiveDates?.length
-      ? request.payload.effectiveDates
-      : expandDateRange(request.payload.effectiveFrom, request.payload.effectiveTo),
-  );
-}
-
-function formatEffectiveDateSummary(dates: string[]) {
-  if (dates.length === 0) return "No dates selected";
-  if (dates.length === 1) return dates[0];
-  if (dates.length <= 4) return dates.join(", ");
-  return `${dates.length} dates: ${dates.slice(0, 3).join(", ")}...`;
-}
-
-function isEditableRequest(request: {
-  status: string;
-  action: string;
-}) {
-  return request.status === "Pending" && request.action === "Create";
-}
-
 export default async function ManagerSchedulesPage({
   searchParams,
 }: {
   searchParams: Promise<{
     employeeId?: string;
     editPatternId?: string;
-    editRequestId?: string;
     status?: string;
     error?: string;
+    tab?: string;
+    periodId?: string;
   }>;
 }) {
   const params = await searchParams;
+  const activeTab = params.tab === "weeklySchedule" ? "weeklySchedule" : "schedules";
   const [employees, shiftTables] = await Promise.all([
     getManagerEmployees(),
     fetchShiftTables(),
@@ -164,35 +107,66 @@ export default async function ManagerSchedulesPage({
     employees[0] ??
     null;
 
-  const [patterns, requests] = selectedEmployee
-    ? await Promise.all([
-        listManagerWeeklyShiftPatterns(selectedEmployee.id),
-        getManagerScheduleRequests(),
-      ])
-    : [[], []];
+  let patterns: Awaited<ReturnType<typeof listManagerWeeklyShiftPatterns>> = [];
+  let weeklyScheduleRows: Awaited<
+    ReturnType<typeof getManagerWeeklyScheduleGridData>
+  > = [];
+  let periodScheduleGrid: PayrollPeriodScheduleGridData | null = null;
+
+  if (activeTab === "schedules" && selectedEmployee) {
+    patterns = await listManagerWeeklyShiftPatterns(selectedEmployee.id);
+  } else if (activeTab === "weeklySchedule") {
+    [weeklyScheduleRows, periodScheduleGrid] = await Promise.all([
+      getManagerWeeklyScheduleGridData(),
+      getManagerPayrollPeriodScheduleGridData({ periodId: params.periodId }),
+    ]);
+  }
+
   const selectedPatternId = Number(params.editPatternId);
   const selectedPattern = Number.isInteger(selectedPatternId)
     ? patterns.find((pattern) => pattern.id === selectedPatternId) ?? null
-    : null;
-  const selectedRequest =
-    params.editRequestId
-      ? requests.find(
-          (request) =>
-            request.id === params.editRequestId &&
-            request.employeeId === selectedEmployee?.id &&
-            isEditableRequest(request),
-        ) ?? null
-      : null;
+    : patterns[0] ?? null;
+  const isEditingPattern = Boolean(params.editPatternId && selectedPattern);
   const patternDayMap = new Map(
     selectedPattern?.days.map((day) => [
       day.weekday,
       day.shiftTableId ? String(day.shiftTableId) : "0",
     ]) ?? [],
   );
-  const requestEffectiveDates = selectedRequest
-    ? getRequestEffectiveDates(selectedRequest)
-    : [todayKey()];
   const message = statusMessage(params.status);
+  const weeklyScheduleShiftOptions: WeeklyScheduleShiftOption[] = shiftTables.map(
+    (shiftTable) => ({
+      id: shiftTable.id,
+      code: shiftTable.code,
+      description: shiftTable.description,
+      regularStartTime: shiftTable.regularStartTime,
+      regularEndTime: shiftTable.regularEndTime,
+    }),
+  );
+  const periodGridDates = periodScheduleGrid?.dates ?? [];
+  const periodGridRows =
+    periodScheduleGrid?.rows.map((row) => ({
+      id: row.id,
+      employeeLabel: buildEmployeeLabel(row),
+      departmentCode: row.departmentCode,
+      departmentName: row.departmentName,
+      cells: row.cells.map((cell) => ({
+        date: cell.date,
+        currentValue: cell.currentValue,
+      })),
+    })) ?? [];
+  const weeklyBaseScheduleRows: WeeklyBaseScheduleGridRow[] =
+    weeklyScheduleRows.map((row) => ({
+      id: row.id,
+      employeeLabel: buildEmployeeLabel(row),
+      departmentCode: row.departmentCode,
+      departmentName: row.departmentName,
+      days:
+        row.weeklyPattern?.days.map((day) => ({
+          weekday: day.weekday as WeekdayName,
+          shiftTableId: day.shiftTableId,
+        })) ?? [],
+    }));
 
   return (
     <div className="space-y-4">
@@ -201,7 +175,33 @@ export default async function ManagerSchedulesPage({
         description="Manage fixed weekly schedules directly and submit sudden schedule changes for Admin approval."
       />
 
-      <Card>
+      <div className="flex flex-wrap gap-2 border-b pb-2">
+        <Button
+          asChild
+          variant={activeTab === "schedules" ? "default" : "ghost"}
+          size="sm"
+        >
+          <a
+            href={
+              selectedEmployee
+                ? `/managerSchedules?employeeId=${selectedEmployee.id}`
+                : "/managerSchedules"
+            }
+          >
+            Individual Employee Schedules
+          </a>
+        </Button>
+        <Button
+          asChild
+          variant={activeTab === "weeklySchedule" ? "default" : "ghost"}
+          size="sm"
+        >
+          <a href="/managerSchedules?tab=weeklySchedule">Weekly Base Schedule</a>
+        </Button>
+      </div>
+
+      {activeTab === "schedules" ? (
+        <Card>
         <CardHeader>
           <CardTitle>Employee Selection</CardTitle>
           <CardDescription>
@@ -217,9 +217,9 @@ export default async function ManagerSchedulesPage({
                 variant={selectedEmployee?.id === employee.id ? "default" : "outline"}
                 size="sm"
               >
-                <Link href={`/managerSchedules?employeeId=${employee.id}`}>
+                <a href={`/managerSchedules?employeeId=${employee.id}`}>
                   {employee.lastName}, {employee.firstName}
-                </Link>
+                </a>
               </Button>
             ))}
             {employees.length === 0 ? (
@@ -230,6 +230,7 @@ export default async function ManagerSchedulesPage({
           </div>
         </CardContent>
       </Card>
+      ) : null}
 
       {message ? (
         <div className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
@@ -242,7 +243,133 @@ export default async function ManagerSchedulesPage({
         </div>
       ) : null}
 
-      {selectedEmployee ? (
+      {activeTab === "weeklySchedule" ? (
+        <>
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle>Weekly Base Schedule</CardTitle>
+            <CardDescription>
+              Set the base Monday-Sunday schedule for employees in your assigned
+              departments.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form
+              action="/managerSchedules/weekly-schedule/bulk"
+              className="space-y-4"
+              method="post"
+            >
+              <WeeklyBaseScheduleGrid
+                rows={weeklyBaseScheduleRows}
+                shiftTables={weeklyScheduleShiftOptions}
+              />
+
+              {shiftTables.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  Create shift tables first from Settings before saving a weekly
+                  schedule.
+                </p>
+              ) : null}
+
+              <Button
+                type="submit"
+                disabled={shiftTables.length === 0 || weeklyScheduleRows.length === 0}
+              >
+                Save Weekly Base Schedule
+              </Button>
+            </form>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle>Payroll Period Schedule</CardTitle>
+            <CardDescription>
+              Review and adjust date-specific schedules using the weekly schedule
+              grid as the base.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <form action="/managerSchedules" method="get" className="flex flex-wrap items-end gap-3">
+              <input type="hidden" name="tab" value="weeklySchedule" />
+              <div className="min-w-72">
+                <label
+                  className="mb-1.5 block text-sm font-medium"
+                  htmlFor="weekly-period"
+                >
+                  Payroll Period
+                </label>
+                <select
+                  id="weekly-period"
+                  name="periodId"
+                  defaultValue={periodScheduleGrid?.selectedPeriodId ?? ""}
+                  className="flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm"
+                >
+                  {periodScheduleGrid?.periods.length ? (
+                    periodScheduleGrid.periods.map((period) => (
+                      <option key={period.id} value={period.id}>
+                        {period.code} | {period.startDate} to {period.endDate}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">No payroll periods available</option>
+                  )}
+                </select>
+              </div>
+              <Button
+                type="submit"
+                disabled={!periodScheduleGrid?.periods.length}
+              >
+                Apply
+              </Button>
+            </form>
+
+            {periodScheduleGrid?.selectedPeriod ? (
+              <form
+                action="/managerSchedules/period-schedule"
+                className="space-y-4"
+                method="post"
+              >
+                <input
+                  type="hidden"
+                  name="periodId"
+                  value={periodScheduleGrid.selectedPeriod.id}
+                />
+
+                <div className="text-sm text-muted-foreground">
+                  {periodScheduleGrid.selectedPeriod.code} |{" "}
+                  {periodScheduleGrid.selectedPeriod.startDate} to{" "}
+                  {periodScheduleGrid.selectedPeriod.endDate}
+                </div>
+
+                <PayrollPeriodScheduleGrid
+                  dates={periodGridDates}
+                  rows={periodGridRows}
+                  shiftTables={weeklyScheduleShiftOptions}
+                />
+
+                <Button
+                  type="submit"
+                  disabled={
+                    shiftTables.length === 0 ||
+                    periodScheduleGrid.rows.length === 0 ||
+                    periodScheduleGrid.dates.length === 0
+                  }
+                >
+                  Save Payroll Period Schedule
+                </Button>
+              </form>
+            ) : (
+              <div className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
+                No payroll periods are available for {periodScheduleGrid?.year ?? new Date().getFullYear()}.
+              </div>
+            )}
+          </CardContent>
+        </Card>
+        </>
+      ) : null}
+
+      {activeTab === "schedules" && selectedEmployee ? (
         <>
           <div>
             <h2 className="text-base font-semibold">
@@ -264,45 +391,14 @@ export default async function ManagerSchedulesPage({
             </CardHeader>
             <CardContent>
               <form
-                action={saveManagerWeeklyPatternFromForm}
+                action="/managerSchedules/weekly-schedule"
                 className="space-y-4"
+                method="post"
               >
                 <input type="hidden" name="employeeId" value={selectedEmployee.id} />
                 {selectedPattern ? (
                   <input type="hidden" name="id" value={selectedPattern.id} />
                 ) : null}
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div>
-                    <label
-                      className="mb-2 block text-sm font-medium"
-                      htmlFor="weekly-effective-from"
-                    >
-                      Effective From
-                    </label>
-                    <Input
-                      id="weekly-effective-from"
-                      name="effectiveFrom"
-                      type="date"
-                      defaultValue={selectedPattern?.effectiveFrom ?? ""}
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label
-                      className="mb-2 block text-sm font-medium"
-                      htmlFor="weekly-effective-to"
-                    >
-                      Effective To
-                    </label>
-                    <Input
-                      id="weekly-effective-to"
-                      name="effectiveTo"
-                      type="date"
-                      defaultValue={selectedPattern?.effectiveTo ?? ""}
-                    />
-                  </div>
-                </div>
-
                 <div className="space-y-3 rounded-md border p-4">
                   {WEEKDAY_ORDER.map((weekday) => (
                     <div
@@ -337,11 +433,11 @@ export default async function ManagerSchedulesPage({
                   <Button type="submit" disabled={shiftTables.length === 0}>
                     {selectedPattern ? "Update Weekly Schedule" : "Save Weekly Schedule"}
                   </Button>
-                  {selectedPattern ? (
+                  {isEditingPattern ? (
                     <Button asChild variant="outline">
-                      <Link href={`/managerSchedules?employeeId=${selectedEmployee.id}`}>
+                      <a href={`/managerSchedules?employeeId=${selectedEmployee.id}`}>
                         Cancel Edit
-                      </Link>
+                      </a>
                     </Button>
                   ) : null}
                 </div>
@@ -397,13 +493,16 @@ export default async function ManagerSchedulesPage({
                           <TableCell className="align-top">
                             <div className="flex flex-wrap gap-2">
                               <Button asChild variant="outline" size="sm">
-                                <Link
+                                <a
                                   href={`/managerSchedules?employeeId=${selectedEmployee.id}&editPatternId=${pattern.id}`}
                                 >
                                   Edit
-                                </Link>
+                                </a>
                               </Button>
-                              <form action={deleteManagerWeeklyPatternFromForm}>
+                              <form
+                                action="/managerSchedules/weekly-schedule/delete"
+                                method="post"
+                              >
                                 <input
                                   type="hidden"
                                   name="employeeId"
@@ -432,167 +531,6 @@ export default async function ManagerSchedulesPage({
             </CardContent>
           </Card>
 
-          <form
-            action={
-              selectedRequest
-                ? updateManagerScheduleRequestFromForm
-                : submitManagerScheduleRequestFromForm
-            }
-            className="space-y-3 rounded-md border p-3"
-          >
-            <input type="hidden" name="employeeId" value={selectedEmployee.id} />
-            {selectedRequest ? (
-              <input type="hidden" name="requestId" value={selectedRequest.id} />
-            ) : null}
-            <div>
-              <h2 className="text-lg font-semibold">
-                Sudden Schedule Change Request
-              </h2>
-              <p className="text-sm text-muted-foreground">
-                Requests stay pending until Admin approval.
-              </p>
-            </div>
-            <div className="grid items-start gap-x-4 gap-y-3 md:grid-cols-2">
-              <div>
-                <label className="mb-1.5 block text-sm font-medium" htmlFor="request-shift-table">
-                  Shift Table
-                </label>
-                <select
-                  id="request-shift-table"
-                  name="shiftTableId"
-                  defaultValue={selectedRequest?.payload.shiftTableId ?? 0}
-                  required
-                  className="flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm"
-                >
-                  <option value={0}>Select shift table</option>
-                  {shiftTables.map((shiftTable) => {
-                    const metrics = buildShiftAssignmentSnapshotFromTable(shiftTable);
-
-                    return (
-                      <option key={shiftTable.id} value={shiftTable.id}>
-                        {shiftTable.code} | {shiftTable.description} |{" "}
-                        {metrics.checkInTime ?? "-"}-{metrics.checkOutTime ?? "-"} |{" "}
-                        {metrics.hoursPerDay.toFixed(2)} hrs
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-              <div>
-                <label className="mb-1.5 block text-sm font-medium" htmlFor="request-dates">
-                  Effective Date/s
-                </label>
-                <Textarea
-                  id="request-dates"
-                  name="effectiveDates"
-                  defaultValue={requestEffectiveDates.join(", ")}
-                  required
-                />
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Use YYYY-MM-DD dates separated by commas, spaces, or new lines.
-                </p>
-              </div>
-            </div>
-            <div>
-              <label className="mb-1.5 block text-sm font-medium" htmlFor="request-reason">
-                Reason
-              </label>
-              <Textarea
-                id="request-reason"
-                name="reason"
-                defaultValue={selectedRequest?.reason ?? ""}
-              />
-            </div>
-            <div className="flex flex-wrap items-center gap-2 pt-2">
-              <Button type="submit" disabled={shiftTables.length === 0}>
-                {selectedRequest ? "Update Request" : "Submit Request"}
-              </Button>
-              {selectedRequest ? (
-                <>
-                  <Button asChild variant="outline">
-                    <Link href={`/managerSchedules?employeeId=${selectedEmployee.id}`}>
-                      Cancel Edit
-                    </Link>
-                  </Button>
-                  <Button
-                    formAction={cancelManagerScheduleRequestFromForm}
-                    type="submit"
-                    variant="destructive"
-                  >
-                    Cancel Request
-                  </Button>
-                </>
-              ) : null}
-            </div>
-          </form>
-
-          <div className="rounded-md border p-3">
-            <div>
-              <h2 className="text-lg font-semibold">Submitted Schedule Requests</h2>
-              <p className="text-sm text-muted-foreground">
-                Pending created requests can be edited before Admin approval.
-              </p>
-            </div>
-            <div className="mt-3 space-y-2">
-              {requests
-                .filter((request) => request.employeeId === selectedEmployee.id)
-                .map((request) => {
-                  const editable = isEditableRequest(request);
-                  const effectiveDates = getRequestEffectiveDates(request);
-
-                  return (
-                    <div
-                      key={request.id}
-                      className="rounded-md border p-3 text-sm"
-                    >
-                      <div className="font-medium">
-                        {request.action} | {request.status}
-                      </div>
-                      <div>Shift Table: #{request.payload.shiftTableId}</div>
-                      <div className="text-muted-foreground">
-                        Effective Date/s: {formatEffectiveDateSummary(effectiveDates)}
-                      </div>
-                      {request.reason ? <div>Reason: {request.reason}</div> : null}
-                      {request.decisionNote ? (
-                        <div>Decision: {request.decisionNote}</div>
-                      ) : null}
-                      {editable ? (
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          <Button asChild variant="outline" size="sm">
-                            <Link
-                              href={`/managerSchedules?employeeId=${selectedEmployee.id}&editRequestId=${request.id}`}
-                            >
-                              Edit
-                            </Link>
-                          </Button>
-                          <form action={cancelManagerScheduleRequestFromForm}>
-                            <input
-                              type="hidden"
-                              name="employeeId"
-                              value={selectedEmployee.id}
-                            />
-                            <input
-                              type="hidden"
-                              name="requestId"
-                              value={request.id}
-                            />
-                            <Button type="submit" variant="destructive" size="sm">
-                              Cancel
-                            </Button>
-                          </form>
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              {requests.filter((request) => request.employeeId === selectedEmployee.id)
-                .length === 0 ? (
-                <div className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
-                  No schedule requests submitted yet.
-                </div>
-              ) : null}
-            </div>
-          </div>
         </>
       ) : null}
     </div>

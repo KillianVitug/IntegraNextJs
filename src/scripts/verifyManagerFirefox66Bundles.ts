@@ -15,10 +15,11 @@ const ROUTES_TO_SCAN = [
   "/layout",
   "/(manager)/layout",
   "/(manager)/managerCalendar/page",
+  "/(manager)/managerLeaves/page",
   "/(manager)/managerSchedules/page",
 ];
 
-const STATIC_CHUNK_PREFIX = "static/chunks/";
+const APP_CHUNK_PREFIX = "static/chunks/app/";
 
 const SYNTAX_RULES: Array<{
   name: string;
@@ -61,22 +62,39 @@ function readJson<T>(filePath: string): T {
 function getRouteChunks(manifest: AppBuildManifest) {
   const pages = manifest.pages ?? {};
   const chunks = new Set<string>();
+  const missingRoutes: string[] = [];
 
-  for (const route of ROUTES_TO_SCAN) {
-    const routeChunks = pages[route];
-
-    if (!routeChunks) {
-      throw new Error(`Route ${route} was not found in .next/app-build-manifest.json.`);
-    }
-
+  function addChunks(routeChunks: string[]) {
     for (const chunk of routeChunks) {
-      if (chunk.startsWith(STATIC_CHUNK_PREFIX) && chunk.endsWith(".js")) {
+      if (chunk.startsWith(APP_CHUNK_PREFIX) && chunk.endsWith(".js")) {
         chunks.add(chunk);
       }
     }
   }
 
-  return [...chunks].sort();
+  for (const route of ROUTES_TO_SCAN) {
+    const routeChunks = pages[route];
+
+    if (!routeChunks) {
+      missingRoutes.push(route);
+      continue;
+    }
+
+    addChunks(routeChunks);
+  }
+
+  if (missingRoutes.length > 0 && chunks.size === 0) {
+    for (const routeChunks of Object.values(pages)) {
+      addChunks(routeChunks);
+    }
+  }
+
+  const routeChunks = [...chunks].sort();
+  if (routeChunks.length === 0) {
+    throw new Error("No app JavaScript chunks were found in .next/app-build-manifest.json.");
+  }
+
+  return routeChunks;
 }
 
 function findUnsupportedSyntax(chunks: string[]) {

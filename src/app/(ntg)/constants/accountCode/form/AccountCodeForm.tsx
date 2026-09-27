@@ -14,7 +14,11 @@ import { InputWithLabel } from "@/components/inputs/InputWithLabel";
 import { CheckboxWithLabel } from "@/components/inputs/CheckboxWithLabel";
 import { SelectWithLabel } from "@/components/inputs/SelectWithLabel";
 import { useAction } from "next-safe-action/hooks";
-import { accountTypeEnum } from "@/db/schema";
+import {
+  accountTypeEnum,
+  birDeMinimisTypeEnum,
+  birTaxCategoryEnum,
+} from "@/db/schema";
 import {
   insertAccountCodeSchema,
   InsertAccountCodeSchemaType,
@@ -71,6 +75,8 @@ export default function AccountCodeForm({
       month13thPay: false,
       nonTaxable: false,
       deminimis: false,
+      birTaxCategory: null,
+      birDeMinimisType: null,
       healthInsurance: false,
     },
   });
@@ -142,6 +148,8 @@ export default function AccountCodeForm({
         accountCode: strippedCode, // ✅ only show the digits
         dailyRate: formatDecimalInput(selectedAccountCode.dailyRate),
         monthlyRate: formatDecimalInput(selectedAccountCode.monthlyRate),
+        birTaxCategory: selectedAccountCode.birTaxCategory ?? null,
+        birDeMinimisType: selectedAccountCode.birDeMinimisType ?? null,
       });
     } else {
       setSelectedId(null);
@@ -155,6 +163,8 @@ export default function AccountCodeForm({
         month13thPay: false,
         nonTaxable: false,
         deminimis: false,
+        birTaxCategory: null,
+        birDeMinimisType: null,
         healthInsurance: false,
       });
     }
@@ -207,6 +217,8 @@ export default function AccountCodeForm({
       month13thPay: false,
       nonTaxable: false,
       deminimis: false,
+      birTaxCategory: null,
+      birDeMinimisType: null,
       healthInsurance: false,
     });
     onResetSelection?.();
@@ -292,6 +304,18 @@ export default function AccountCodeForm({
               register={form.register}
               inputMode="decimal"
               placeholder="0.0000"
+            />
+            <SelectWithLabel<InsertAccountCodeSchemaType>
+              fieldTitle="BIR Category"
+              nameInSchema="birTaxCategory"
+              control={form.control}
+              data={enumToSelectOptions(birTaxCategoryEnum.enumValues)}
+            />
+            <SelectWithLabel<InsertAccountCodeSchemaType>
+              fieldTitle="De Minimis Type"
+              nameInSchema="birDeMinimisType"
+              control={form.control}
+              data={enumToSelectOptions(birDeMinimisTypeEnum.enumValues)}
             />
           </div>
 

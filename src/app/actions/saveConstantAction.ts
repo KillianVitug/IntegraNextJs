@@ -131,6 +131,8 @@ export const saveAccountCodeAction = actionClient
             month13thPay: parsedInput.month13thPay,
             nonTaxable: parsedInput.nonTaxable,
             deminimis: parsedInput.deminimis,
+            birTaxCategory: parsedInput.birTaxCategory,
+            birDeMinimisType: parsedInput.birDeMinimisType,
             healthInsurance: parsedInput.healthInsurance,
           } satisfies Partial<typeof accountCode.$inferInsert>)
           .returning({ insertedId: accountCode.id });
@@ -174,6 +176,8 @@ export const updateAccountCodeAction = actionClient
             month13thPay: parsedInput.month13thPay,
             nonTaxable: parsedInput.nonTaxable,
             deminimis: parsedInput.deminimis,
+            birTaxCategory: parsedInput.birTaxCategory,
+            birDeMinimisType: parsedInput.birDeMinimisType,
             healthInsurance: parsedInput.healthInsurance,
             updatedAt: new Date(),
           })

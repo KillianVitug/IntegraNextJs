@@ -13,7 +13,8 @@ import {
   type EmployeeDepartmentMetadata,
 } from "@/lib/payroll/employeeDepartment";
 import { getPayrollRun, parsePayrollBreakdownNotes } from "@/lib/payroll/engine";
-import { asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { payrollEligibleEmploymentStatusCondition } from "@/lib/employmentStatus";
 import type {
   AttendanceImportBatchView,
   PayrollAccountCodeEmployeeView,
@@ -170,6 +171,7 @@ export function serializePayrollRunForWorkspace(
         payComputationMode: parsedNotes.payComputationMode,
         isManualPayrollOverride: parsedNotes.isManualPayrollOverride,
         statutoryMonthlyCompensationBase: parsedNotes.statutoryMonthlyCompensationBase,
+        philhealthMonthlyCompensationBase: parsedNotes.philhealthMonthlyCompensationBase,
         sssContributionSource: parsedNotes.sssContributionSource,
         sssSalaryCredit: parsedNotes.sssSalaryCredit,
         sssBracketLabel: parsedNotes.sssBracketLabel,
@@ -234,7 +236,13 @@ export async function loadPayrollAccountCodeEmployees(): Promise<
       eq(employeesGeneralInfo.employeeId, employees.id)
     )
     .leftJoin(department, eq(employeesGeneralInfo.departmentId, department.id))
-    .where(isNull(employees.deletedAt))
+    .where(
+      and(
+        isNull(employees.deletedAt),
+        isNull(employeesGeneralInfo.deletedAt),
+        payrollEligibleEmploymentStatusCondition()
+      )
+    )
     .orderBy(
       asc(employees.lastName),
       asc(employees.firstName),

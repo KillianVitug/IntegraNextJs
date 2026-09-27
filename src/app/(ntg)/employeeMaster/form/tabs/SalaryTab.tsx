@@ -91,6 +91,7 @@ export default function SalaryTab({
   }, [selectedPayrollId, customPayrollCodes, setValue]);
 
   const payrollBasis = getPayrollBasis(dailyRateValue, monthlyRateValue);
+  const isEditingExistingEmployee = Boolean(employeeId);
 
   return (
     <div className="p-4">
@@ -101,6 +102,7 @@ export default function SalaryTab({
           placeholder="0.0000"
           register={register}
           format="money"
+          disabled={isEditingExistingEmployee}
         />
         <InputWithLabel
           fieldTitle="Monthly Rate"
@@ -108,6 +110,7 @@ export default function SalaryTab({
           placeholder="0.0000"
           register={register}
           format="money"
+          disabled={isEditingExistingEmployee}
         />
         <InputWithLabel
           fieldTitle="Rate Divisor"

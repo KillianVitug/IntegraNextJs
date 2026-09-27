@@ -14,6 +14,7 @@ import {
   position,
 } from "@/db/schema";
 import { and, asc, desc, eq, gte, isNull, sql } from "drizzle-orm";
+import { currentDepartmentMemberStatusCondition } from "@/lib/employmentStatus";
 
 type LeaveStatus = typeof leaveStatusEnum.enumValues[number];
 type LeaveType = string;
@@ -356,7 +357,9 @@ export async function getHomeDepartmentsData(): Promise<HomeDepartmentsData> {
         employees,
         and(
           eq(employeesGeneralInfo.employeeId, employees.id),
-          isNull(employees.deletedAt)
+          isNull(employees.deletedAt),
+          isNull(employeesGeneralInfo.deletedAt),
+          currentDepartmentMemberStatusCondition()
         )
       )
       .groupBy(department.id, department.name, department.code)
@@ -382,7 +385,13 @@ export async function getHomeDepartmentsData(): Promise<HomeDepartmentsData> {
         eq(employees.id, employeesOtherReferences.employeeId)
       )
       .leftJoin(position, eq(employeesOtherReferences.positionId, position.id))
-      .where(isNull(employees.deletedAt))
+      .where(
+        and(
+          isNull(employees.deletedAt),
+          isNull(employeesGeneralInfo.deletedAt),
+          currentDepartmentMemberStatusCondition()
+        )
+      )
       .orderBy(
         asc(employees.employeeType),
         asc(employees.employeeNo),

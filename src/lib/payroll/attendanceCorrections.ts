@@ -1,4 +1,5 @@
 import {
+  ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG,
   summarizeEmployeeDay,
   type DailyAttendanceSummarySeed,
   type ParsedAttendanceLog,
@@ -477,8 +478,30 @@ export function detectAttendanceCorrectionSuggestions(args: {
     logs: missingOutLogs,
     shift: args.shift,
   });
+  const hasSplitIncompletePunches = args.summary.anomalyFlags.includes(
+    ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG
+  );
 
   if (
+    hasSplitIncompletePunches &&
+    !args.summary.isRestDay &&
+    args.summary.scheduledMinutes > 0 &&
+    args.summary.paidLeaveMinutes === 0 &&
+    args.summary.unpaidLeaveMinutes === 0 &&
+    missingOutLogs.length > 0
+  ) {
+    suggestions.push({
+      correctionType: "Ambiguous Sequence",
+      confidence: 40,
+      reason:
+        "Split schedule requires four punches in IN, OUT, IN, OUT order, so the workday needs review before DTR computation.",
+      payload: buildPayload({
+        rawLogs,
+        ignoredRawLogIds: duplicateIds,
+        summary: null,
+      }),
+    });
+  } else if (
     !args.summary.isRestDay &&
     args.summary.scheduledMinutes > 0 &&
     args.summary.paidLeaveMinutes === 0 &&

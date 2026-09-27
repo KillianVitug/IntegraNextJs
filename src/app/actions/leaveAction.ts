@@ -58,6 +58,8 @@ export type LeaveRecordWithEmployeeInfo = {
   employeeType: string | null;
   firstName: string | null;
   lastName: string | null;
+  departmentName: string | null;
+  departmentCode: string | null;
 };
 
 export type EmployeeLeaveUsageSummary = {
@@ -666,9 +668,16 @@ export async function getLeaveRecordsByYear(year: number) {
         employeeType: employees.employeeType,
         firstName: employees.firstName,
         lastName: employees.lastName,
+        departmentName: department.name,
+        departmentCode: department.code,
       })
       .from(employeesLeaveRecords)
       .leftJoin(employees, eq(employeesLeaveRecords.employeeId, employees.id))
+      .leftJoin(
+        employeesGeneralInfo,
+        eq(employeesLeaveRecords.employeeId, employeesGeneralInfo.employeeId)
+      )
+      .leftJoin(department, eq(employeesGeneralInfo.departmentId, department.id))
       .leftJoin(leaveTypes, eq(employeesLeaveRecords.leaveTypeId, leaveTypes.id))
       .where(
         and(
@@ -676,7 +685,7 @@ export async function getLeaveRecordsByYear(year: number) {
           lte(employeesLeaveRecords.dateFiled, endDate)
         )
       )
-      .orderBy(employeesLeaveRecords.dateFiled);
+      .orderBy(desc(employeesLeaveRecords.dateFiled), desc(employeesLeaveRecords.id));
 
     const normalized = records.map((record) => ({
       ...record,

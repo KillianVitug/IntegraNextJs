@@ -16,12 +16,14 @@ import {
   employeesLeaveRecords,
   leaveTypes,
   managerScheduleChangeRequests,
+  payrollPeriods,
 } from "@/db/schema";
 import {
   assertManagerCanAccessEmployee,
   getManagerDepartmentIds,
   requireManager,
 } from "@/lib/auth/server";
+import { currentDepartmentMemberStatusCondition } from "@/lib/employmentStatus";
 import {
   ensureDefaultLeaveTypes,
   getEmployeeLeaveBalanceSummary,
@@ -29,9 +31,16 @@ import {
   replaceLeaveRecordDayDetails,
 } from "@/lib/payroll/leave";
 import {
+  getActiveShiftAssignmentForDate,
+  getActiveWeeklyShiftPatternForDate,
   isResolvedScheduleRestDay,
   resolveEmployeeScheduleForDate,
+  type WeekdayName,
 } from "@/lib/payroll/scheduleResolver";
+import {
+  compareLiveWeeklyPatterns,
+  selectLiveWeeklyPattern,
+} from "@/lib/payroll/weeklyPatternPruning";
 import { upsertEmployeeShiftAssignmentSchema } from "@/zod-schemas/employeeShiftAssignment";
 import { leaveFormSchema } from "@/zod-schemas/SickandLeaveSchema";
 
@@ -180,6 +189,55 @@ function formatMonthLabel(year: number, month: number) {
   }).format(new Date(year, month - 1, 1));
 }
 
+function readPayrollPeriodYear(value: number | null | undefined) {
+  return Number.isInteger(value) && value! >= 2000 && value! <= 2100
+    ? value!
+    : new Date().getFullYear();
+}
+
+function addDateKeyDays(value: string, days: number) {
+  const date = new Date(`${value}T00:00:00`);
+  date.setDate(date.getDate() + days);
+
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
+    2,
+    "0",
+  )}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function buildDateKeysBetween(startDate: string, endDate: string) {
+  const dates: string[] = [];
+  let currentDate = startDate;
+
+  while (currentDate <= endDate && dates.length < 370) {
+    dates.push(currentDate);
+    currentDate = addDateKeyDays(currentDate, 1);
+  }
+
+  return dates;
+}
+
+function getWeekdayName(dateKey: string) {
+  return new Intl.DateTimeFormat("en", { weekday: "long" }).format(
+    new Date(`${dateKey}T00:00:00`),
+  ) as WeekdayName;
+}
+
+function selectPayrollPeriodId<
+  TPeriod extends { id: string; startDate: string; endDate: string },
+>(periods: TPeriod[], requestedPeriodId?: string | null) {
+  const today = new Date().toISOString().slice(0, 10);
+
+  return periods.some((period) => period.id === requestedPeriodId)
+    ? requestedPeriodId!
+    : periods.find(
+        (period) => period.startDate <= today && period.endDate >= today,
+      )?.id ??
+        [...periods].reverse().find((period) => period.endDate <= today)?.id ??
+        periods[0]?.id ??
+        null;
+}
+
 async function requireExistingLeaveType(code: string, database: DbLike = db) {
   await ensureDefaultLeaveTypes();
 
@@ -240,6 +298,7 @@ export async function getManagerEmployees() {
       and(
         isNull(employees.deletedAt),
         isNull(employeesGeneralInfo.deletedAt),
+        currentDepartmentMemberStatusCondition(),
         inArray(employeesGeneralInfo.departmentId, departmentIds),
       ),
     )
@@ -340,6 +399,7 @@ export async function getManagerCalendarMonth(input: unknown) {
       and(
         isNull(employees.deletedAt),
         isNull(employeesGeneralInfo.deletedAt),
+        currentDepartmentMemberStatusCondition(),
         inArray(employeesGeneralInfo.departmentId, departmentIds),
       ),
     )
@@ -591,6 +651,7 @@ export async function getManagerLeaveRecordsByYear(year: number) {
       and(
         isNull(employees.deletedAt),
         isNull(employeesGeneralInfo.deletedAt),
+        currentDepartmentMemberStatusCondition(),
         inArray(employeesGeneralInfo.departmentId, departmentIds),
         gte(employeesLeaveRecords.dateFiled, startDate),
         lte(employeesLeaveRecords.dateFiled, endDate),
@@ -680,6 +741,7 @@ export async function createManagerLeaveRecord(input: unknown) {
       endDate: createdRecord.leaveEndDate,
       leaveTypeId: leaveType.id,
       dayPart: payload.dayPart ?? "FullDay",
+      chargeRestDays: true,
       database: tx,
     });
 
@@ -754,6 +816,7 @@ export async function updateManagerLeaveRecord(input: unknown) {
       endDate: updatedRecord.leaveEndDate,
       leaveTypeId: leaveType.id,
       dayPart: payload.dayPart ?? "FullDay",
+      chargeRestDays: true,
       database: tx,
     });
 
@@ -826,9 +889,205 @@ export async function listManagerWeeklyShiftPatterns(employeeId: string) {
     },
   });
 
-  return patterns.sort((left, right) =>
-    right.effectiveFrom.localeCompare(left.effectiveFrom) || right.id - left.id
+  const livePattern = selectLiveWeeklyPattern(patterns);
+
+  return livePattern ? [livePattern] : [];
+}
+
+export async function getManagerWeeklyScheduleGridData() {
+  const employeesForManager = await getManagerEmployees();
+  const employeeIds = employeesForManager.map((employee) => employee.id);
+
+  if (employeeIds.length === 0) {
+    return [];
+  }
+
+  const patterns = await db.query.employeeWeeklyShiftPatterns.findMany({
+    where: inArray(employeeWeeklyShiftPatterns.employeeId, employeeIds),
+    with: {
+      days: true,
+    },
+  });
+  const latestPatterns = [...patterns].sort(compareLiveWeeklyPatterns);
+  const patternByEmployeeId = new Map<string, (typeof patterns)[number]>();
+
+  for (const pattern of latestPatterns) {
+    if (!patternByEmployeeId.has(pattern.employeeId)) {
+      patternByEmployeeId.set(pattern.employeeId, pattern);
+    }
+  }
+
+  return employeesForManager.map((employee) => ({
+    ...employee,
+    weeklyPattern: patternByEmployeeId.get(employee.id) ?? null,
+  }));
+}
+
+export async function getManagerPayrollPeriodScheduleGridData(input?: {
+  periodId?: string | null;
+  year?: number;
+}) {
+  const year = readPayrollPeriodYear(input?.year);
+  const [employeesForManager, periodRows] = await Promise.all([
+    getManagerEmployees(),
+    db
+      .select({
+        id: payrollPeriods.id,
+        code: payrollPeriods.code,
+        payrollTerms: payrollPeriods.payrollTerms,
+        cycle: payrollPeriods.cycle,
+        year: payrollPeriods.year,
+        month: payrollPeriods.month,
+        startDate: payrollPeriods.startDate,
+        endDate: payrollPeriods.endDate,
+        nominalPayDate: payrollPeriods.nominalPayDate,
+        adjustedPayDate: payrollPeriods.adjustedPayDate,
+        status: payrollPeriods.status,
+      })
+      .from(payrollPeriods)
+      .where(eq(payrollPeriods.year, year))
+      .orderBy(asc(payrollPeriods.startDate)),
+  ]);
+  const selectedPeriodId = selectPayrollPeriodId(periodRows, input?.periodId);
+  const selectedPeriod =
+    periodRows.find((period) => period.id === selectedPeriodId) ?? null;
+
+  if (!selectedPeriod) {
+    return {
+      year,
+      selectedPeriodId: null,
+      selectedPeriod: null,
+      periods: periodRows,
+      dates: [] as string[],
+      rows: [],
+    };
+  }
+
+  const dates = buildDateKeysBetween(
+    selectedPeriod.startDate,
+    selectedPeriod.endDate,
   );
+  const employeeIds = employeesForManager.map((employee) => employee.id);
+
+  if (employeeIds.length === 0) {
+    return {
+      year,
+      selectedPeriodId,
+      selectedPeriod,
+      periods: periodRows,
+      dates,
+      rows: [],
+    };
+  }
+
+  const [weeklyPatterns, shiftAssignments] = await Promise.all([
+    db.query.employeeWeeklyShiftPatterns.findMany({
+      where: and(
+        inArray(employeeWeeklyShiftPatterns.employeeId, employeeIds),
+        lte(employeeWeeklyShiftPatterns.effectiveFrom, selectedPeriod.endDate),
+        or(
+          isNull(employeeWeeklyShiftPatterns.effectiveTo),
+          gte(employeeWeeklyShiftPatterns.effectiveTo, selectedPeriod.startDate),
+        ),
+      ),
+      with: {
+        days: true,
+      },
+    }),
+    db
+      .select()
+      .from(employeeShiftAssignments)
+      .where(
+        and(
+          inArray(employeeShiftAssignments.employeeId, employeeIds),
+          lte(employeeShiftAssignments.effectiveFrom, selectedPeriod.endDate),
+          or(
+            isNull(employeeShiftAssignments.effectiveTo),
+            gte(employeeShiftAssignments.effectiveTo, selectedPeriod.startDate),
+          ),
+        ),
+      )
+      .orderBy(
+        asc(employeeShiftAssignments.employeeId),
+        desc(employeeShiftAssignments.effectiveFrom),
+        desc(employeeShiftAssignments.id),
+      ),
+  ]);
+
+  const weeklyPatternsByEmployeeId = new Map<
+    string,
+    typeof weeklyPatterns
+  >();
+  for (const pattern of weeklyPatterns) {
+    const current = weeklyPatternsByEmployeeId.get(pattern.employeeId) ?? [];
+    current.push(pattern);
+    weeklyPatternsByEmployeeId.set(pattern.employeeId, current);
+  }
+
+  const shiftAssignmentsByEmployeeId = new Map<
+    string,
+    typeof shiftAssignments
+  >();
+  for (const assignment of shiftAssignments) {
+    const current = shiftAssignmentsByEmployeeId.get(assignment.employeeId) ?? [];
+    current.push(assignment);
+    shiftAssignmentsByEmployeeId.set(assignment.employeeId, current);
+  }
+
+  const rows = employeesForManager.map((employee) => {
+    const employeeWeeklyPatterns =
+      weeklyPatternsByEmployeeId.get(employee.id) ?? [];
+    const employeeShiftAssignments =
+      shiftAssignmentsByEmployeeId.get(employee.id) ?? [];
+
+    return {
+      ...employee,
+      cells: dates.map((date) => {
+        const weekday = getWeekdayName(date);
+        const weeklyPattern = getActiveWeeklyShiftPatternForDate(
+          employeeWeeklyPatterns,
+          date,
+        );
+        const weeklyPatternDay =
+          weeklyPattern?.days.find((day) => day.weekday === weekday) ?? null;
+        const baseShiftTableId = weeklyPatternDay?.shiftTableId ?? null;
+        const baseValue = baseShiftTableId ? String(baseShiftTableId) : "0";
+        const overrideAssignment = getActiveShiftAssignmentForDate(
+          employeeShiftAssignments,
+          date,
+        );
+        const overrideShiftTableId = overrideAssignment?.shiftTableId ?? null;
+        const currentValue = overrideAssignment
+          ? overrideShiftTableId
+            ? String(overrideShiftTableId)
+            : "0"
+          : baseValue;
+
+        return {
+          date,
+          weekday,
+          baseValue,
+          currentValue,
+          overrideAssignment,
+          overrideAssignmentId: overrideAssignment?.id ?? null,
+          source: overrideAssignment
+            ? "OVERRIDE"
+            : weeklyPattern
+              ? "WEEKLY_PATTERN"
+              : "BASE_OFF",
+        };
+      }),
+    };
+  });
+
+  return {
+    year,
+    selectedPeriodId,
+    selectedPeriod,
+    periods: periodRows,
+    dates,
+    rows,
+  };
 }
 
 export async function listManagerShiftAssignments(employeeId: string) {
@@ -998,6 +1257,9 @@ export async function getManagerScheduleRequests() {
     .where(
       and(
         eq(managerScheduleChangeRequests.requestedByAccountId, auth.accountId),
+        isNull(employees.deletedAt),
+        isNull(employeesGeneralInfo.deletedAt),
+        currentDepartmentMemberStatusCondition(),
         inArray(employeesGeneralInfo.departmentId, departmentIds),
       ),
     )

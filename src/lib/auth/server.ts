@@ -38,6 +38,7 @@ import {
   getPermissionsForGroups,
   isAuthGroupKey,
 } from "@/lib/auth/permissions";
+import { currentDepartmentMemberStatusCondition } from "@/lib/employmentStatus";
 export {
   assignDefaultAccountGroupTx,
   ensureDefaultPermissionGroupsTx,
@@ -335,6 +336,7 @@ export async function assertManagerCanAccessEmployee(args: {
         eq(employees.id, args.employeeId),
         isNull(employees.deletedAt),
         isNull(employeesGeneralInfo.deletedAt),
+        currentDepartmentMemberStatusCondition(),
         inArray(employeesGeneralInfo.departmentId, managerDepartmentIds),
       ),
     )

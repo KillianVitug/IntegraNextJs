@@ -18,6 +18,7 @@ import type {
 import { db } from "@/db";
 import {
   accountCode,
+  adminAuditEvents,
   attendanceDailySummaries,
   attendanceDtrCorrections,
   attendanceDtrHoldApprovals,
@@ -25,6 +26,7 @@ import {
   attendanceRawLogs,
   branchCalendarAccountCodeOverrides,
   employeeAttendanceDayStatusOverrides,
+  employeeAttendanceDayMetricOverrides,
   employeeAttendanceDayTypeOverrides,
   employeeAttendancePeriodOverrides,
   employeePayrollExceptionRows,
@@ -62,6 +64,10 @@ import {
   requireManager,
 } from "@/lib/auth/server";
 import {
+  currentDepartmentMemberStatusCondition,
+  isPayrollEligibleEmploymentStatus,
+} from "@/lib/employmentStatus";
+import {
   recordAdminAuditEvent,
   recordPayrollRunEvent,
   requireAdminActor,
@@ -96,7 +102,10 @@ import {
   applyAttendanceDtrEffectiveStatus,
   attendanceDtrDayTypeValues,
   attendanceDtrManualStatusValues,
+  computeAttendanceHoldWorkedMinutes,
+  computeAccumulatedLatePenaltyMinutes,
   computeNetDtrWorkedMinutes,
+  computePayrollTardinessMinutes,
   getAttendanceDtrDayTypeFromHolidayType,
   getHolidayTypeFromAttendanceDtrDayType,
   getComputedAttendanceDtrStatus,
@@ -111,7 +120,10 @@ import {
   type OvertimeCategory,
   type OvertimeHolidayType,
 } from "@/lib/payroll/overtime";
-import { computeManualPayrollLatestBaseline } from "@/lib/payroll/engine";
+import {
+  computeManualPayrollLatestBaseline,
+  createOrRecomputePayrollRun,
+} from "@/lib/payroll/engine";
 import { refreshManualPayrollAttendanceLinesFromBaseline } from "@/lib/payroll/manualPayroll";
 import { computeGeneratedDtrLwopMinutes } from "@/lib/payroll/dtrLwop";
 import {
@@ -188,6 +200,7 @@ type AttendancePeriodSourceData = {
   approvedCorrections: Array<typeof attendanceDtrCorrections.$inferSelect>;
   periodOverrides: Array<typeof employeeAttendancePeriodOverrides.$inferSelect>;
   dayStatusOverrides: Array<typeof employeeAttendanceDayStatusOverrides.$inferSelect>;
+  dayMetricOverrides: Array<typeof employeeAttendanceDayMetricOverrides.$inferSelect>;
   dayTypeOverrides: Array<typeof employeeAttendanceDayTypeOverrides.$inferSelect>;
   holidayRows: Array<{
     holidayDate: string;
@@ -212,6 +225,7 @@ type AttendancePeriodPersistedSummarySourceData = {
   rawPunchesByEmployeeDate: Map<string, Date[]>;
   periodOverrides: Array<typeof employeeAttendancePeriodOverrides.$inferSelect>;
   dayStatusOverrides: Array<typeof employeeAttendanceDayStatusOverrides.$inferSelect>;
+  dayMetricOverrides: Array<typeof employeeAttendanceDayMetricOverrides.$inferSelect>;
   dayTypeOverrides: Array<typeof employeeAttendanceDayTypeOverrides.$inferSelect>;
   holdApprovalRows: Array<{
     employeeId: string;
@@ -262,6 +276,7 @@ async function loadEligibleSemiMonthlyAttendanceEmployees(
     const separated = employee.generalInfo?.separationDate;
 
     return (
+      isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus) &&
       payrollTerms === "Semi-Monthly" &&
       (!separated || separated >= payrollPeriod.startDate)
     );
@@ -551,11 +566,18 @@ function buildAttendanceDtrTotals(
       undertimeMinutes: totals.undertimeMinutes,
     }),
     lateMinutes: totals.lateMinutes,
+    latePenaltyMinutes: computeAccumulatedLatePenaltyMinutes(totals.lateMinutes),
     undertimeMinutes: totals.undertimeMinutes,
     overtimeMinutes: totals.overtimeMinutes,
   };
   const overrides = normalizeAttendanceDtrPeriodOverride(periodOverride);
-  const effectiveLateMinutes = overrides.lateMinutes ?? computed.lateMinutes;
+  const rawEffectiveLateMinutes = overrides.lateMinutes ?? computed.lateMinutes;
+  const effectiveLatePenaltyMinutes = computeAccumulatedLatePenaltyMinutes(
+    rawEffectiveLateMinutes
+  );
+  const effectiveLateMinutes = computePayrollTardinessMinutes(
+    rawEffectiveLateMinutes
+  );
   const effectiveUndertimeMinutes =
     overrides.undertimeMinutes ?? computed.undertimeMinutes;
 
@@ -564,11 +586,12 @@ function buildAttendanceDtrTotals(
     presentDays: overrides.presentDays ?? computed.presentDays,
     workedMinutes: computeNetDtrWorkedMinutes({
       presentDays: computed.presentDays,
-      lateMinutes: effectiveLateMinutes,
+      lateMinutes: rawEffectiveLateMinutes,
       undertimeMinutes: effectiveUndertimeMinutes,
       workedMinutesOverride: overrides.workedMinutes,
     }),
     lateMinutes: effectiveLateMinutes,
+    latePenaltyMinutes: effectiveLatePenaltyMinutes,
     undertimeMinutes: effectiveUndertimeMinutes,
     overtimeMinutes: overrides.overtimeMinutes ?? computed.overtimeMinutes,
     biometricWorkedMinutes,
@@ -580,10 +603,76 @@ function buildAttendanceDtrTotals(
   } satisfies AttendanceDtrTotalsView;
 }
 
+type AttendanceDtrMetricOverrideRecord = Pick<
+  typeof employeeAttendanceDayMetricOverrides.$inferSelect,
+  "lateMinutes" | "undertimeMinutes" | "overtimeMinutes"
+>;
+
+function getDtrMetricOverrideBaselineWorkedMinutes(row: {
+  scheduledMinutes?: number | null;
+  workedMinutes?: number | null;
+}) {
+  const scheduledMinutes = Math.max(0, Math.round(row.scheduledMinutes ?? 0));
+  if (scheduledMinutes > 0) return scheduledMinutes;
+
+  const workedMinutes = Math.max(0, Math.round(row.workedMinutes ?? 0));
+  return workedMinutes > 0 ? workedMinutes : 8 * 60;
+}
+
+function applyAttendanceDtrMetricOverride<
+  T extends {
+    scheduledMinutes: number;
+    workedMinutes: number;
+    regularMinutes: number;
+    lateMinutes: number;
+    undertimeMinutes: number;
+    overtimeMinutes: number;
+    isRestDay: boolean;
+  },
+>(row: T, override: AttendanceDtrMetricOverrideRecord | null | undefined): T {
+  if (!override) return row;
+
+  const lateMinutes =
+    override.lateMinutes == null
+      ? row.lateMinutes
+      : Math.max(0, Math.round(override.lateMinutes));
+  const undertimeMinutes =
+    override.undertimeMinutes == null
+      ? row.undertimeMinutes
+      : Math.max(0, Math.round(override.undertimeMinutes));
+  const overtimeMinutes =
+    override.overtimeMinutes == null
+      ? row.overtimeMinutes
+      : Math.max(0, Math.round(override.overtimeMinutes));
+  const workedMinutes = Math.max(
+    0,
+    getDtrMetricOverrideBaselineWorkedMinutes(row) - lateMinutes - undertimeMinutes
+  );
+  const regularBaseline = row.isRestDay
+    ? Math.max(0, Math.round(row.regularMinutes))
+    : getDtrMetricOverrideBaselineWorkedMinutes(row);
+
+  return {
+    ...row,
+    workedMinutes,
+    regularMinutes: Math.min(workedMinutes, regularBaseline),
+    lateMinutes,
+    undertimeMinutes,
+    overtimeMinutes,
+  };
+}
+
+function buildDtrMetricOverrideByEmployeeDate(
+  rows: Array<typeof employeeAttendanceDayMetricOverrides.$inferSelect>
+) {
+  return new Map(rows.map((row) => [`${row.employeeId}|${row.attendanceDate}`, row]));
+}
+
 async function loadAttendancePeriodSourceData(
   database: AttendanceDatabase,
   payrollPeriodId: string,
-  employeeId?: string
+  employeeId?: string,
+  options?: { employeeIds?: string[] }
 ): Promise<AttendancePeriodSourceData> {
   const payrollPeriod = await database.query.payrollPeriods.findFirst({
     where: eq(payrollPeriods.id, payrollPeriodId),
@@ -591,6 +680,31 @@ async function loadAttendancePeriodSourceData(
 
   if (!payrollPeriod) {
     throw new Error("Payroll period not found.");
+  }
+
+  const scopedEmployeeIds = options?.employeeIds
+    ? [...new Set(options.employeeIds)]
+    : undefined;
+  if (scopedEmployeeIds && scopedEmployeeIds.length === 0) {
+    return {
+      payrollPeriod,
+      rawLogs: [],
+      employeeRecords: [],
+      departmentByEmployeeId: new Map(),
+      approvedLeaves: [],
+      shiftAssignments: [],
+      weeklyPatterns: [],
+      shiftTableBreaksByShiftTableId: new Map(),
+      approvedCorrections: [],
+      periodOverrides: [],
+      dayStatusOverrides: [],
+      dayMetricOverrides: [],
+      dayTypeOverrides: [],
+      holidayRows: (await fetchConfirmedHolidayRowsForRange(
+        payrollPeriod.startDate,
+        payrollPeriod.endDate
+      )) as AttendancePeriodSourceData["holidayRows"],
+    };
   }
 
   const rawLogs: AttendancePeriodRawLogRow[] = await database
@@ -615,7 +729,11 @@ async function loadAttendancePeriodSourceData(
       and(
         eq(attendanceImportBatches.payrollPeriodId, payrollPeriodId),
         isNotNull(attendanceRawLogs.employeeId),
-        employeeId ? eq(attendanceRawLogs.employeeId, employeeId) : sql`TRUE`,
+        employeeId
+          ? eq(attendanceRawLogs.employeeId, employeeId)
+          : scopedEmployeeIds
+            ? inArray(attendanceRawLogs.employeeId, scopedEmployeeIds)
+            : sql`TRUE`,
         gte(attendanceRawLogs.logDate, payrollPeriod.startDate),
         lte(attendanceRawLogs.logDate, payrollPeriod.endDate)
       )
@@ -626,7 +744,7 @@ async function loadAttendancePeriodSourceData(
       asc(attendanceRawLogs.id)
     );
 
-  const employeeIds: string[] = [
+  const rawEmployeeIds: string[] = [
     ...new Set(
       rawLogs
         .map((row) => row.employeeId)
@@ -634,18 +752,24 @@ async function loadAttendancePeriodSourceData(
     ),
   ];
   const employeeRecords: AttendancePeriodEmployeeRecord[] =
-    employeeIds.length === 0
+    rawEmployeeIds.length === 0
       ? []
-      : await database.query.employees.findMany({
+      : (
+          await database.query.employees.findMany({
           where: and(
-            inArray(employees.id, employeeIds),
+            inArray(employees.id, rawEmployeeIds),
             eq(employees.employeeType, DEFAULT_EMPLOYEE_TYPE),
             isNull(employees.deletedAt),
           ),
           with: {
+            generalInfo: true,
             timekeeping: true,
           },
-        });
+        })
+        ).filter((employee) =>
+          isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus)
+        );
+  const employeeIds = employeeRecords.map((employee) => employee.id);
   const departmentByEmployeeId = await loadEmployeeDepartmentMetadataByEmployeeId(
     employeeIds,
     database
@@ -764,6 +888,22 @@ async function loadAttendancePeriodSourceData(
               lte(employeeAttendanceDayTypeOverrides.attendanceDate, payrollPeriod.endDate)
             )
           );
+  const dayMetricOverrides: Array<
+    typeof employeeAttendanceDayMetricOverrides.$inferSelect
+  > =
+    employeeIds.length === 0
+      ? []
+      : await database
+          .select()
+          .from(employeeAttendanceDayMetricOverrides)
+          .where(
+            and(
+              eq(employeeAttendanceDayMetricOverrides.payrollPeriodId, payrollPeriodId),
+              inArray(employeeAttendanceDayMetricOverrides.employeeId, employeeIds),
+              gte(employeeAttendanceDayMetricOverrides.attendanceDate, payrollPeriod.startDate),
+              lte(employeeAttendanceDayMetricOverrides.attendanceDate, payrollPeriod.endDate)
+            )
+          );
   const approvedCorrections: Array<typeof attendanceDtrCorrections.$inferSelect> =
     employeeIds.length === 0
       ? []
@@ -796,6 +936,7 @@ async function loadAttendancePeriodSourceData(
     approvedCorrections,
     periodOverrides,
     dayStatusOverrides,
+    dayMetricOverrides,
     dayTypeOverrides,
     holidayRows: holidayRows as AttendancePeriodSourceData["holidayRows"],
   };
@@ -828,6 +969,7 @@ async function loadAttendancePeriodPersistedSummarySourceData(
       rawPunchesByEmployeeDate: new Map(),
       periodOverrides: [],
       dayStatusOverrides: [],
+      dayMetricOverrides: [],
       dayTypeOverrides: [],
       holdApprovalRows: [],
       holidayRows: (await fetchConfirmedHolidayRowsForRange(
@@ -872,6 +1014,7 @@ async function loadAttendancePeriodPersistedSummarySourceData(
     rawPunchRows,
     periodOverrides,
     dayStatusOverrides,
+    dayMetricOverrides,
     dayTypeOverrides,
     holdApprovalRows,
     holidayRows,
@@ -962,6 +1105,19 @@ async function loadAttendancePeriodPersistedSummarySourceData(
       ? Promise.resolve([])
       : database
           .select()
+          .from(employeeAttendanceDayMetricOverrides)
+          .where(
+            and(
+              eq(employeeAttendanceDayMetricOverrides.payrollPeriodId, payrollPeriodId),
+              inArray(employeeAttendanceDayMetricOverrides.employeeId, employeeIds),
+              gte(employeeAttendanceDayMetricOverrides.attendanceDate, payrollPeriod.startDate),
+              lte(employeeAttendanceDayMetricOverrides.attendanceDate, payrollPeriod.endDate)
+            )
+          ),
+    employeeIds.length === 0
+      ? Promise.resolve([])
+      : database
+          .select()
           .from(employeeAttendanceDayTypeOverrides)
           .where(
             and(
@@ -1044,6 +1200,10 @@ async function loadAttendancePeriodPersistedSummarySourceData(
     dayStatusOverrides:
       dayStatusOverrides as Array<
         typeof employeeAttendanceDayStatusOverrides.$inferSelect
+      >,
+    dayMetricOverrides:
+      dayMetricOverrides as Array<
+        typeof employeeAttendanceDayMetricOverrides.$inferSelect
       >,
     dayTypeOverrides:
       dayTypeOverrides as Array<typeof employeeAttendanceDayTypeOverrides.$inferSelect>,
@@ -1248,6 +1408,203 @@ type AttendanceImportScope = {
   auditDetails?: Record<string, unknown>;
 };
 
+type AttendanceImportAuditDetails = {
+  payrollPeriodId?: string | null;
+  departmentIds?: number[];
+};
+
+function parseAttendanceImportAuditDetails(
+  value: string | null
+): AttendanceImportAuditDetails {
+  if (!value) return {};
+
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const payrollPeriodId =
+      typeof parsed.payrollPeriodId === "string" ? parsed.payrollPeriodId : null;
+    const departmentIds = Array.isArray(parsed.departmentIds)
+      ? parsed.departmentIds.filter(
+          (departmentId): departmentId is number =>
+            Number.isInteger(departmentId)
+        )
+      : [];
+
+    return {
+      payrollPeriodId,
+      departmentIds,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function getUnmatchedIdentifierReason(args: {
+  employeeNo: string;
+  employeeByNormalizedKey: Map<
+    string,
+    {
+      id: string;
+      generalInfo?: { departmentId: number | null } | null;
+    }
+  >;
+  ambiguousNormalizedKeys: Set<string>;
+  managerDepartmentIds?: Set<number>;
+  managerEmployeeIds?: Set<string>;
+}) {
+  const normalizedEmployeeKey = normalizeAttendanceEmployeeKey(args.employeeNo);
+
+  if (!normalizedEmployeeKey) {
+    return "Invalid DTR identifier";
+  }
+
+  if (args.ambiguousNormalizedKeys.has(normalizedEmployeeKey)) {
+    return "Duplicate or ambiguous employee number";
+  }
+
+  const employee = args.employeeByNormalizedKey.get(normalizedEmployeeKey) ?? null;
+  if (
+    employee &&
+    (args.managerEmployeeIds
+      ? !args.managerEmployeeIds.has(employee.id)
+      : args.managerDepartmentIds && employee.generalInfo?.departmentId != null
+        ? !args.managerDepartmentIds.has(employee.generalInfo.departmentId)
+        : false)
+  ) {
+    return "Outside manager assigned departments";
+  }
+
+  return "No employee match";
+}
+
+async function buildAttendanceImportBatchUnmatchedDiagnostics(args: {
+  batchId: string;
+  managerDepartmentIds?: number[];
+  managerEmployeeIds?: string[];
+}): Promise<AttendanceImportBatchDiagnosticsView> {
+  const rows = await db
+    .select({
+      id: attendanceRawLogs.id,
+      employeeNo: attendanceRawLogs.employeeNo,
+      sourceLine: attendanceRawLogs.sourceLine,
+      loggedAt: attendanceRawLogs.loggedAt,
+      logDate: attendanceRawLogs.logDate,
+      logTime: attendanceRawLogs.logTime,
+      deviceId: attendanceRawLogs.deviceId,
+      siteCode: attendanceRawLogs.siteCode,
+      rawText: attendanceRawLogs.rawText,
+    })
+    .from(attendanceRawLogs)
+    .where(
+      and(
+        eq(attendanceRawLogs.batchId, args.batchId),
+        isNull(attendanceRawLogs.employeeId)
+      )
+    )
+    .orderBy(
+      asc(attendanceRawLogs.employeeNo),
+      asc(attendanceRawLogs.logDate),
+      asc(attendanceRawLogs.logTime),
+      asc(attendanceRawLogs.id)
+    );
+
+  const employeeRows = await db.query.employees.findMany({
+    where: and(
+      eq(employees.employeeType, DEFAULT_EMPLOYEE_TYPE),
+      isNull(employees.deletedAt)
+    ),
+    columns: {
+      id: true,
+      employeeNo: true,
+    },
+    with: {
+      generalInfo: true,
+    },
+  });
+  const { employeeByNormalizedKey, ambiguousNormalizedKeys } =
+    buildEmployeeLookup(
+      employeeRows.filter((employee) =>
+        isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus)
+      )
+    );
+  const managerDepartmentIds = args.managerDepartmentIds
+    ? new Set(args.managerDepartmentIds)
+    : undefined;
+  const managerEmployeeIds = args.managerEmployeeIds
+    ? new Set(args.managerEmployeeIds)
+    : undefined;
+  const groupedRows = new Map<
+    string,
+    {
+      employeeNo: string;
+      reason: string;
+      rows: AttendanceImportBatchDiagnosticsView["groups"][number]["rows"];
+    }
+  >();
+
+  for (const row of rows) {
+    const reason = getUnmatchedIdentifierReason({
+      employeeNo: row.employeeNo,
+      employeeByNormalizedKey,
+      ambiguousNormalizedKeys,
+      managerDepartmentIds,
+      managerEmployeeIds,
+    });
+    const groupKey = `${row.employeeNo}\u0000${reason}`;
+    const group = groupedRows.get(groupKey) ?? {
+      employeeNo: row.employeeNo,
+      reason,
+      rows: [],
+    };
+
+    group.rows.push({
+      id: row.id,
+      employeeNo: row.employeeNo,
+      sourceLine: row.sourceLine ?? null,
+      loggedAt: row.loggedAt.toISOString(),
+      logDate: row.logDate,
+      logTime: row.logTime,
+      deviceId: row.deviceId ?? null,
+      siteCode: row.siteCode ?? null,
+      rawText: row.rawText ?? null,
+    });
+    groupedRows.set(groupKey, group);
+  }
+
+  const groups = [...groupedRows.values()]
+    .map((group) => {
+      const dates = group.rows.map((row) => row.logDate).sort();
+      const sourceLines = group.rows
+        .map((row) => row.sourceLine)
+        .filter((sourceLine): sourceLine is number => sourceLine != null)
+        .sort((left, right) => left - right);
+
+      return {
+        employeeNo: group.employeeNo,
+        reason: group.reason,
+        rowCount: group.rows.length,
+        startDate: dates[0] ?? "-",
+        endDate: dates[dates.length - 1] ?? "-",
+        firstSourceLine: sourceLines[0] ?? null,
+        lastSourceLine: sourceLines[sourceLines.length - 1] ?? null,
+        sampleRawText: group.rows.find((row) => row.rawText)?.rawText ?? null,
+        rows: group.rows,
+      };
+    })
+    .sort((left, right) => {
+      const countComparison = right.rowCount - left.rowCount;
+      if (countComparison !== 0) return countComparison;
+      const employeeComparison = left.employeeNo.localeCompare(right.employeeNo);
+      if (employeeComparison !== 0) return employeeComparison;
+      return left.reason.localeCompare(right.reason);
+    });
+
+  return {
+    batchId: args.batchId,
+    totalUnmatchedRows: rows.length,
+    groups,
+  };
+}
+
 async function importAttendanceLogsForScope(
   params: AttendanceImportParams,
   scope: AttendanceImportScope
@@ -1366,24 +1723,38 @@ async function importAttendanceLogsForScope(
       isNull(employees.deletedAt),
     ),
     with: {
+      generalInfo: true,
       timekeeping: true,
     },
   });
   const { employeeByNormalizedKey, ambiguousNormalizedKeys } =
-    buildEmployeeLookup(employeeRecords);
+    buildEmployeeLookup(
+      employeeRecords.filter((employee) =>
+        isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus)
+      )
+    );
+  const outOfScopeEmployeeRows =
+    scopedEmployeeIds && scopedEmployeeIds.length > 0
+      ? await db.query.employees.findMany({
+          where: and(
+            eq(employees.employeeType, DEFAULT_EMPLOYEE_TYPE),
+            isNull(employees.deletedAt),
+          ),
+          columns: {
+            id: true,
+            employeeNo: true,
+          },
+          with: {
+            generalInfo: true,
+          },
+        })
+      : [];
   const outOfScopeEmployeeLookup =
     scopedEmployeeIds && scopedEmployeeIds.length > 0
       ? buildEmployeeLookup(
-          await db.query.employees.findMany({
-            where: and(
-              eq(employees.employeeType, DEFAULT_EMPLOYEE_TYPE),
-              isNull(employees.deletedAt),
-            ),
-            columns: {
-              id: true,
-              employeeNo: true,
-            },
-          })
+          outOfScopeEmployeeRows.filter((employee) =>
+            isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus)
+          )
         )
       : null;
   const normalizedHashes = importLogs.map((log) =>
@@ -1816,10 +2187,12 @@ async function importAttendanceLogsForScope(
             ? `${ambiguousRows} row(s) were left unmatched because the normalized DTR identifier matched multiple employees.`
             : null,
           ignoredOutOfScopeRows > 0
-            ? `${ignoredOutOfScopeRows} row(s) were ignored because the DTR identifier belongs outside the manager's assigned departments.`
+            ? `${ignoredOutOfScopeRows} row(s) were left unmatched because the DTR identifier belongs outside the manager's assigned departments.`
             : null,
-          ignoredUnmatchedRows > 0 && !scope.persistUnmatchedLogs
-            ? `${ignoredUnmatchedRows} row(s) were ignored because the DTR identifier did not match an employee in the manager's assigned departments.`
+          ignoredUnmatchedRows > 0
+            ? scope.persistUnmatchedLogs
+              ? `${ignoredUnmatchedRows} row(s) were left unmatched because the DTR identifier did not match an employee.`
+              : `${ignoredUnmatchedRows} row(s) were ignored because the DTR identifier did not match an employee in the manager's assigned departments.`
             : null,
           skippedSummaryRows > 0
             ? `${skippedSummaryRows} attendance daily summary row(s) were skipped because replaceExisting was not enabled.`
@@ -1925,6 +2298,7 @@ async function getManagerAttendanceScope(accountId: string) {
         eq(employees.employeeType, DEFAULT_EMPLOYEE_TYPE),
         isNull(employees.deletedAt),
         isNull(employeesGeneralInfo.deletedAt),
+        currentDepartmentMemberStatusCondition(),
         inArray(employeesGeneralInfo.departmentId, departmentIds)
       )
     );
@@ -1935,9 +2309,51 @@ async function getManagerAttendanceScope(accountId: string) {
   };
 }
 
+async function getManagerOwnedDtrImportBatchIds(
+  accountId: string,
+  payrollPeriodIds?: string[]
+) {
+  const auditRows = await db
+    .select({
+      entityId: adminAuditEvents.entityId,
+      details: adminAuditEvents.details,
+    })
+    .from(adminAuditEvents)
+    .where(
+      and(
+        eq(adminAuditEvents.actorUserId, accountId),
+        eq(adminAuditEvents.entityType, "attendance_import_batch"),
+        eq(adminAuditEvents.action, "attendance.manager_imported"),
+        isNotNull(adminAuditEvents.entityId)
+      )
+    );
+  const payrollPeriodIdSet = payrollPeriodIds
+    ? new Set(payrollPeriodIds)
+    : null;
+  const batchIds = new Set<string>();
+
+  for (const row of auditRows) {
+    if (!row.entityId) continue;
+
+    const details = parseAttendanceImportAuditDetails(row.details);
+    if (
+      payrollPeriodIdSet &&
+      (!details.payrollPeriodId ||
+        !payrollPeriodIdSet.has(details.payrollPeriodId))
+    ) {
+      continue;
+    }
+
+    batchIds.add(row.entityId);
+  }
+
+  return batchIds;
+}
+
 function serializeManagerAttendanceBatch(
   batch: typeof attendanceImportBatches.$inferSelect,
-  scopedMatchedRows: number
+  scopedMatchedRows: number,
+  canViewUnmatchedDiagnostics: boolean
 ) {
   return {
     id: batch.id,
@@ -1950,6 +2366,7 @@ function serializeManagerAttendanceBatch(
     unmatchedRows: batch.unmatchedRows,
     duplicateRows: batch.duplicateRows,
     scopedMatchedRows,
+    canViewUnmatchedDiagnostics,
     notes: batch.notes,
     importedAt: batch.importedAt.toISOString(),
   };
@@ -1999,6 +2416,26 @@ export async function listManagerDtrPayrollPeriodsAction(input?: {
     const batchIds = batchIdsByPeriod.get(row.periodId) ?? new Set<string>();
     batchIds.add(row.batchId);
     batchIdsByPeriod.set(row.periodId, batchIds);
+  }
+  const managerOwnedBatchIds =
+    periodIds.length === 0
+      ? new Set<string>()
+      : await getManagerOwnedDtrImportBatchIds(auth.accountId, periodIds);
+  const managerOwnedBatchRows =
+    managerOwnedBatchIds.size === 0
+      ? []
+      : await db
+          .select({
+            id: attendanceImportBatches.id,
+            payrollPeriodId: attendanceImportBatches.payrollPeriodId,
+          })
+          .from(attendanceImportBatches)
+          .where(inArray(attendanceImportBatches.id, [...managerOwnedBatchIds]));
+  for (const row of managerOwnedBatchRows) {
+    if (!row.payrollPeriodId) continue;
+    const batchIds = batchIdsByPeriod.get(row.payrollPeriodId) ?? new Set<string>();
+    batchIds.add(row.id);
+    batchIdsByPeriod.set(row.payrollPeriodId, batchIds);
   }
 
   const today = new Date().toISOString().slice(0, 10);
@@ -2062,7 +2499,13 @@ export async function listManagerDtrImportBatchesAction(payrollPeriodId: string)
     );
   }
 
-  const batchIds = [...scopedRowCountByBatchId.keys()];
+  const managerOwnedBatchIds = await getManagerOwnedDtrImportBatchIds(
+    auth.accountId,
+    [payrollPeriodId]
+  );
+  const batchIds = [
+    ...new Set([...scopedRowCountByBatchId.keys(), ...managerOwnedBatchIds]),
+  ];
   if (batchIds.length === 0) return [];
 
   const batchRows = await db
@@ -2074,7 +2517,8 @@ export async function listManagerDtrImportBatchesAction(payrollPeriodId: string)
   return batchRows.map((batch) =>
     serializeManagerAttendanceBatch(
       batch,
-      scopedRowCountByBatchId.get(batch.id) ?? 0
+      scopedRowCountByBatchId.get(batch.id) ?? 0,
+      managerOwnedBatchIds.has(batch.id)
     )
   );
 }
@@ -2103,7 +2547,7 @@ export async function importManagerDtrLogsAction(params: AttendanceImportParams)
         .sort((left, right) => left - right)
         .join(",")}`,
       employeeIds: scope.employeeIds,
-      persistUnmatchedLogs: false,
+      persistUnmatchedLogs: true,
       replaceExisting: false,
       revalidatePaths: ["/managerDtrFiles", "/payroll"],
       auditAction: "attendance.manager_imported",
@@ -2115,8 +2559,73 @@ export async function importManagerDtrLogsAction(params: AttendanceImportParams)
   );
 
   return batch
-    ? serializeManagerAttendanceBatch(batch, batch.matchedRows)
+    ? serializeManagerAttendanceBatch(batch, batch.matchedRows, true)
     : null;
+}
+
+export async function refreshManagerAttendancePeriodSummariesAction(
+  payrollPeriodId: string
+) {
+  const auth = await requireManager();
+  const scope = await getManagerAttendanceScope(auth.accountId);
+
+  if (!payrollPeriodId) {
+    throw new Error("Select a payroll period before refreshing DTR summaries.");
+  }
+  if (scope.employeeIds.length === 0) {
+    throw new Error("Manager account is not assigned to a department.");
+  }
+
+  return refreshAttendancePeriodSummariesForScope({
+    actorUserId: auth.accountId,
+    payrollPeriodId,
+    employeeIds: scope.employeeIds,
+    revalidatePaths: ["/managerDtrFiles", "/payroll"],
+    auditAction: "attendance.manager_summaries_refreshed",
+    auditDetails: {
+      managerAccountId: auth.accountId,
+      departmentIds: scope.departmentIds,
+    },
+  });
+}
+
+export async function recomputeManagerDtrPayrollAction(payrollPeriodId: string) {
+  const auth = await requireManager();
+  const scope = await getManagerAttendanceScope(auth.accountId);
+
+  if (!payrollPeriodId) {
+    throw new Error("Select a payroll period before recomputing payroll.");
+  }
+  if (scope.employeeIds.length === 0) {
+    throw new Error("Manager account is not assigned to a department.");
+  }
+
+  const payrollPeriod = await db.query.payrollPeriods.findFirst({
+    where: eq(payrollPeriods.id, payrollPeriodId),
+  });
+  if (!payrollPeriod) {
+    throw new Error("Payroll period not found.");
+  }
+
+  await db.transaction(async (tx) => {
+    await markPayrollPeriodRunsStale({
+      tx,
+      payrollPeriodId,
+      payrollPeriodCode: payrollPeriod.code,
+      actorUserId: auth.accountId,
+      notes: "Marked stale because manager DTR updates triggered payroll recompute.",
+    });
+  });
+
+  const run = await createOrRecomputePayrollRun(payrollPeriodId, auth.accountId);
+  revalidatePath("/payroll");
+  revalidatePath("/managerDtrFiles");
+
+  return {
+    payrollRunId: run?.id ?? null,
+    payrollRunNumber: run?.runNumber ?? null,
+    payrollPeriodCode: payrollPeriod.code,
+  };
 }
 
 export async function getManagerAttendancePeriodDtrAction(payrollPeriodId: string) {
@@ -2143,12 +2652,64 @@ export async function getManagerAttendanceDtrHeldRowsAction(periodId: string) {
   return loadAttendanceDtrHeldRows(periodId, scope.employeeIds);
 }
 
+export async function getManagerAttendanceImportBatchUnmatchedDiagnosticsAction(
+  batchId: string
+): Promise<AttendanceImportBatchDiagnosticsView> {
+  const auth = await requireManager({ redirectTo: "/" });
+  const scope = await getManagerAttendanceScope(auth.accountId);
+  const batch = await db.query.attendanceImportBatches.findFirst({
+    where: eq(attendanceImportBatches.id, batchId),
+  });
+
+  if (!batch) {
+    throw new Error("Attendance import batch not found.");
+  }
+
+  const managerOwnedBatchIds = await getManagerOwnedDtrImportBatchIds(
+    auth.accountId,
+    batch.payrollPeriodId ? [batch.payrollPeriodId] : undefined
+  );
+  const managerOwnsBatch = managerOwnedBatchIds.has(batch.id);
+  const branchVisibleRows =
+    scope.employeeIds.length === 0
+      ? []
+      : await db
+          .select({ id: attendanceRawLogs.id })
+          .from(attendanceRawLogs)
+          .where(
+            and(
+              eq(attendanceRawLogs.batchId, batch.id),
+              isNotNull(attendanceRawLogs.employeeId),
+              inArray(attendanceRawLogs.employeeId, scope.employeeIds)
+            )
+          )
+          .limit(1);
+
+  if (!managerOwnsBatch && branchVisibleRows.length === 0) {
+    throw new Error("Attendance import batch not found.");
+  }
+
+  if (!managerOwnsBatch) {
+    return {
+      batchId: batch.id,
+      totalUnmatchedRows: 0,
+      groups: [],
+    };
+  }
+
+  return buildAttendanceImportBatchUnmatchedDiagnostics({
+    batchId: batch.id,
+    managerEmployeeIds: scope.employeeIds,
+  });
+}
+
 export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
   const auth = await requireManager();
   const parsed = attendanceDtrHoldApprovalSchema.parse(input);
   const attendanceDates = [...new Set(parsed.attendanceDates)].sort((left, right) =>
     left.localeCompare(right)
   );
+  const targetPayrollPeriodId = parsed.targetPayrollPeriodId;
 
   const scope = await getManagerAttendanceScope(auth.accountId);
   if (!scope.employeeIds.includes(parsed.employeeId)) {
@@ -2181,10 +2742,11 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
     0
   );
   const submissionTotals: AttendanceHoldApprovalMinutes = {
-    workedMinutes: Math.max(
-      0,
-      intendedWorkedMinutes - parsed.lateMinutes - parsed.undertimeMinutes
-    ),
+    workedMinutes: computeAttendanceHoldWorkedMinutes({
+      intendedWorkedMinutes,
+      lateMinutes: parsed.lateMinutes,
+      undertimeMinutes: parsed.undertimeMinutes,
+    }),
     lateMinutes: parsed.lateMinutes,
     undertimeMinutes: parsed.undertimeMinutes,
     overtimeMinutes: parsed.overtimeMinutes,
@@ -2196,12 +2758,17 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
         where: eq(payrollPeriods.id, parsed.sourcePayrollPeriodId),
       }),
       tx.query.payrollPeriods.findFirst({
-        where: eq(payrollPeriods.id, parsed.targetPayrollPeriodId),
+        where: eq(payrollPeriods.id, targetPayrollPeriodId),
       }),
     ]);
 
     if (!sourcePeriod) throw new Error("Source payroll period not found.");
     if (!targetPeriod) throw new Error("Target payroll period not found.");
+    if (targetPeriod.startDate < sourcePeriod.startDate) {
+      throw new Error(
+        "Target payroll period must be the selected period or a future period."
+      );
+    }
 
     const outsideSourcePeriod = attendanceDates.find(
       (attendanceDate) =>
@@ -2226,10 +2793,21 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
         )
       );
 
-    if (previousSubmissions.some((submission) => submission.status === "Approved")) {
-      throw new Error("Approved held DTR rows can no longer be edited by a manager.");
-    }
+    const affectedTargetPeriods = new Map<
+      string,
+      {
+        payrollPeriodCode: string;
+        refreshableExceptionRowIds: string[];
+        generatedAccountCodeRowCount: number;
+        staleRunCount: number;
+      }
+    >();
+    const affectedTargetPeriodIds = new Set([
+      ...previousSubmissions.map((submission) => submission.targetPayrollPeriodId),
+      targetPayrollPeriodId,
+    ]);
 
+    const approvedAt = new Date();
     const splitSubmissions = splitAttendanceHoldApprovalMinutes(
       submissionTotals,
       attendanceDates
@@ -2239,17 +2817,17 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
       .values(
         splitSubmissions.map((submission) => ({
           sourcePayrollPeriodId: parsed.sourcePayrollPeriodId,
-          targetPayrollPeriodId: parsed.targetPayrollPeriodId,
+          targetPayrollPeriodId,
           employeeId: parsed.employeeId,
           attendanceDate: submission.attendanceDate,
-          status: "Pending",
+          status: "Approved",
           workedMinutes: submission.workedMinutes,
           lateMinutes: submission.lateMinutes,
           undertimeMinutes: submission.undertimeMinutes,
           overtimeMinutes: submission.overtimeMinutes,
           notes: parsed.notes ?? null,
-          approvedByUserId: null,
-          approvedAt: null,
+          approvedByUserId: auth.accountId,
+          approvedAt,
         }))
       )
       .onConflictDoUpdate({
@@ -2266,18 +2844,90 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
           undertimeMinutes: sql`excluded.undertime_minutes`,
           overtimeMinutes: sql`excluded.overtime_minutes`,
           notes: sql`excluded.notes`,
-          approvedByUserId: null,
-          approvedAt: null,
+          approvedByUserId: sql`excluded.approved_by_user_id`,
+          approvedAt: sql`excluded.approved_at`,
           updatedAt: new Date(),
         },
       });
+
+    for (const affectedTargetPeriodId of affectedTargetPeriodIds) {
+      const rebuilt = await rebuildHeldDtrExceptionRowsForTargetPeriod({
+        tx,
+        actorUserId: auth.accountId,
+        targetPayrollPeriodId: affectedTargetPeriodId,
+        employeeId: parsed.employeeId,
+      });
+      if (
+        rebuilt.refreshableExceptionRowIds.length === 0 &&
+        rebuilt.generatedAccountCodeRowCount === 0 &&
+        rebuilt.staleRunCount === 0
+      ) {
+        continue;
+      }
+      const current = affectedTargetPeriods.get(affectedTargetPeriodId) ?? {
+        payrollPeriodCode: rebuilt.payrollPeriod.code,
+        refreshableExceptionRowIds: [],
+        generatedAccountCodeRowCount: 0,
+        staleRunCount: 0,
+      };
+      current.refreshableExceptionRowIds.push(
+        ...rebuilt.refreshableExceptionRowIds
+      );
+      current.generatedAccountCodeRowCount +=
+        rebuilt.generatedAccountCodeRowCount;
+      current.staleRunCount += rebuilt.staleRunCount;
+      affectedTargetPeriods.set(affectedTargetPeriodId, current);
+    }
+
+    await recordAdminAuditEvent({
+      actorUserId: auth.accountId,
+      entityType: "attendance_dtr_hold_approval",
+      entityId: `${parsed.sourcePayrollPeriodId}:${parsed.employeeId}`,
+      action: "attendance.manager_dtr_hold.auto_approved",
+      details: {
+        sourcePayrollPeriodId: parsed.sourcePayrollPeriodId,
+        sourcePayrollPeriodCode: sourcePeriod.code,
+        targetPayrollPeriodId,
+        targetPayrollPeriodCode: targetPeriod.code,
+        employeeId: parsed.employeeId,
+        attendanceDates,
+        approvalTotals: submissionTotals,
+        previousSubmissionCount: previousSubmissions.length,
+        affectedTargetPeriods: [...affectedTargetPeriods.entries()].map(
+          ([payrollPeriodId, affected]) => ({
+            payrollPeriodId,
+            ...affected,
+          })
+        ),
+      },
+      database: tx,
+    });
 
     return {
       sourcePayrollPeriodCode: sourcePeriod.code,
       targetPayrollPeriodCode: targetPeriod.code,
       submittedDateCount: attendanceDates.length,
+      affectedTargetPeriods: [...affectedTargetPeriods.entries()].map(
+        ([payrollPeriodId, affected]) => ({
+          payrollPeriodId,
+          ...affected,
+          refreshableExceptionRowIds: [
+            ...new Set(affected.refreshableExceptionRowIds),
+          ],
+        })
+      ),
     };
   });
+
+  for (const affected of result.affectedTargetPeriods) {
+    await refreshManualPayrollAttendanceForEmployees({
+      actorUserId: auth.accountId,
+      payrollPeriodId: affected.payrollPeriodId,
+      employeeIds: [parsed.employeeId],
+      refreshableExceptionRowIds: affected.refreshableExceptionRowIds,
+      refreshHeldDtrLines: true,
+    });
+  }
 
   revalidatePath("/managerDtrFiles");
   revalidatePath("/payroll");
@@ -2285,8 +2935,170 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
   return result;
 }
 
-export async function revertAttendanceImportBatchAction(batchId: string) {
-  const actor = await requireAdminActor();
+export async function saveManagerAttendanceDtrDayMetricOverrideAction(
+  input: unknown
+) {
+  const auth = await requireManager();
+  const parsed = managerAttendanceDtrDayMetricOverrideSchema.parse(input);
+  const scope = await getManagerAttendanceScope(auth.accountId);
+
+  if (!scope.employeeIds.includes(parsed.employeeId)) {
+    throw new Error("Employee is not assigned to one of this manager's departments.");
+  }
+
+  const payrollPeriod = await db.query.payrollPeriods.findFirst({
+    where: eq(payrollPeriods.id, parsed.payrollPeriodId),
+  });
+  if (!payrollPeriod) {
+    throw new Error("Payroll period not found.");
+  }
+
+  if (
+    parsed.attendanceDate < payrollPeriod.startDate ||
+    parsed.attendanceDate > payrollPeriod.endDate
+  ) {
+    throw new Error("Attendance date is outside the selected payroll period.");
+  }
+
+  const summaryRow = await db.query.attendanceDailySummaries.findFirst({
+    where: and(
+      eq(attendanceDailySummaries.employeeId, parsed.employeeId),
+      eq(attendanceDailySummaries.attendanceDate, parsed.attendanceDate)
+    ),
+  });
+  if (!summaryRow) {
+    throw new Error("DTR summary row not found.");
+  }
+
+  const overrideValues = {
+    lateMinutes: parsed.lateMinutes ?? null,
+    undertimeMinutes: parsed.undertimeMinutes ?? null,
+    overtimeMinutes: parsed.overtimeMinutes ?? null,
+  };
+  const isClearing = Object.values(overrideValues).every(
+    (value) => value == null
+  );
+
+  const result = await db.transaction(async (tx) => {
+    const staleRunCount = await markPayrollPeriodRunsStale({
+      tx,
+      payrollPeriodId: payrollPeriod.id,
+      payrollPeriodCode: payrollPeriod.code,
+      actorUserId: auth.accountId,
+      notes: "Marked stale because manager DTR row metric overrides changed.",
+    });
+
+    if (isClearing) {
+      await tx
+        .delete(employeeAttendanceDayMetricOverrides)
+        .where(
+          and(
+            eq(
+              employeeAttendanceDayMetricOverrides.payrollPeriodId,
+              parsed.payrollPeriodId
+            ),
+            eq(employeeAttendanceDayMetricOverrides.employeeId, parsed.employeeId),
+            eq(
+              employeeAttendanceDayMetricOverrides.attendanceDate,
+              parsed.attendanceDate
+            )
+          )
+        );
+    } else {
+      await tx
+        .insert(employeeAttendanceDayMetricOverrides)
+        .values({
+          payrollPeriodId: parsed.payrollPeriodId,
+          employeeId: parsed.employeeId,
+          attendanceDate: parsed.attendanceDate,
+          ...overrideValues,
+        })
+        .onConflictDoUpdate({
+          target: [
+            employeeAttendanceDayMetricOverrides.payrollPeriodId,
+            employeeAttendanceDayMetricOverrides.employeeId,
+            employeeAttendanceDayMetricOverrides.attendanceDate,
+          ],
+          set: {
+            lateMinutes: sql`excluded.late_minutes`,
+            undertimeMinutes: sql`excluded.undertime_minutes`,
+            overtimeMinutes: sql`excluded.overtime_minutes`,
+            updatedAt: new Date(),
+          },
+        });
+    }
+
+    const generatedDtrRows = await syncGeneratedDtrWorkedExceptionRows({
+      tx,
+      payrollPeriod,
+      employeeIds: [parsed.employeeId],
+    });
+
+    await recordAdminAuditEvent({
+      actorUserId: auth.accountId,
+      entityType: "employee_attendance_day_metric_override",
+      entityId: `${parsed.payrollPeriodId}:${parsed.employeeId}:${parsed.attendanceDate}`,
+      action: isClearing
+        ? "attendance.manager_dtr_day_metric_override.cleared"
+        : "attendance.manager_dtr_day_metric_override.updated",
+      details: {
+        payrollPeriodId: parsed.payrollPeriodId,
+        payrollPeriodCode: payrollPeriod.code,
+        employeeId: parsed.employeeId,
+        attendanceDate: parsed.attendanceDate,
+        overrides: overrideValues,
+        departmentIds: scope.departmentIds,
+        generatedAccountCodeRowCount:
+          generatedDtrRows.generatedAccountCodeRowCount,
+        staleRunCount,
+      },
+      database: tx,
+    });
+
+    return {
+      ...generatedDtrRows,
+      staleRunCount,
+    };
+  });
+
+  const manualPayrollRefresh = await refreshManualPayrollAttendanceForEmployees({
+    actorUserId: auth.accountId,
+    payrollPeriodId: parsed.payrollPeriodId,
+    employeeIds: [parsed.employeeId],
+    refreshableExceptionRowIds: result.refreshableExceptionRowIds,
+  });
+
+  revalidatePath("/managerDtrFiles");
+  revalidatePath("/payroll");
+
+  return {
+    payrollPeriodCode: payrollPeriod.code,
+    attendanceDate: parsed.attendanceDate,
+    cleared: isClearing,
+    manualPayrollRefresh,
+    generatedAccountCodeRowCount: result.generatedAccountCodeRowCount,
+    staleRunCount: result.staleRunCount,
+  };
+}
+
+type AttendanceImportBatchRevertRawLog = {
+  id: number;
+  employeeId: string | null;
+  logDate: string;
+};
+
+type AttendanceImportBatchRevertOptions = {
+  actorUserId: string;
+  auditAction: string;
+  auditDetails?: Record<string, unknown>;
+  revalidatePaths: string[];
+  validateRawLogs?: (rawLogRows: AttendanceImportBatchRevertRawLog[]) => void;
+};
+
+async function revertAttendanceImportBatchForActor(
+  batchId: string,
+  options: AttendanceImportBatchRevertOptions
+) {
   const batch = await db.query.attendanceImportBatches.findFirst({
     where: eq(attendanceImportBatches.id, batchId),
   });
@@ -2336,6 +3148,8 @@ export async function revertAttendanceImportBatchAction(batchId: string) {
       })
       .from(attendanceRawLogs)
       .where(eq(attendanceRawLogs.batchId, batch.id));
+
+    options.validateRawLogs?.(rawLogRows);
 
     const deletedSummaries = await tx
       .delete(attendanceDailySummaries)
@@ -2488,7 +3302,7 @@ export async function revertAttendanceImportBatchAction(batchId: string) {
 
       const rebuilt = await rebuildHeldDtrExceptionRowsForTargetPeriod({
         tx,
-        actorUserId: actor.userId,
+        actorUserId: options.actorUserId,
         targetPayrollPeriodId,
         employeeId,
       });
@@ -2530,7 +3344,7 @@ export async function revertAttendanceImportBatchAction(batchId: string) {
           tx,
           payrollPeriodId: payrollPeriod.id,
           payrollPeriodCode: payrollPeriod.code,
-          actorUserId: actor.userId,
+          actorUserId: options.actorUserId,
         })
       : 0;
     const generatedDtrWorkedRows = payrollPeriod
@@ -2569,7 +3383,7 @@ export async function revertAttendanceImportBatchAction(batchId: string) {
 
   if (payrollPeriod) {
     await refreshManualPayrollAttendanceForEmployees({
-      actorUserId: actor.userId,
+      actorUserId: options.actorUserId,
       payrollPeriodId: payrollPeriod.id,
       employeeIds: revertResult.affectedEmployeeIds,
       refreshableExceptionRowIds: revertResult.refreshableExceptionRowIds,
@@ -2577,7 +3391,7 @@ export async function revertAttendanceImportBatchAction(batchId: string) {
   }
   for (const targetPeriod of revertResult.affectedTargetPeriods) {
     await refreshManualPayrollAttendanceForEmployees({
-      actorUserId: actor.userId,
+      actorUserId: options.actorUserId,
       payrollPeriodId: targetPeriod.payrollPeriodId,
       employeeIds: targetPeriod.employeeIds,
       refreshableExceptionRowIds: targetPeriod.refreshableExceptionRowIds,
@@ -2586,10 +3400,10 @@ export async function revertAttendanceImportBatchAction(batchId: string) {
   }
 
   await recordAdminAuditEvent({
-    actorUserId: actor.userId,
+    actorUserId: options.actorUserId,
     entityType: "attendance_import_batch",
     entityId: batch.id,
-    action: "attendance.import_reverted",
+    action: options.auditAction,
     details: {
       sourceFileName: batch.sourceFileName,
       payrollPeriodId: batch.payrollPeriodId,
@@ -2603,16 +3417,199 @@ export async function revertAttendanceImportBatchAction(batchId: string) {
       deletedHoldApprovalCount: result.deletedHoldApprovalCount,
       affectedTargetPeriods: result.affectedTargetPeriods,
       targetStaleRunCount: result.targetStaleRunCount,
+      ...options.auditDetails,
     },
   });
 
-  revalidatePath("/payroll");
+  for (const path of options.revalidatePaths) {
+    revalidatePath(path);
+  }
   return result;
 }
 
-export async function refreshAttendancePeriodSummariesAction(payrollPeriodId: string) {
+export async function revertAttendanceImportBatchAction(batchId: string) {
   const actor = await requireAdminActor();
-  const sourceData = await loadAttendancePeriodSourceData(db, payrollPeriodId);
+
+  return revertAttendanceImportBatchForActor(batchId, {
+    actorUserId: actor.userId,
+    auditAction: "attendance.import_reverted",
+    revalidatePaths: ["/payroll"],
+  });
+}
+
+export async function revertManagerDtrImportBatchAction(batchId: string) {
+  const auth = await requireManager();
+  const scope = await getManagerAttendanceScope(auth.accountId);
+
+  if (scope.employeeIds.length === 0) {
+    throw new Error("Manager account is not assigned to a department.");
+  }
+
+  const allowedEmployeeIds = new Set(scope.employeeIds);
+
+  return revertAttendanceImportBatchForActor(batchId, {
+    actorUserId: auth.accountId,
+    auditAction: "attendance.manager_import_removed",
+    auditDetails: {
+      managerAccountId: auth.accountId,
+      departmentIds: scope.departmentIds,
+    },
+    revalidatePaths: ["/managerDtrFiles", "/payroll"],
+    validateRawLogs(rawLogRows) {
+      if (rawLogRows.length === 0) {
+        throw new Error("No removable DTR logs were found for this import.");
+      }
+
+      const hasOutOfScopeRow = rawLogRows.some(
+        (row) => !row.employeeId || !allowedEmployeeIds.has(row.employeeId)
+      );
+
+      if (hasOutOfScopeRow) {
+        throw new Error(
+          "This DTR import includes rows outside your assigned departments. Ask Admin to remove it."
+        );
+      }
+    },
+  });
+}
+
+function isAttendanceSummaryHeld(summary: AttendanceHoldRefreshSummaryRow) {
+  const flags = normalizeAttendanceDtrAnomalyFlags(summary.anomalyFlags ?? null);
+  const hasHoldFlag =
+    flags.includes("ODD_PUNCH_COUNT") || flags.includes("MISSING_OUT");
+  return hasHoldFlag && !flags.includes("DOUBLE_PUNCH");
+}
+
+function getAttendanceHoldRefreshMinutes(
+  summary: AttendanceHoldRefreshSummaryRow | null | undefined
+): AttendanceHoldApprovalMinutes {
+  const scheduledMinutes = summary?.scheduledMinutes ?? 0;
+  const intendedWorkedMinutes =
+    scheduledMinutes > 0 ? scheduledMinutes : FALLBACK_HELD_DTR_WORKED_MINUTES;
+  const lateMinutes = summary?.lateMinutes ?? 0;
+  const undertimeMinutes = summary?.undertimeMinutes ?? 0;
+
+  return {
+    workedMinutes: computeAttendanceHoldWorkedMinutes({
+      intendedWorkedMinutes,
+      lateMinutes,
+      undertimeMinutes,
+    }),
+    lateMinutes,
+    undertimeMinutes,
+    overtimeMinutes: summary?.overtimeMinutes ?? 0,
+  };
+}
+
+async function refreshUnapprovedAttendanceHoldApprovals(args: {
+  tx: AttendanceTransaction;
+  payrollPeriod: typeof payrollPeriods.$inferSelect;
+  employeeIds: string[];
+  summaries: AttendanceHoldRefreshSummaryRow[];
+  dayStatusOverrides: Array<typeof employeeAttendanceDayStatusOverrides.$inferSelect>;
+}) {
+  const employeeIds = [...new Set(args.employeeIds)];
+  if (employeeIds.length === 0) {
+    return {
+      refreshedHoldApprovalCount: 0,
+      deletedHoldApprovalCount: 0,
+      clearedManualHoldOverrideCount: 0,
+    };
+  }
+
+  const summaryByKey = new Map(
+    args.summaries.map((summary) => [
+      `${summary.employeeId}|${summary.attendanceDate}`,
+      summary,
+    ])
+  );
+  const heldKeys = new Set<string>();
+
+  for (const summary of args.summaries) {
+    if (isAttendanceSummaryHeld(summary)) {
+      heldKeys.add(`${summary.employeeId}|${summary.attendanceDate}`);
+    }
+  }
+
+  const unapprovedRows = await args.tx
+    .select()
+    .from(attendanceDtrHoldApprovals)
+    .where(
+      and(
+        eq(attendanceDtrHoldApprovals.sourcePayrollPeriodId, args.payrollPeriod.id),
+        inArray(attendanceDtrHoldApprovals.employeeId, employeeIds),
+        gte(attendanceDtrHoldApprovals.attendanceDate, args.payrollPeriod.startDate),
+        lte(attendanceDtrHoldApprovals.attendanceDate, args.payrollPeriod.endDate),
+        sql`${attendanceDtrHoldApprovals.status} <> 'Approved'`
+      )
+    );
+
+  let refreshedHoldApprovalCount = 0;
+  let deletedHoldApprovalCount = 0;
+  let clearedManualHoldOverrideCount = 0;
+
+  for (const row of unapprovedRows) {
+    const key = `${row.employeeId}|${row.attendanceDate}`;
+
+    if (!heldKeys.has(key)) {
+      await args.tx
+        .delete(attendanceDtrHoldApprovals)
+        .where(eq(attendanceDtrHoldApprovals.id, row.id));
+      deletedHoldApprovalCount += 1;
+      continue;
+    }
+
+    const minutes = getAttendanceHoldRefreshMinutes(summaryByKey.get(key));
+    await args.tx
+      .update(attendanceDtrHoldApprovals)
+      .set({
+        workedMinutes: minutes.workedMinutes,
+        lateMinutes: minutes.lateMinutes,
+        undertimeMinutes: minutes.undertimeMinutes,
+        overtimeMinutes: minutes.overtimeMinutes,
+        updatedAt: new Date(),
+      })
+      .where(eq(attendanceDtrHoldApprovals.id, row.id));
+    refreshedHoldApprovalCount += 1;
+  }
+
+  const staleManualHoldOverrides = args.dayStatusOverrides.filter(
+    (override) =>
+      override.status === "Hold" &&
+      employeeIds.includes(override.employeeId) &&
+      override.attendanceDate >= args.payrollPeriod.startDate &&
+      override.attendanceDate <= args.payrollPeriod.endDate &&
+      !heldKeys.has(`${override.employeeId}|${override.attendanceDate}`)
+  );
+
+  for (const override of staleManualHoldOverrides) {
+    await args.tx
+      .delete(employeeAttendanceDayStatusOverrides)
+      .where(eq(employeeAttendanceDayStatusOverrides.id, override.id));
+    clearedManualHoldOverrideCount += 1;
+  }
+
+  return {
+    refreshedHoldApprovalCount,
+    deletedHoldApprovalCount,
+    clearedManualHoldOverrideCount,
+  };
+}
+
+async function refreshAttendancePeriodSummariesForScope(args: {
+  actorUserId: string;
+  payrollPeriodId: string;
+  employeeIds?: string[];
+  revalidatePaths: string[];
+  auditAction: string;
+  auditDetails?: Record<string, unknown>;
+}) {
+  const sourceData = await loadAttendancePeriodSourceData(
+    db,
+    args.payrollPeriodId,
+    undefined,
+    args.employeeIds ? { employeeIds: args.employeeIds } : undefined
+  );
 
   if (sourceData.rawLogs.length === 0 || sourceData.employeeRecords.length === 0) {
     throw new Error(
@@ -2645,7 +3642,7 @@ export async function refreshAttendancePeriodSummariesAction(payrollPeriodId: st
       tx,
       payrollPeriodId: sourceData.payrollPeriod.id,
       payrollPeriodCode: sourceData.payrollPeriod.code,
-      actorUserId: actor.userId,
+      actorUserId: args.actorUserId,
     });
 
     // Insert corrections first so that auto-approved ones (e.g. Same-Direction
@@ -2715,6 +3712,13 @@ export async function refreshAttendancePeriodSummariesAction(payrollPeriodId: st
       payrollPeriod: sourceData.payrollPeriod,
       employeeIds: matchedEmployeeIds,
     });
+    const holdRefresh = await refreshUnapprovedAttendanceHoldApprovals({
+      tx,
+      payrollPeriod: sourceData.payrollPeriod,
+      employeeIds: matchedEmployeeIds,
+      summaries: summaryComputations,
+      dayStatusOverrides: sourceData.dayStatusOverrides,
+    });
 
     return {
       staleRunCount,
@@ -2724,22 +3728,26 @@ export async function refreshAttendancePeriodSummariesAction(payrollPeriodId: st
         generatedDtrWorkedRows.generatedAccountCodeRowCount,
       refreshableExceptionRowIds:
         generatedDtrWorkedRows.refreshableExceptionRowIds,
+      refreshedHoldApprovalCount: holdRefresh.refreshedHoldApprovalCount,
+      deletedHoldApprovalCount: holdRefresh.deletedHoldApprovalCount,
+      clearedManualHoldOverrideCount:
+        holdRefresh.clearedManualHoldOverrideCount,
     };
   });
   const { staleRunCount } = summaryRefreshResult;
 
   await refreshManualPayrollAttendanceForEmployees({
-    actorUserId: actor.userId,
+    actorUserId: args.actorUserId,
     payrollPeriodId: sourceData.payrollPeriod.id,
     employeeIds: matchedEmployeeIds,
     refreshableExceptionRowIds: summaryRefreshResult.refreshableExceptionRowIds,
   });
 
   await recordAdminAuditEvent({
-    actorUserId: actor.userId,
+    actorUserId: args.actorUserId,
     entityType: "attendance_daily_summaries",
     entityId: sourceData.payrollPeriod.id,
-    action: "attendance.summaries_refreshed",
+    action: args.auditAction,
     details: {
       payrollPeriodId: sourceData.payrollPeriod.id,
       payrollPeriodCode: sourceData.payrollPeriod.code,
@@ -2750,10 +3758,19 @@ export async function refreshAttendancePeriodSummariesAction(payrollPeriodId: st
       generatedAccountCodeRowCount:
         summaryRefreshResult.generatedAccountCodeRowCount,
       staleRunCount,
+      refreshedHoldApprovalCount:
+        summaryRefreshResult.refreshedHoldApprovalCount,
+      deletedHoldApprovalCount: summaryRefreshResult.deletedHoldApprovalCount,
+      clearedManualHoldOverrideCount:
+        summaryRefreshResult.clearedManualHoldOverrideCount,
+      ...args.auditDetails,
     },
   });
 
-  revalidatePath("/payroll");
+  for (const path of args.revalidatePaths) {
+    revalidatePath(path);
+  }
+
   return {
     payrollPeriodCode: sourceData.payrollPeriod.code,
     employeeCount: matchedEmployeeIds.length,
@@ -2763,7 +3780,22 @@ export async function refreshAttendancePeriodSummariesAction(payrollPeriodId: st
     generatedAccountCodeRowCount:
       summaryRefreshResult.generatedAccountCodeRowCount,
     staleRunCount,
+    refreshedHoldApprovalCount:
+      summaryRefreshResult.refreshedHoldApprovalCount,
+    deletedHoldApprovalCount: summaryRefreshResult.deletedHoldApprovalCount,
+    clearedManualHoldOverrideCount:
+      summaryRefreshResult.clearedManualHoldOverrideCount,
   };
+}
+
+export async function refreshAttendancePeriodSummariesAction(payrollPeriodId: string) {
+  const actor = await requireAdminActor();
+  return refreshAttendancePeriodSummariesForScope({
+    actorUserId: actor.userId,
+    payrollPeriodId,
+    revalidatePaths: ["/payroll", "/managerDtrFiles"],
+    auditAction: "attendance.summaries_refreshed",
+  });
 }
 
 function serializeAttendancePayrollPeriod(
@@ -2822,6 +3854,9 @@ async function buildAttendanceDtrEmployees(
       override.dayType as AttendanceDtrDayType,
     ])
   );
+  const metricOverrideByEmployeeDate = buildDtrMetricOverrideByEmployeeDate(
+    sourceData.dayMetricOverrides
+  );
   const calendarDayTypeByDate = new Map(
     [...buildHolidayTypeByDate(sourceData.holidayRows).entries()].map(
       ([attendanceDate, holidayType]) => [
@@ -2868,6 +3903,14 @@ async function buildAttendanceDtrEmployees(
           dayTypeOverrideByEmployeeDate.get(
             `${employee.id}|${row.attendanceDate}`
           ) ?? null;
+        const metricOverride =
+          metricOverrideByEmployeeDate.get(
+            `${employee.id}|${row.attendanceDate}`
+          ) ?? null;
+        const effectiveMetrics = applyAttendanceDtrMetricOverride(
+          row,
+          metricOverride
+        );
 
         return {
           source: row,
@@ -2876,7 +3919,11 @@ async function buildAttendanceDtrEmployees(
           calendarDayType,
           manualDayType,
           effectiveDayType: manualDayType ?? calendarDayType,
-          effective: applyAttendanceDtrEffectiveStatus(row, manualStatus),
+          metricOverride,
+          effective: applyAttendanceDtrEffectiveStatus(
+            effectiveMetrics,
+            manualStatus
+          ),
         };
       });
       const sourceFiles = [
@@ -2914,6 +3961,13 @@ async function buildAttendanceDtrEmployees(
           lateMinutes: row.effective.lateMinutes,
           undertimeMinutes: row.effective.undertimeMinutes,
           overtimeMinutes: row.effective.overtimeMinutes,
+          biometricWorkedMinutes: row.source.workedMinutes,
+          biometricLateMinutes: row.source.lateMinutes,
+          biometricUndertimeMinutes: row.source.undertimeMinutes,
+          biometricOvertimeMinutes: row.source.overtimeMinutes,
+          isLateOverridden: row.metricOverride?.lateMinutes != null,
+          isUndertimeOverridden: row.metricOverride?.undertimeMinutes != null,
+          isOvertimeOverridden: row.metricOverride?.overtimeMinutes != null,
           paidLeaveMinutes: row.effective.paidLeaveMinutes,
           unpaidLeaveMinutes: row.effective.unpaidLeaveMinutes,
           absentMinutes: row.effective.absentMinutes,
@@ -2968,6 +4022,9 @@ function buildAttendanceDtrEmployeesFromPersistedSummaries(
       `${override.employeeId}|${override.attendanceDate}`,
       override.dayType as AttendanceDtrDayType,
     ])
+  );
+  const metricOverrideByEmployeeDate = buildDtrMetricOverrideByEmployeeDate(
+    sourceData.dayMetricOverrides
   );
   const holdApprovalByEmployeeDate = new Map(
     sourceData.holdApprovalRows.map((approval) => [
@@ -3026,7 +4083,18 @@ function buildAttendanceDtrEmployeesFromPersistedSummaries(
           rawPunches,
         };
         const computedStatus = getComputedAttendanceDtrStatus(source);
-        const effective = applyAttendanceDtrEffectiveStatus(source, manualStatus);
+        const metricOverride =
+          metricOverrideByEmployeeDate.get(
+            `${employee.id}|${summary.attendanceDate}`
+          ) ?? null;
+        const effectiveMetrics = applyAttendanceDtrMetricOverride(
+          source,
+          metricOverride
+        );
+        const effective = applyAttendanceDtrEffectiveStatus(
+          effectiveMetrics,
+          manualStatus
+        );
         const holdApproval =
           holdApprovalByEmployeeDate.get(
             `${employee.id}|${summary.attendanceDate}`
@@ -3048,6 +4116,13 @@ function buildAttendanceDtrEmployeesFromPersistedSummaries(
           lateMinutes: effective.lateMinutes,
           undertimeMinutes: effective.undertimeMinutes,
           overtimeMinutes: effective.overtimeMinutes,
+          biometricWorkedMinutes: source.workedMinutes,
+          biometricLateMinutes: source.lateMinutes,
+          biometricUndertimeMinutes: source.undertimeMinutes,
+          biometricOvertimeMinutes: source.overtimeMinutes,
+          isLateOverridden: metricOverride?.lateMinutes != null,
+          isUndertimeOverridden: metricOverride?.undertimeMinutes != null,
+          isOvertimeOverridden: metricOverride?.overtimeMinutes != null,
           paidLeaveMinutes: effective.paidLeaveMinutes,
           unpaidLeaveMinutes: effective.unpaidLeaveMinutes,
           absentMinutes: effective.absentMinutes,
@@ -3133,6 +4208,29 @@ export async function getAttendancePeriodDtrSummaryAction(
   return {
     payrollPeriod: serializeAttendancePayrollPeriod(sourceData.payrollPeriod),
     employees: employeesForView.map(toAttendanceDtrSummary),
+  };
+}
+
+export async function getAttendancePeriodBundleAction(
+  payrollPeriodId: string
+): Promise<{
+  summary: AttendanceDtrSummaryView;
+  heldRows: AttendanceDtrHeldRowsView;
+}> {
+  await requireAdminActor();
+  const [sourceData, heldRows] = await Promise.all([
+    loadAttendancePeriodPersistedSummarySourceData(db, payrollPeriodId),
+    loadAttendanceDtrHeldRows(payrollPeriodId),
+  ]);
+  const employeesForView =
+    buildAttendanceDtrEmployeesFromPersistedSummaries(sourceData);
+
+  return {
+    summary: {
+      payrollPeriod: serializeAttendancePayrollPeriod(sourceData.payrollPeriod),
+      employees: employeesForView.map(toAttendanceDtrSummary),
+    },
+    heldRows,
   };
 }
 
@@ -3286,6 +4384,7 @@ const attendanceDtrHoldApprovalSchema = z.object({
   lateMinutes: z.number().int().min(0),
   undertimeMinutes: z.number().int().min(0),
   overtimeMinutes: z.number().int().min(0),
+  workedManuallyEdited: z.boolean().optional(),
   notes: z.string().trim().max(500).optional(),
 });
 
@@ -3365,6 +4464,17 @@ type AttendanceHoldApprovalMinutes = {
   overtimeMinutes: number;
 };
 
+type AttendanceHoldRefreshSummaryRow = Pick<
+  typeof attendanceDailySummaries.$inferInsert,
+  | "employeeId"
+  | "attendanceDate"
+  | "anomalyFlags"
+  | "scheduledMinutes"
+  | "lateMinutes"
+  | "undertimeMinutes"
+  | "overtimeMinutes"
+>;
+
 type GeneratedDtrAccountCodeRow = typeof accountCode.$inferSelect;
 type GeneratedDtrExceptionRowInsert =
   typeof employeePayrollExceptionRows.$inferInsert;
@@ -3416,6 +4526,8 @@ const EMPTY_GENERATED_DTR_EXCEPTION_ROW_SYNC: GeneratedDtrExceptionRowSyncResult
   generatedAccountCodeRowCount: 0,
   refreshableExceptionRowIds: [],
 };
+
+const FALLBACK_HELD_DTR_WORKED_MINUTES = 8 * 60;
 
 function normalizeGeneratedDtrAccountText(value: string | null | undefined) {
   return value?.trim().toLowerCase() ?? "";
@@ -4238,7 +5350,9 @@ function buildGeneratedDtrExceptionRows(args: {
 
   const lateMinutes = Math.max(
     0,
-    Math.round(args.overrides.lateMinutes ?? args.computed.lateMinutes)
+    computePayrollTardinessMinutes(
+      args.overrides.lateMinutes ?? args.computed.lateMinutes
+    )
   );
   if (lateMinutes > 0) {
     const account = getGeneratedDtrAccountCode({
@@ -4344,6 +5458,7 @@ async function replaceGeneratedDtrExceptionRowsForEmployee(args: {
     holidayRows,
     summaryRows,
     dayStatusOverrideRows,
+    dayMetricOverrideRows,
     dayTypeOverrideRows,
     branchOverrideRows,
     employeeGeneralInfoRow,
@@ -4377,6 +5492,17 @@ async function replaceGeneratedDtrExceptionRowsForEmployee(args: {
           eq(employeeAttendanceDayStatusOverrides.employeeId, args.employeeId),
           gte(employeeAttendanceDayStatusOverrides.attendanceDate, payrollPeriod.startDate),
           lte(employeeAttendanceDayStatusOverrides.attendanceDate, payrollPeriod.endDate)
+          )
+      ),
+    args.tx
+      .select()
+      .from(employeeAttendanceDayMetricOverrides)
+      .where(
+        and(
+          eq(employeeAttendanceDayMetricOverrides.payrollPeriodId, args.payrollPeriodId),
+          eq(employeeAttendanceDayMetricOverrides.employeeId, args.employeeId),
+          gte(employeeAttendanceDayMetricOverrides.attendanceDate, payrollPeriod.startDate),
+          lte(employeeAttendanceDayMetricOverrides.attendanceDate, payrollPeriod.endDate)
         )
       ),
     args.tx
@@ -4415,9 +5541,15 @@ async function replaceGeneratedDtrExceptionRowsForEmployee(args: {
       override.dayType as AttendanceDtrDayType,
     ])
   );
+  const metricOverrideByDate = new Map(
+    dayMetricOverrideRows.map((override) => [override.attendanceDate, override])
+  );
   const effectiveRows = summaryRows.map((row) =>
     applyAttendanceDtrEffectiveStatus(
-      row,
+      applyAttendanceDtrMetricOverride(
+        row,
+        metricOverrideByDate.get(row.attendanceDate) ?? null
+      ),
       statusOverrideByDate.get(row.attendanceDate) ?? null
     )
   );
@@ -4596,6 +5728,23 @@ async function syncGeneratedDtrWorkedExceptionRows(args: {
         )
       )
     );
+  const dayMetricOverrideRows = await args.tx
+    .select()
+    .from(employeeAttendanceDayMetricOverrides)
+    .where(
+      and(
+        eq(employeeAttendanceDayMetricOverrides.payrollPeriodId, args.payrollPeriod.id),
+        inArray(employeeAttendanceDayMetricOverrides.employeeId, employeeIds),
+        gte(
+          employeeAttendanceDayMetricOverrides.attendanceDate,
+          args.payrollPeriod.startDate
+        ),
+        lte(
+          employeeAttendanceDayMetricOverrides.attendanceDate,
+          args.payrollPeriod.endDate
+        )
+      )
+    );
   const accountRows = await args.tx
     .select()
     .from(accountCode)
@@ -4704,12 +5853,20 @@ async function syncGeneratedDtrWorkedExceptionRows(args: {
       override.dayType as AttendanceDtrDayType,
     ])
   );
+  const metricOverrideByEmployeeDate = buildDtrMetricOverrideByEmployeeDate(
+    dayMetricOverrideRows
+  );
   const generatedRows = employeeIds.flatMap((employeeId) => {
     const periodOverride = periodOverrideByEmployeeId.get(employeeId) ?? null;
     const effectiveRows = (summaryRowsByEmployeeId.get(employeeId) ?? []).map(
       (row) =>
         applyAttendanceDtrEffectiveStatus(
-          row,
+          applyAttendanceDtrMetricOverride(
+            row,
+            metricOverrideByEmployeeDate.get(
+              `${employeeId}|${row.attendanceDate}`
+            ) ?? null
+          ),
           statusOverrideByEmployeeDate.get(`${employeeId}|${row.attendanceDate}`) ??
             null
         )
@@ -5157,8 +6314,18 @@ async function rebuildHeldDtrExceptionRowsForTargetPeriod(args: {
   );
   const accountBySource = await ensureHeldDtrAccountCodes(args.tx);
   const heldRows: GeneratedDtrExceptionRowInsert[] = [];
+  const heldLatePenaltyMinutes = computeAccumulatedLatePenaltyMinutes(
+    totals.lateMinutes
+  );
+  const heldPayrollTardinessMinutes = computePayrollTardinessMinutes(
+    totals.lateMinutes
+  );
+  const heldWorkedMinutes = Math.max(
+    0,
+    totals.workedMinutes - heldLatePenaltyMinutes
+  );
 
-  if (totals.workedMinutes > 0) {
+  if (heldWorkedMinutes > 0) {
     heldRows.push(
       createHeldDtrExceptionRow({
         payrollPeriodId: args.targetPayrollPeriodId,
@@ -5166,12 +6333,12 @@ async function rebuildHeldDtrExceptionRowsForTargetPeriod(args: {
         attendanceDate: payrollPeriod.startDate,
         source: "DTR_HOLD_WORKED",
         account: accountBySource.get("DTR_HOLD_WORKED")!,
-        quantityMinutes: totals.workedMinutes,
+        quantityMinutes: heldWorkedMinutes,
       })
     );
   }
 
-  if (totals.lateMinutes > 0) {
+  if (heldPayrollTardinessMinutes > 0) {
     heldRows.push(
       createHeldDtrExceptionRow({
         payrollPeriodId: args.targetPayrollPeriodId,
@@ -5179,7 +6346,7 @@ async function rebuildHeldDtrExceptionRowsForTargetPeriod(args: {
         attendanceDate: payrollPeriod.startDate,
         source: "DTR_HOLD_TARDINESS",
         account: accountBySource.get("DTR_HOLD_TARDINESS")!,
-        quantityMinutes: totals.lateMinutes,
+        quantityMinutes: heldPayrollTardinessMinutes,
       })
     );
   }
@@ -5477,6 +6644,15 @@ const attendanceDtrDayOverridesSchema = z.object({
       })
     )
     .min(1),
+});
+
+const managerAttendanceDtrDayMetricOverrideSchema = z.object({
+  payrollPeriodId: z.string().uuid(),
+  employeeId: z.string().uuid(),
+  attendanceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  lateMinutes: z.number().int().min(0).nullable().optional(),
+  undertimeMinutes: z.number().int().min(0).nullable().optional(),
+  overtimeMinutes: z.number().int().min(0).nullable().optional(),
 });
 
 export async function saveAttendanceDtrPeriodOverrideAction(input: unknown) {
@@ -5780,12 +6956,7 @@ export async function approveAttendanceDtrHoldRowsAction(input: unknown) {
   const attendanceDates = [...new Set(parsed.attendanceDates)].sort((left, right) =>
     left.localeCompare(right)
   );
-  const approvalTotals: AttendanceHoldApprovalMinutes = {
-    workedMinutes: parsed.workedMinutes,
-    lateMinutes: parsed.lateMinutes,
-    undertimeMinutes: parsed.undertimeMinutes,
-    overtimeMinutes: parsed.overtimeMinutes,
-  };
+  const targetPayrollPeriodId = parsed.targetPayrollPeriodId;
 
   const result = await db.transaction(async (tx) => {
     const [sourcePeriod, targetPeriod] = await Promise.all([
@@ -5793,12 +6964,17 @@ export async function approveAttendanceDtrHoldRowsAction(input: unknown) {
         where: eq(payrollPeriods.id, parsed.sourcePayrollPeriodId),
       }),
       tx.query.payrollPeriods.findFirst({
-        where: eq(payrollPeriods.id, parsed.targetPayrollPeriodId),
+        where: eq(payrollPeriods.id, targetPayrollPeriodId),
       }),
     ]);
 
     if (!sourcePeriod) throw new Error("Source payroll period not found.");
     if (!targetPeriod) throw new Error("Target payroll period not found.");
+    if (targetPeriod.startDate < sourcePeriod.startDate) {
+      throw new Error(
+        "Target payroll period must be the selected period or a future period."
+      );
+    }
 
     const outsideSourcePeriod = attendanceDates.find(
       (attendanceDate) =>
@@ -5874,6 +7050,33 @@ export async function approveAttendanceDtrHoldRowsAction(input: unknown) {
       throw new Error("One or more selected dates are no longer held.");
     }
 
+    const summaryByDate = new Map(
+      summaryRows.map((summary) => [summary.attendanceDate, summary])
+    );
+    const intendedWorkedMinutes = attendanceDates.reduce((total, attendanceDate) => {
+      const summary = summaryByDate.get(attendanceDate);
+      const scheduledMinutes = summary?.scheduledMinutes ?? 0;
+      return (
+        total +
+        (scheduledMinutes > 0
+          ? scheduledMinutes
+          : FALLBACK_HELD_DTR_WORKED_MINUTES)
+      );
+    }, 0);
+    const approvalTotals: AttendanceHoldApprovalMinutes = {
+      workedMinutes:
+        parsed.workedManuallyEdited === true
+          ? parsed.workedMinutes
+          : computeAttendanceHoldWorkedMinutes({
+              intendedWorkedMinutes,
+              lateMinutes: parsed.lateMinutes,
+              undertimeMinutes: parsed.undertimeMinutes,
+            }),
+      lateMinutes: parsed.lateMinutes,
+      undertimeMinutes: parsed.undertimeMinutes,
+      overtimeMinutes: parsed.overtimeMinutes,
+    };
+
     const affectedTargetPeriods = new Map<
       string,
       {
@@ -5885,7 +7088,7 @@ export async function approveAttendanceDtrHoldRowsAction(input: unknown) {
     >();
     const affectedTargetPeriodIds = new Set([
       ...previousApprovals.map((approval) => approval.targetPayrollPeriodId),
-      parsed.targetPayrollPeriodId,
+      targetPayrollPeriodId,
     ]);
 
     const approvedAt = new Date();
@@ -5898,7 +7101,7 @@ export async function approveAttendanceDtrHoldRowsAction(input: unknown) {
       .values(
         splitApprovals.map((approval) => ({
           sourcePayrollPeriodId: parsed.sourcePayrollPeriodId,
-          targetPayrollPeriodId: parsed.targetPayrollPeriodId,
+          targetPayrollPeriodId,
           employeeId: parsed.employeeId,
           attendanceDate: approval.attendanceDate,
           status: "Approved",
@@ -5968,7 +7171,7 @@ export async function approveAttendanceDtrHoldRowsAction(input: unknown) {
       details: {
         sourcePayrollPeriodId: parsed.sourcePayrollPeriodId,
         sourcePayrollPeriodCode: sourcePeriod.code,
-        targetPayrollPeriodId: parsed.targetPayrollPeriodId,
+        targetPayrollPeriodId,
         targetPayrollPeriodCode: targetPeriod.code,
         employeeId: parsed.employeeId,
         attendanceDates,
@@ -6422,83 +7625,28 @@ export async function getAttendanceImportBatchUnmatchedDiagnosticsAction(
     throw new Error("Attendance import batch not found.");
   }
 
-  const rows = await db
+  const [managerAuditRow] = await db
     .select({
-      id: attendanceRawLogs.id,
-      employeeNo: attendanceRawLogs.employeeNo,
-      sourceLine: attendanceRawLogs.sourceLine,
-      loggedAt: attendanceRawLogs.loggedAt,
-      logDate: attendanceRawLogs.logDate,
-      logTime: attendanceRawLogs.logTime,
-      deviceId: attendanceRawLogs.deviceId,
-      siteCode: attendanceRawLogs.siteCode,
-      rawText: attendanceRawLogs.rawText,
+      details: adminAuditEvents.details,
     })
-    .from(attendanceRawLogs)
+    .from(adminAuditEvents)
     .where(
       and(
-        eq(attendanceRawLogs.batchId, batch.id),
-        isNull(attendanceRawLogs.employeeId)
+        eq(adminAuditEvents.entityType, "attendance_import_batch"),
+        eq(adminAuditEvents.entityId, batch.id),
+        eq(adminAuditEvents.action, "attendance.manager_imported")
       )
     )
-    .orderBy(
-      asc(attendanceRawLogs.employeeNo),
-      asc(attendanceRawLogs.logDate),
-      asc(attendanceRawLogs.logTime),
-      asc(attendanceRawLogs.id)
-    );
+    .orderBy(desc(adminAuditEvents.createdAt))
+    .limit(1);
+  const managerAuditDetails = parseAttendanceImportAuditDetails(
+    managerAuditRow?.details ?? null
+  );
 
-  const groupedRows = new Map<
-    string,
-    AttendanceImportBatchDiagnosticsView["groups"][number]["rows"]
-  >();
-
-  for (const row of rows) {
-    const currentRows = groupedRows.get(row.employeeNo) ?? [];
-    currentRows.push({
-      id: row.id,
-      employeeNo: row.employeeNo,
-      sourceLine: row.sourceLine ?? null,
-      loggedAt: row.loggedAt.toISOString(),
-      logDate: row.logDate,
-      logTime: row.logTime,
-      deviceId: row.deviceId ?? null,
-      siteCode: row.siteCode ?? null,
-      rawText: row.rawText ?? null,
-    });
-    groupedRows.set(row.employeeNo, currentRows);
-  }
-
-  const groups = [...groupedRows.entries()]
-    .map(([employeeNo, groupRows]) => {
-      const dates = groupRows.map((row) => row.logDate).sort();
-      const sourceLines = groupRows
-        .map((row) => row.sourceLine)
-        .filter((sourceLine): sourceLine is number => sourceLine != null)
-        .sort((left, right) => left - right);
-
-      return {
-        employeeNo,
-        rowCount: groupRows.length,
-        startDate: dates[0] ?? "-",
-        endDate: dates[dates.length - 1] ?? "-",
-        firstSourceLine: sourceLines[0] ?? null,
-        lastSourceLine: sourceLines[sourceLines.length - 1] ?? null,
-        sampleRawText: groupRows.find((row) => row.rawText)?.rawText ?? null,
-        rows: groupRows,
-      };
-    })
-    .sort((left, right) => {
-      const countComparison = right.rowCount - left.rowCount;
-      if (countComparison !== 0) return countComparison;
-      return left.employeeNo.localeCompare(right.employeeNo);
-    });
-
-  return {
+  return buildAttendanceImportBatchUnmatchedDiagnostics({
     batchId: batch.id,
-    totalUnmatchedRows: rows.length,
-    groups,
-  };
+    managerDepartmentIds: managerAuditDetails.departmentIds,
+  });
 }
 
 export async function getAttendanceImportBatch(batchId: string) {
@@ -6628,7 +7776,12 @@ async function loadAttendanceDtrHeldRows(
     summaryRows,
     rawPunchRows,
   ] = await Promise.all([
-    db.select().from(employees).where(inArray(employees.id, allEmployeeIds)),
+    db.query.employees.findMany({
+      where: inArray(employees.id, allEmployeeIds),
+      with: {
+        generalInfo: true,
+      },
+    }),
     loadEmployeeDepartmentMetadataByEmployeeId(allEmployeeIds, db),
     db
       .select()
@@ -6724,7 +7877,13 @@ async function loadAttendanceDtrHeldRows(
     ])
   );
 
-  const employeeById = new Map(employeeRows.map((e) => [e.id, e]));
+  const employeeById = new Map(
+    employeeRows
+      .filter((employee) =>
+        isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus)
+      )
+      .map((employee) => [employee.id, employee])
+  );
   const FALLBACK_HELD_DTR_WORKED_MINUTES = 8 * 60;
 
   const rows = allEntries

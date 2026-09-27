@@ -3,7 +3,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Form } from "@/components/ui/form";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { InputWithLabel } from "@/components/inputs/InputWithLabel";
 import { SelectWithLabel } from "@/components/inputs/SelectWithLabel";
@@ -12,9 +19,15 @@ import { DateRangeWithLabel } from "@/components/inputs/DateRangeWithLabel";
 import { TextAreaWithLabel } from "@/components/inputs/TextAreaWithLabel";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { FormActions, FormGrid } from "@/components/layout/page-layout";
 import { differenceInCalendarDays } from "date-fns";
 import { Textarea } from "@/components/ui/textarea";
+import { Check, ChevronDown, Search } from "lucide-react";
 import {
   leaveFormSchema,
   LeaveFormSchemaType,
@@ -32,9 +45,12 @@ import {
 } from "@/app/actions/leaveAction";
 import { useToast } from "@/hooks/use-toast";
 import {
+  formatEmployeeNoDisplay,
   formatEmployeePickerLabel,
+  getEmployeeTypeDisplay,
   sortEmployeesByLastName,
 } from "@/utils/employeeDisplay";
+import { cn } from "@/lib/utils";
 
 interface LeaveFormProps {
   initialData?: LeaveEditPayload | null;
@@ -43,6 +59,7 @@ interface LeaveFormProps {
   onSuccess: () => Promise<void>;
   employees: Employee[];
   leaveTypeOptions: LeaveTypeOption[];
+  initialEmployeeId?: string | null;
 }
 
 type Employee = {
@@ -70,11 +87,140 @@ const createStatusOptions = [
   { id: "Approved", name: "Approved" },
 ] as const;
 
+type EmployeePickerOption = Employee & {
+  name: string;
+};
+
+function matchesSearchTerm(
+  values: Array<string | number | null | undefined>,
+  searchTerm: string
+) {
+  const normalizedSearchTerm = searchTerm.trim().toLowerCase();
+  if (!normalizedSearchTerm) return true;
+
+  return values.some((value) =>
+    String(value ?? "")
+      .toLowerCase()
+      .includes(normalizedSearchTerm)
+  );
+}
+
+function EmployeeSearchPicker({
+  value,
+  employees,
+  onChange,
+}: {
+  value: string | null | undefined;
+  employees: EmployeePickerOption[];
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [employeeSearch, setEmployeeSearch] = useState("");
+
+  useEffect(() => {
+    if (!open) {
+      setEmployeeSearch("");
+    }
+  }, [open]);
+
+  const selectedEmployee =
+    employees.find((employee) => employee.id === value) ?? null;
+  const filteredEmployees = employees.filter((employee) =>
+    matchesSearchTerm(
+      [
+        employee.name,
+        employee.firstName,
+        employee.middleName,
+        employee.lastName,
+        employee.employeeNo,
+        formatEmployeeNoDisplay(employee.employeeNo),
+        getEmployeeTypeDisplay(employee),
+      ],
+      employeeSearch
+    )
+  );
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          className="h-auto min-h-9 w-full min-w-0 justify-between whitespace-normal px-3 py-2 text-left"
+          aria-label="Search employee"
+          aria-expanded={open}
+        >
+          <span className="min-w-0 flex-1">
+            {selectedEmployee ? (
+              <span className="block truncate">{selectedEmployee.name}</span>
+            ) : (
+              <span className="text-muted-foreground">Search employee</span>
+            )}
+          </span>
+          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-[var(--radix-popover-trigger-width)] min-w-[320px] p-0"
+      >
+        <div className="border-b p-2">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={employeeSearch}
+              onChange={(event) => setEmployeeSearch(event.target.value)}
+              placeholder="Search employee or no..."
+              aria-label="Search employees"
+              className="pl-8"
+            />
+          </div>
+        </div>
+        <div className="max-h-72 overflow-auto p-1">
+          {filteredEmployees.map((employee) => {
+            const selected = employee.id === selectedEmployee?.id;
+
+            return (
+              <button
+                key={employee.id}
+                type="button"
+                className="flex w-full items-start gap-2 rounded-sm px-2 py-2 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground"
+                onClick={() => {
+                  onChange(employee.id);
+                  setOpen(false);
+                }}
+              >
+                <Check
+                  className={cn(
+                    "mt-0.5 h-4 w-4 shrink-0",
+                    selected ? "opacity-100" : "opacity-0"
+                  )}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">
+                    {employee.name}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+          {filteredEmployees.length === 0 && (
+            <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+              No employees found.
+            </div>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function LeaveForm({
   initialData,
   onCancelEdit,
   employees,
   leaveTypeOptions,
+  initialEmployeeId = null,
   selectedYear,
   onSuccess,
 }: LeaveFormProps) {
@@ -84,11 +230,15 @@ export function LeaveForm({
   const [overrideInsufficientBalance, setOverrideInsufficientBalance] = useState(false);
   const [overrideReason, setOverrideReason] = useState("");
   const defaultLeaveTypeCode = leaveTypeOptions[0]?.id ?? "";
+  const selectedInitialEmployeeId =
+    initialEmployeeId && employees.some((employee) => employee.id === initialEmployeeId)
+      ? initialEmployeeId
+      : "";
 
   const form = useForm<LeaveFormSchemaType>({
     resolver: zodResolver(leaveFormSchema),
     defaultValues: {
-      employeeId: "",
+      employeeId: selectedInitialEmployeeId,
       dateFiled: new Date().toISOString().split("T")[0],
       leaveStartDate: new Date().toISOString().split("T")[0],
       leaveEndDate: "",
@@ -102,7 +252,7 @@ export function LeaveForm({
 
   const defaultFormValues = useMemo<LeaveFormSchemaType>(
     () => ({
-      employeeId: "",
+      employeeId: selectedInitialEmployeeId,
       dateFiled: new Date().toISOString().split("T")[0],
       leaveStartDate: new Date().toISOString().split("T")[0],
       leaveEndDate: "",
@@ -112,7 +262,7 @@ export function LeaveForm({
       reason: "",
       leaveStatus: "Pending",
     }),
-    [defaultLeaveTypeCode]
+    [defaultLeaveTypeCode, selectedInitialEmployeeId]
   );
 
   const leaveStartDate = form.watch("leaveStartDate");
@@ -343,7 +493,8 @@ export function LeaveForm({
     onCancelEdit();
   };
 
-  const employeeOptions = sortEmployeesByLastName(employees).map((emp) => ({
+  const employeeOptions: EmployeePickerOption[] = sortEmployeesByLastName(employees).map((emp) => ({
+    ...emp,
     id: emp.id,
     name: formatEmployeePickerLabel(emp),
   }));
@@ -353,11 +504,28 @@ export function LeaveForm({
     <Form {...form}>
       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
         <FormGrid columns={2}>
-          <SelectWithLabel
-            fieldTitle="Employee"
-            nameInSchema="employeeId"
+          <FormField
             control={form.control}
-            data={employeeOptions}
+            name="employeeId"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Employee</FormLabel>
+                <FormControl>
+                  <EmployeeSearchPicker
+                    value={field.value}
+                    employees={employeeOptions}
+                    onChange={(nextEmployeeId) => {
+                      form.setValue("employeeId", nextEmployeeId, {
+                        shouldDirty: true,
+                        shouldTouch: true,
+                        shouldValidate: true,
+                      });
+                    }}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
           />
           <DateWithLabel
             fieldTitle="Date Filed"

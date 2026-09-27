@@ -60,6 +60,30 @@ export const saveManualPayrollEntrySchema = z.object({
         month13thEligible: z.boolean().optional(),
         nonTaxable: z.boolean().optional(),
         deminimis: z.boolean().optional(),
+        birTaxCategory: z
+          .enum([
+            "RegularTaxable",
+            "SupplementalTaxable",
+            "ThirteenthMonthOtherBenefits",
+            "DeMinimis",
+            "NonTaxable",
+          ])
+          .nullable()
+          .optional(),
+        birDeMinimisType: z
+          .enum([
+            "MonetizedLeavePrivate",
+            "MedicalCashAllowance",
+            "RiceSubsidy",
+            "UniformClothing",
+            "MedicalBenefits",
+            "LaundryAllowance",
+            "EmployeeAchievementAward",
+            "ChristmasMajorAnniversaryGift",
+            "OvertimeMealAllowance",
+          ])
+          .nullable()
+          .optional(),
         sourceTable: z.string().trim().max(50).optional().nullable(),
         sourceId: z.string().trim().max(50).optional().nullable(),
         sortOrder: z.coerce.number().int().min(0).max(10000).optional(),

@@ -39,6 +39,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -86,6 +87,7 @@ type SalaryAdjustmentTableRow = {
   employeeLabel: string;
   employeeNoDisplay: string;
   previousRate: string;
+  rateDivisor: string;
   department: string;
   position: string;
   customPayrollCode: string;
@@ -148,22 +150,30 @@ function pickDefaultPeriodId(periods: PayrollPeriodOption[]) {
   return periods[periods.length - 1]?.id ?? periods[0]?.id ?? "";
 }
 
-function normalizeDecimalInput(value: string) {
+function normalizeDecimalInput(value: string, maxDecimalPlaces = 4) {
   const normalized = value.replace(/,/g, "").trim();
   if (normalized === "" || normalized === ".") return "";
   if (!/^\d*\.?\d*$/.test(normalized)) return null;
-  if ((normalized.split(".")[1]?.length ?? 0) > 4) return null;
+  if ((normalized.split(".")[1]?.length ?? 0) > maxDecimalPlaces) return null;
   return normalized;
 }
 
-function normalizeComparableRate(value: string) {
-  const normalized = normalizeDecimalInput(value);
+function normalizeComparableDecimal(value: string, maxDecimalPlaces = 4) {
+  const normalized = normalizeDecimalInput(value, maxDecimalPlaces);
   if (normalized == null || normalized === "") return null;
 
   const numericValue = Number(normalized);
   if (!Number.isFinite(numericValue)) return null;
 
-  return numericValue.toFixed(4);
+  return numericValue.toFixed(maxDecimalPlaces);
+}
+
+function normalizeComparableRate(value: string) {
+  return normalizeComparableDecimal(value, 4);
+}
+
+function normalizeComparableMoney(value: string) {
+  return normalizeComparableDecimal(value, 2);
 }
 
 function formatPreviousRate(value: string) {
@@ -185,6 +195,15 @@ function getPreviousRate(row: DailyRateSalaryAdjustmentRow, salaryRateType: Sala
   return salaryRateType === "MonthlyRate"
     ? row.previousMonthlyRate
     : row.previousDailyRate;
+}
+
+function getEffectiveRateDivisor(value: string) {
+  const normalized = normalizeComparableMoney(value);
+  return normalized != null && Number(normalized) > 0 ? normalized : "26.00";
+}
+
+function formatRateDivisor(value: string) {
+  return formatRateDisplay(getEffectiveRateDivisor(value));
 }
 
 function getHistoryRatePair(change: SalaryChangeHistoryRead) {
@@ -230,6 +249,7 @@ export default function SalaryAdjustTable({
     useState<SalaryRateType>("DailyRate");
   const [reason, setReason] = useState("");
   const [rate, setRate] = useState("");
+  const [rateDivisor, setRateDivisor] = useState("");
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [sorting, setSorting] = useState<SortingState>([
     { id: "employee", desc: false },
@@ -243,6 +263,7 @@ export default function SalaryAdjustTable({
   const [voidReason, setVoidReason] = useState("");
   const [isVoidDialogOpen, setIsVoidDialogOpen] = useState(false);
   const [isVoiding, setIsVoiding] = useState(false);
+  const [showVoidedChanges, setShowVoidedChanges] = useState(false);
 
   useEffect(() => {
     if (!periods.some((period) => period.id === selectedPeriodId)) {
@@ -292,18 +313,35 @@ export default function SalaryAdjustTable({
   const selectedRows = eligibleRows.filter((row) =>
     selectedEmployeeIds.has(row.employeeId)
   );
-  const normalizedSharedRate = normalizeComparableRate(rate);
+  const hasRateInput = rate.trim() !== "";
+  const hasRateDivisorInput = rateDivisor.trim() !== "";
+  const normalizedSharedRate = hasRateInput ? normalizeComparableRate(rate) : null;
+  const normalizedSharedRateDivisor = hasRateDivisorInput
+    ? normalizeComparableMoney(rateDivisor)
+    : null;
   const hasInvalidRate =
-    normalizeDecimalInput(rate) == null || rate.trim() === "";
+    hasRateInput && normalizedSharedRate == null;
+  const hasInvalidRateDivisor =
+    hasRateDivisorInput && normalizedSharedRateDivisor == null;
+  const hasInvalidSalaryChangeInput = hasInvalidRate || hasInvalidRateDivisor;
+  const hasSalaryChangeInput = hasRateInput || hasRateDivisorInput;
+  const isRowRateChanged = (row: DailyRateSalaryAdjustmentRow) =>
+    normalizedSharedRate != null &&
+    normalizedSharedRate !== normalizeComparableRate(getPreviousRate(row, salaryRateType));
+  const isRowRateDivisorChanged = (row: DailyRateSalaryAdjustmentRow) =>
+    normalizedSharedRateDivisor != null &&
+    normalizedSharedRateDivisor !== getEffectiveRateDivisor(row.previousRateDivisor);
   const changedSelectedRows = selectedRows.filter(
-    (row) =>
-      normalizedSharedRate !== normalizeComparableRate(getPreviousRate(row, salaryRateType))
+    (row) => isRowRateChanged(row) || isRowRateDivisorChanged(row)
   );
   const allRowsSelected =
     eligibleRows.length > 0 &&
     eligibleRows.every((row) => selectedEmployeeIds.has(row.employeeId));
   const hasUnchangedSelection =
-    selectedRows.length > 0 && !hasInvalidRate && changedSelectedRows.length === 0;
+    selectedRows.length > 0 &&
+    hasSalaryChangeInput &&
+    !hasInvalidSalaryChangeInput &&
+    changedSelectedRows.length === 0;
   const tableData = useMemo(
     () =>
       eligibleRows.map((row) => {
@@ -315,6 +353,7 @@ export default function SalaryAdjustTable({
             ? formatEmployeeNoDisplay(employee.employeeNo)
             : "-",
           previousRate: formatPreviousRate(getPreviousRate(row, salaryRateType)),
+          rateDivisor: formatRateDivisor(row.previousRateDivisor),
           department: employee?.department ?? "-",
           position: employee?.position ?? "-",
           customPayrollCode: employee?.customPayrollCode ?? "-",
@@ -394,6 +433,12 @@ export default function SalaryAdjustTable({
           <SortableHeader column={column} label={`Previous ${rateLabel}`} />
         ),
       }),
+      salaryAdjustmentColumnHelper.accessor("rateDivisor", {
+        id: "rateDivisor",
+        header: ({ column }) => (
+          <SortableHeader column={column} label="Rate Divisor" />
+        ),
+      }),
       salaryAdjustmentColumnHelper.accessor("department", {
         id: "department",
         header: ({ column }) => (
@@ -439,8 +484,11 @@ export default function SalaryAdjustTable({
   });
 
   const visibleHistoryChanges = useMemo(
-    () => allChanges.filter((change) => change.status !== "Canceled"),
-    [allChanges]
+    () =>
+      showVoidedChanges
+        ? allChanges
+        : allChanges.filter((change) => change.status !== "Canceled"),
+    [allChanges, showVoidedChanges]
   );
   const visibleActiveHistoryChangeIds = useMemo(
     () =>
@@ -495,6 +543,7 @@ export default function SalaryAdjustTable({
             employeeId: employee.id,
             previousDailyRate: row?.previousDailyRate ?? "0",
             previousMonthlyRate: row?.previousMonthlyRate ?? "0",
+            previousRateDivisor: row?.previousRateDivisor ?? "0",
           };
         })
       );
@@ -602,16 +651,24 @@ export default function SalaryAdjustTable({
     setRate(value);
   }
 
+  function updateSharedRateDivisor(value: string) {
+    const normalized = normalizeDecimalInput(value, 2);
+    if (normalized == null) return;
+    setRateDivisor(value);
+  }
+
   function handleSalaryRateTypeChange(value: string) {
     setSalaryRateType(value as SalaryRateType);
     setSelectedEmployeeIds(new Set());
     setRate("");
+    setRateDivisor("");
   }
 
   function resetValues() {
     setSelectedEmployeeIds(new Set());
     setReason("");
     setRate("");
+    setRateDivisor("");
   }
 
   async function handleSave() {
@@ -632,26 +689,49 @@ export default function SalaryAdjustTable({
       return;
     }
 
+    if (hasInvalidRateDivisor) {
+      toast.error("Enter a valid Rate Divisor.");
+      return;
+    }
+
     if (changedSelectedRows.length === 0) {
-      toast.info("No salary rates changed.");
+      toast.info("No salary rates or rate divisors changed.");
       return;
     }
 
     try {
       setIsSaving(true);
+      const payloadRows = changedSelectedRows.map((row) => {
+        const payloadRow: {
+          employeeId: string;
+          rate?: string;
+          rateDivisor?: string;
+        } = {
+          employeeId: row.employeeId,
+        };
+
+        if (isRowRateChanged(row)) {
+          payloadRow.rate = rate;
+        }
+
+        if (isRowRateDivisorChanged(row)) {
+          payloadRow.rateDivisor = rateDivisor;
+        }
+
+        return payloadRow;
+      });
+
       const result = await createSalaryRateSalaryChanges({
         payrollPeriodId: selectedPeriod.id,
         salaryRateType,
         reason,
-        rows: changedSelectedRows.map((row) => ({
-          employeeId: row.employeeId,
-          rate,
-        })),
+        rows: payloadRows,
       });
 
       toast.success(`${result.createdCount} salary changes saved.`);
       setReason("");
       setRate("");
+      setRateDivisor("");
       setSelectedEmployeeIds(new Set());
       await Promise.all([loadDailyRateRows(selectedPeriod.id), refreshChanges()]);
     } catch (error) {
@@ -753,7 +833,7 @@ export default function SalaryAdjustTable({
           </div>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-[220px_220px_1fr]">
+        <div className="grid gap-3 md:grid-cols-[220px_220px_220px_1fr]">
           <SelectWithLabel
             fieldTitle="Salary Rate"
             nameInSchema="salaryRateType"
@@ -772,6 +852,16 @@ export default function SalaryAdjustTable({
             />
           </label>
           <label className="space-y-1.5">
+            <span className="text-sm font-medium">Rate Divisor</span>
+            <Input
+              value={rateDivisor}
+              inputMode="decimal"
+              placeholder="26"
+              disabled={isRowsLoading || isSaving}
+              onChange={(event) => updateSharedRateDivisor(event.target.value)}
+            />
+          </label>
+          <label className="space-y-1.5">
             <span className="text-sm font-medium">Reason</span>
             <Textarea
               value={reason}
@@ -785,7 +875,7 @@ export default function SalaryAdjustTable({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="text-sm text-muted-foreground">
             {selectedEmployeeIds.size} selected, {changedSelectedRows.length} changed
-            {hasUnchangedSelection ? " | No salary rates changed" : ""}
+            {hasUnchangedSelection ? " | No salary rates or divisors changed" : ""}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -828,7 +918,7 @@ export default function SalaryAdjustTable({
                 isSaving ||
                 selectedRows.length === 0 ||
                 changedSelectedRows.length === 0 ||
-                hasInvalidRate
+                hasInvalidSalaryChangeInput
               }
               onClick={() => void handleSave()}
             >
@@ -932,8 +1022,18 @@ export default function SalaryAdjustTable({
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-sm text-muted-foreground">
-            {selectedHistoryChanges.length} selected for void/remove
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="text-sm text-muted-foreground">
+              {selectedHistoryChanges.length} selected for void/remove
+            </div>
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Switch
+                checked={showVoidedChanges}
+                onCheckedChange={setShowVoidedChanges}
+                aria-label="Show Void"
+              />
+              <span>Show Void</span>
+            </div>
           </div>
           <Button
             type="button"
@@ -971,6 +1071,7 @@ export default function SalaryAdjustTable({
                 <TableHead>Period</TableHead>
                 <TableHead>Employee No</TableHead>
                 <TableHead>Employee</TableHead>
+                <TableHead>Status</TableHead>
                 <TableHead>Before Rate</TableHead>
                 <TableHead>After Rate</TableHead>
                 <TableHead>Reason</TableHead>
@@ -984,7 +1085,10 @@ export default function SalaryAdjustTable({
                   <TableRow key={change.id}>
                     <TableCell>
                       <Checkbox
-                        checked={selectedHistoryChangeIds.has(change.id)}
+                        checked={
+                          change.status === "Active" &&
+                          selectedHistoryChangeIds.has(change.id)
+                        }
                         disabled={change.status !== "Active" || isVoiding}
                         onCheckedChange={(checked) =>
                           toggleHistoryChange(change.id, checked === true)
@@ -1009,10 +1113,20 @@ export default function SalaryAdjustTable({
                     <TableCell>
                       <div className="font-medium">{change.fullName}</div>
                     </TableCell>
+                    <TableCell>
+                      <span className="inline-flex rounded-md border px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                        {change.status === "Canceled" ? "Void" : change.status}
+                      </span>
+                    </TableCell>
                     <TableCell>{historyRate.before}</TableCell>
                     <TableCell>{historyRate.after}</TableCell>
                     <TableCell>
                       <div>{change.reason}</div>
+                      {change.status === "Canceled" && change.cancelReason ? (
+                        <div className="text-xs text-muted-foreground">
+                          Void reason: {change.cancelReason}
+                        </div>
+                      ) : null}
                       {change.notes ? (
                         <div className="text-xs text-muted-foreground">
                           {change.notes}
@@ -1025,7 +1139,7 @@ export default function SalaryAdjustTable({
               {visibleHistoryChanges.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={9}
+                    colSpan={10}
                     className="py-10 text-center text-muted-foreground"
                   >
                     No salary changes found for this year.

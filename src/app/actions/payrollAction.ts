@@ -214,6 +214,7 @@ function serializePayrollRunEmployee(
     payComputationMode: parsedNotes.payComputationMode,
     isManualPayrollOverride: parsedNotes.isManualPayrollOverride,
     statutoryMonthlyCompensationBase: parsedNotes.statutoryMonthlyCompensationBase,
+    philhealthMonthlyCompensationBase: parsedNotes.philhealthMonthlyCompensationBase,
     sssContributionSource: parsedNotes.sssContributionSource,
     sssSalaryCredit: parsedNotes.sssSalaryCredit,
     sssBracketLabel: parsedNotes.sssBracketLabel,
@@ -419,6 +420,53 @@ export async function getLoanDeductionSummaryAction(payrollRunId: string) {
         sourceId: row.sourceId,
       }) satisfies PayrollLoanDeductionView
   );
+}
+
+export async function getPayrollReportBundleAction(payrollRunId: string): Promise<{
+  register: PayrollRegisterReportView | null;
+  agencySummary: PayrollAgencySummaryView;
+  loanDeductions: PayrollLoanDeductionView[];
+}> {
+  await requireAdminActor();
+  const [report, departmentByEmployeeId, agencySummary, loanRows] =
+    await Promise.all([
+      getPayrollRegister(payrollRunId),
+      loadEmployeeDepartmentMetadataByPayrollRunId(payrollRunId),
+      getAgencyDeductionSummary(payrollRunId),
+      getLoanDeductionSummary(payrollRunId),
+    ]);
+
+  return {
+    register: serializePayrollRegisterReport(report, departmentByEmployeeId),
+    agencySummary: {
+      sssEmployee: agencySummary?.sssEmployee ?? EMPTY_AGENCY_SUMMARY.sssEmployee,
+      philhealthEmployee:
+        agencySummary?.philhealthEmployee ??
+        EMPTY_AGENCY_SUMMARY.philhealthEmployee,
+      pagibigEmployee:
+        agencySummary?.pagibigEmployee ?? EMPTY_AGENCY_SUMMARY.pagibigEmployee,
+      withholdingTax:
+        agencySummary?.withholdingTax ?? EMPTY_AGENCY_SUMMARY.withholdingTax,
+      sssEmployer: agencySummary?.sssEmployer ?? EMPTY_AGENCY_SUMMARY.sssEmployer,
+      philhealthEmployer:
+        agencySummary?.philhealthEmployer ??
+        EMPTY_AGENCY_SUMMARY.philhealthEmployer,
+      pagibigEmployer:
+        agencySummary?.pagibigEmployer ?? EMPTY_AGENCY_SUMMARY.pagibigEmployer,
+      sssEc: agencySummary?.sssEc ?? EMPTY_AGENCY_SUMMARY.sssEc,
+    },
+    loanDeductions: loanRows.map(
+      (row) =>
+        ({
+          employeeId: row.employeeId,
+          employeeNo: row.employeeNo,
+          employeeName: row.employeeName,
+          description: row.description,
+          amount: row.amount,
+          sourceId: row.sourceId,
+        }) satisfies PayrollLoanDeductionView
+    ),
+  };
 }
 
 export async function getEmployeePayrollAdjustmentRowsAction(

@@ -68,6 +68,7 @@ export type AttendanceImportBatchUnmatchedRowView = {
 
 export type AttendanceImportBatchUnmatchedGroupView = {
   employeeNo: string;
+  reason: string;
   rowCount: number;
   startDate: string;
   endDate: string;
@@ -96,6 +97,13 @@ export type AttendanceDtrDayView = {
   lateMinutes: number;
   undertimeMinutes: number;
   overtimeMinutes: number;
+  biometricWorkedMinutes: number;
+  biometricLateMinutes: number;
+  biometricUndertimeMinutes: number;
+  biometricOvertimeMinutes: number;
+  isLateOverridden: boolean;
+  isUndertimeOverridden: boolean;
+  isOvertimeOverridden: boolean;
   paidLeaveMinutes: number;
   unpaidLeaveMinutes: number;
   absentMinutes: number;
@@ -117,6 +125,7 @@ export type AttendanceDtrEditableTotalsView = {
   presentDays: number;
   workedMinutes: number;
   lateMinutes: number;
+  latePenaltyMinutes: number;
   undertimeMinutes: number;
   overtimeMinutes: number;
 };
@@ -133,6 +142,7 @@ export type AttendanceDtrTotalsView = {
   workedMinutes: number;
   biometricWorkedMinutes: number;
   lateMinutes: number;
+  latePenaltyMinutes: number;
   undertimeMinutes: number;
   overtimeMinutes: number;
   paidLeaveMinutes: number;
@@ -293,6 +303,7 @@ export type PayrollRunEmployeeView = {
   payComputationMode: PayrollComputationModeView | null;
   isManualPayrollOverride: boolean;
   statutoryMonthlyCompensationBase: string | null;
+  philhealthMonthlyCompensationBase: string | null;
   sssContributionSource: string | null;
   sssSalaryCredit: string | null;
   sssBracketLabel: string | null;
@@ -425,6 +436,26 @@ export type PayrollLineReportRowView = {
   sourceId: string | null;
 };
 
+export type PayrollContributionReportRowView = {
+  employeeId: string;
+  employeeNo: string;
+  employeeName: string;
+  departmentId: number | null;
+  departmentName: string;
+  departmentCode: string | null;
+  pagibig: number;
+  pagibigEmployer: number;
+  philhealth: number;
+  philhealthEmployer: number;
+  sss: number;
+  sssEmployer: number;
+  sssEc: number;
+  peraa: number;
+  peraaEmployer: number;
+  tax: number;
+  total: number;
+};
+
 export type PayrollAccountCodeReportOptionView = {
   code: string;
   description: string;
@@ -476,6 +507,24 @@ export type PayrollExceptionAccountCodeOptionView = {
   description: string | null;
   month13thPay: boolean;
   nonTaxable: boolean;
+  birTaxCategory:
+    | "RegularTaxable"
+    | "SupplementalTaxable"
+    | "ThirteenthMonthOtherBenefits"
+    | "DeMinimis"
+    | "NonTaxable"
+    | null;
+  birDeMinimisType:
+    | "MonetizedLeavePrivate"
+    | "MedicalCashAllowance"
+    | "RiceSubsidy"
+    | "UniformClothing"
+    | "MedicalBenefits"
+    | "LaundryAllowance"
+    | "EmployeeAchievementAward"
+    | "ChristmasMajorAnniversaryGift"
+    | "OvertimeMealAllowance"
+    | null;
   dailyRate: string | null;
   monthlyRate: string | null;
 };
@@ -601,6 +650,8 @@ export type ManualPayrollEntryLineView = {
   month13thEligible: boolean;
   nonTaxable: boolean;
   deminimis: boolean;
+  birTaxCategory: PayrollExceptionAccountCodeOptionView["birTaxCategory"];
+  birDeMinimisType: PayrollExceptionAccountCodeOptionView["birDeMinimisType"];
   sourceTable: string | null;
   sourceId: string | null;
   sortOrder: number;

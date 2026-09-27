@@ -87,6 +87,25 @@ function normalizeRateValue(value: string) {
   return normalizeDecimalValue(value, 4);
 }
 
+function normalizeComparableDecimalValue(value: string, decimalPlaces: number) {
+  const normalized = normalizeDecimalValue(value, decimalPlaces);
+  const numericValue = Number(normalized);
+  if (!Number.isFinite(numericValue)) {
+    throw new Error("Invalid salary value.");
+  }
+  return numericValue.toFixed(decimalPlaces);
+}
+
+function normalizeComparableMoneyValue(value: string) {
+  return normalizeComparableDecimalValue(value, 2);
+}
+
+function normalizeEffectiveRateDivisor(value: string) {
+  const normalized = normalizeMoneyValue(value);
+  const numericValue = Number(normalized);
+  return numericValue > 0 ? normalized : "26";
+}
+
 function normalizeSnapshot(snapshot: SalarySnapshot): SalarySnapshot {
   return {
     dailyRate: normalizeRateValue(snapshot.dailyRate),
@@ -502,6 +521,7 @@ function historyRowToReadModel(row: {
   mode: SalaryChangeMode;
   status: "Active" | "Superseded" | "Canceled" | "AppliedPermanent";
   reason: string;
+  cancelReason: string | null;
   notes: string | null;
   createdByUserId: string;
   createdAt: Date;
@@ -537,6 +557,7 @@ function historyRowToReadModel(row: {
     mode: row.mode,
     status: row.status,
     reason: row.reason,
+    cancelReason: row.cancelReason,
     notes: row.notes,
     createdByUserId: row.createdByUserId,
     createdAt: row.createdAt,
@@ -792,19 +813,19 @@ export async function createDailyRateSalaryChanges(input: unknown): Promise<{
           notes: payload.notes ?? null,
           createdByUserId: actorUserId,
           beforeDailyRate: beforeSnapshot.dailyRate,
-          beforeMonthlyRate: beforeSnapshot.monthlyRate,
-          beforeMonthlyAllowance: beforeSnapshot.monthlyAllowance,
-          beforeDailyAllowance: beforeSnapshot.dailyAllowance,
-          beforeCola: beforeSnapshot.cola,
-          beforeRateDivisor: beforeSnapshot.rateDivisor,
-          beforeBillingRate: beforeSnapshot.billingRate,
+          beforeMonthlyRate: null,
+          beforeMonthlyAllowance: null,
+          beforeDailyAllowance: null,
+          beforeCola: null,
+          beforeRateDivisor: null,
+          beforeBillingRate: null,
           afterDailyRate: afterSnapshot.dailyRate,
-          afterMonthlyRate: afterSnapshot.monthlyRate,
-          afterMonthlyAllowance: afterSnapshot.monthlyAllowance,
-          afterDailyAllowance: afterSnapshot.dailyAllowance,
-          afterCola: afterSnapshot.cola,
-          afterRateDivisor: afterSnapshot.rateDivisor,
-          afterBillingRate: afterSnapshot.billingRate,
+          afterMonthlyRate: null,
+          afterMonthlyAllowance: null,
+          afterDailyAllowance: null,
+          afterCola: null,
+          afterRateDivisor: null,
+          afterBillingRate: null,
         })
         .returning();
 
@@ -875,7 +896,9 @@ export async function createSalaryRateSalaryChanges(input: unknown): Promise<{
       row.employeeId,
       {
         employeeId: row.employeeId,
-        rate: normalizeRateValue(row.rate),
+        rate: row.rate == null ? null : normalizeRateValue(row.rate),
+        rateDivisor:
+          row.rateDivisor == null ? null : normalizeMoneyValue(row.rateDivisor),
       },
     ])
   );
@@ -942,18 +965,36 @@ export async function createSalaryRateSalaryChanges(input: unknown): Promise<{
       const beforeSnapshot = normalizeSnapshot(
         salaryRecordToSnapshot(resolved.salary)
       );
-      const afterSnapshot: SalarySnapshot =
-        payload.salaryRateType === "MonthlyRate"
-          ? {
-              ...beforeSnapshot,
-              monthlyRate: row.rate,
-            }
-          : {
-              ...beforeSnapshot,
-              dailyRate: row.rate,
-            };
+      const afterSnapshot: SalarySnapshot = { ...beforeSnapshot };
+      const beforeEffectiveRateDivisor = normalizeEffectiveRateDivisor(
+        beforeSnapshot.rateDivisor
+      );
 
-      if (snapshotsEqual(beforeSnapshot, afterSnapshot)) {
+      if (row.rate != null) {
+        if (payload.salaryRateType === "MonthlyRate") {
+          afterSnapshot.monthlyRate = row.rate;
+        } else {
+          afterSnapshot.dailyRate = row.rate;
+        }
+      }
+
+      const rateChanged =
+        row.rate != null &&
+        (payload.salaryRateType === "MonthlyRate"
+          ? normalizeComparableDecimalValue(beforeSnapshot.monthlyRate, 4) !==
+            normalizeComparableDecimalValue(afterSnapshot.monthlyRate, 4)
+          : normalizeComparableDecimalValue(beforeSnapshot.dailyRate, 4) !==
+            normalizeComparableDecimalValue(afterSnapshot.dailyRate, 4));
+      const rateDivisorChanged =
+        row.rateDivisor != null &&
+        normalizeComparableMoneyValue(beforeEffectiveRateDivisor) !==
+          normalizeComparableMoneyValue(row.rateDivisor);
+
+      if (row.rateDivisor != null && rateDivisorChanged) {
+        afterSnapshot.rateDivisor = row.rateDivisor;
+      }
+
+      if (!rateChanged && !rateDivisorChanged) {
         skippedUnchangedCount += 1;
         continue;
       }
@@ -981,20 +1022,32 @@ export async function createSalaryRateSalaryChanges(input: unknown): Promise<{
           reason: payload.reason,
           notes: payload.notes ?? null,
           createdByUserId: actorUserId,
-          beforeDailyRate: beforeSnapshot.dailyRate,
-          beforeMonthlyRate: beforeSnapshot.monthlyRate,
-          beforeMonthlyAllowance: beforeSnapshot.monthlyAllowance,
-          beforeDailyAllowance: beforeSnapshot.dailyAllowance,
-          beforeCola: beforeSnapshot.cola,
-          beforeRateDivisor: beforeSnapshot.rateDivisor,
-          beforeBillingRate: beforeSnapshot.billingRate,
-          afterDailyRate: afterSnapshot.dailyRate,
-          afterMonthlyRate: afterSnapshot.monthlyRate,
-          afterMonthlyAllowance: afterSnapshot.monthlyAllowance,
-          afterDailyAllowance: afterSnapshot.dailyAllowance,
-          afterCola: afterSnapshot.cola,
-          afterRateDivisor: afterSnapshot.rateDivisor,
-          afterBillingRate: afterSnapshot.billingRate,
+          beforeDailyRate:
+            rateChanged && payload.salaryRateType === "DailyRate"
+              ? beforeSnapshot.dailyRate
+              : null,
+          beforeMonthlyRate:
+            rateChanged && payload.salaryRateType === "MonthlyRate"
+              ? beforeSnapshot.monthlyRate
+              : null,
+          beforeMonthlyAllowance: null,
+          beforeDailyAllowance: null,
+          beforeCola: null,
+          beforeRateDivisor: rateDivisorChanged ? beforeEffectiveRateDivisor : null,
+          beforeBillingRate: null,
+          afterDailyRate:
+            rateChanged && payload.salaryRateType === "DailyRate"
+              ? afterSnapshot.dailyRate
+              : null,
+          afterMonthlyRate:
+            rateChanged && payload.salaryRateType === "MonthlyRate"
+              ? afterSnapshot.monthlyRate
+              : null,
+          afterMonthlyAllowance: null,
+          afterDailyAllowance: null,
+          afterCola: null,
+          afterRateDivisor: rateDivisorChanged ? afterSnapshot.rateDivisor : null,
+          afterBillingRate: null,
         })
         .returning();
 
@@ -1031,11 +1084,7 @@ export async function createSalaryRateSalaryChanges(input: unknown): Promise<{
     }
 
     if (createdCount === 0) {
-      throw new Error(
-        payload.salaryRateType === "MonthlyRate"
-          ? "No monthly rates changed."
-          : "No daily rates changed."
-      );
+      throw new Error("No salary rates or rate divisors changed.");
     }
 
     return {
@@ -1314,6 +1363,7 @@ export async function listDailyRateSalaryAdjustmentRows(input: unknown) {
       employeeId: employee.id,
       previousDailyRate: previousSalary.dailyRate,
       previousMonthlyRate: previousSalary.monthlyRate,
+      previousRateDivisor: previousSalary.rateDivisor,
     });
   });
 }
@@ -1379,6 +1429,7 @@ export async function listSalaryChanges(input: unknown = {}) {
       mode: employeeSalaryChanges.mode,
       status: employeeSalaryChanges.status,
       reason: employeeSalaryChanges.reason,
+      cancelReason: employeeSalaryChanges.cancelReason,
       notes: employeeSalaryChanges.notes,
       createdByUserId: employeeSalaryChanges.createdByUserId,
       createdAt: employeeSalaryChanges.createdAt,
@@ -1441,6 +1492,7 @@ export async function listSalaryChanges(input: unknown = {}) {
       mode: row.mode,
       status: row.status,
       reason: row.reason,
+      cancelReason: row.cancelReason,
       notes: row.notes,
       createdByUserId: row.createdByUserId,
       createdAt: row.createdAt,
