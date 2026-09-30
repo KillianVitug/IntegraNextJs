@@ -37,7 +37,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx ./src/db/migrate.ts",
     "auth:bootstrap-admin": "tsx ./src/scripts/bootstrapAdmin.ts",
-    "auth:create-admin": "tsx ./src/scripts/createAdmin.ts"
+    "auth:create-admin": "tsx ./src/scripts/createAdmin.ts",
+    "verify:attendance-source": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceSource.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -83,6 +84,7 @@
     "zustand": "^5.0.11"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
     "@eslint/eslintrc": "^3",
     "@playwright/test": "^1.60.0",
     "@types/node": "^20",

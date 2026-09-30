@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { PayrollWorkspace } from "./PayrollWorkspace";
 import { requireAdminActor } from "@/lib/admin";
 import {
@@ -30,6 +31,8 @@ export default async function PayrollPage({
   ]);
 
   return (
+    <>
+    {process.env.ATTENDANCE_SOURCE_ENABLED === "true" && <div className="px-6 pt-4"><Link href="/payroll/attendance-source">Attendance connection / Sync attendance now</Link></div>}
     <PayrollWorkspace
       initialYear={selectedYear}
       periods={snapshot.periods}
@@ -38,5 +41,6 @@ export default async function PayrollPage({
       payrollAccountCodeEmployees={payrollAccountCodeEmployees}
       attendanceBatches={snapshot.attendanceBatches}
     />
+    </>
   );
 }

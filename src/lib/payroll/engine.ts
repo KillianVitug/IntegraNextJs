@@ -1,3 +1,4 @@
+import { assertAttendanceSourceReady, confirmAttendanceSourcePayrollInput } from "./attendanceSourceGuard";
 import { db } from "@/db";
 import {
   accountCode,
@@ -2965,6 +2966,7 @@ export async function createOrRecomputePayrollRun(
   payrollPeriodId: string,
   actorUserId: string
 ) {
+  const attendanceSourceInput = await assertAttendanceSourceReady(payrollPeriodId);
   await ensurePayrollFoundationData();
 
   const period = await getPayrollPeriod(payrollPeriodId);
@@ -3338,6 +3340,7 @@ export async function createOrRecomputePayrollRun(
   );
 
   return db.transaction(async (tx) => {
+    await confirmAttendanceSourcePayrollInput(tx, payrollPeriodId, attendanceSourceInput);
     const [latestRunForPeriod] = await tx
       .select()
       .from(payrollRuns)
