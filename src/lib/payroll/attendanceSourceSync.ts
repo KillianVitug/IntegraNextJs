@@ -1,6 +1,6 @@
 import "server-only";
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
 import { db, type DbClient } from "@/db";
 import { employees, payrollPeriods, payrollRuns, attendanceImportBatches, attendanceRawLogs, attendanceDailySummaries } from "@/db/schema";
 import { attendanceSourceEvents as events, attendanceSourceMappings as mappings, attendanceSourceRuns as runs, attendanceSourceRevisions as revisions, attendanceSourceProjections as projections, attendanceSourcePeriods as sourcePeriods } from "@/db/attendanceSourceSchema";
@@ -72,7 +72,7 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
         if(day===period.startDate && r.type==='OUT' && list[i-1]?.type!=='IN' || day===period.endDate && r.type==='IN' && list[i+1]?.type!=='OUT') boundaryIds.add(r.eventId);
       });
     }
-    const fileLogs = await tx.select({ employeeId: attendanceRawLogs.employeeId, day: attendanceRawLogs.logDate }).from(attendanceRawLogs).innerJoin(attendanceImportBatches,eq(attendanceImportBatches.id,attendanceRawLogs.batchId)).where(and(eq(attendanceImportBatches.payrollPeriodId,periodId),sql`${attendanceImportBatches.sourceFileName} not like 'attendance-api:%'`));
+    const fileLogs = await tx.select({ employeeId: attendanceRawLogs.employeeId, day: attendanceRawLogs.logDate }).from(attendanceRawLogs).innerJoin(attendanceImportBatches,eq(attendanceImportBatches.id,attendanceRawLogs.batchId)).where(and(eq(attendanceImportBatches.payrollPeriodId,periodId),ne(attendanceImportBatches.sourceFormat, "API")));
     const fileDays = new Set(fileLogs.map(r=>`${r.employeeId}|${r.day}`));
     let batchId: string | undefined;
     for (const punch of records) {
@@ -108,7 +108,7 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
         if (fileDays.has(`${person.employeeId}|${wall.date}`)) throw Error("Resolve overlapping file imports before enabling the API source");
         if (!batchId) {
           const name = `attendance-api:${periodId}`;
-          const [batch] = await tx.select().from(attendanceImportBatches).where(and(eq(attendanceImportBatches.payrollPeriodId, periodId), eq(attendanceImportBatches.sourceFileName, name)));
+          const [batch] = await tx.select().from(attendanceImportBatches).where(and(eq(attendanceImportBatches.payrollPeriodId, periodId), eq(attendanceImportBatches.sourceFileName, name), eq(attendanceImportBatches.sourceFormat, "API")));
           batchId = batch?.id;
           if (!batchId) { const [created] = await tx.insert(attendanceImportBatches).values({ payrollPeriodId: periodId, sourceFileName: name, sourceFormat: "API", status: "Processed", notes: "Managed by attendance API reconciliation. Source IDs and revisions are retained in the source inbox." }).returning({ id: attendanceImportBatches.id }); batchId = created.id; }
         }
@@ -126,7 +126,7 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
       }
     }
     const current = await tx.select().from(projections).where(eq(projections.payrollPeriodId, periodId));
-    const [managedBatch] = await tx.select({id:attendanceImportBatches.id}).from(attendanceImportBatches).where(and(eq(attendanceImportBatches.payrollPeriodId,periodId),eq(attendanceImportBatches.sourceFileName,`attendance-api:${periodId}`)));
+    const [managedBatch] = await tx.select({id:attendanceImportBatches.id}).from(attendanceImportBatches).where(and(eq(attendanceImportBatches.payrollPeriodId,periodId),eq(attendanceImportBatches.sourceFileName,`attendance-api:${periodId}`),eq(attendanceImportBatches.sourceFormat,"API")));
     if(managedBatch && !protectedPeriod) {
       const total=current.filter(r=>r.rawLogId!==null).length;
       await tx.update(attendanceImportBatches).set({totalRows:total,matchedRows:total}).where(eq(attendanceImportBatches.id,managedBatch.id));

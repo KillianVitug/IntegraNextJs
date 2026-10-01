@@ -1,6 +1,6 @@
 # Attendance API contribution — review before enabling
 
-Prepared 1 October 2026 against Integra commit `28012ea2b930ab68d86f1cc59d42ef27ee2cfd6b`, branch `codex/attendance-api-integration`. No upstream branch, production database or deployment was changed. The connection is disabled unless `ATTENDANCE_SOURCE_ENABLED=true`.
+Prepared 1 October 2026 against Integra commit `28012ea2b930ab68d86f1cc59d42ef27ee2cfd6b`, branch `codex/attendance-api-integration`. This contribution is proposed for maintainer review and staging acceptance; it does not include a production migration or deployment. The connection is disabled unless `ATTENDANCE_SOURCE_ENABLED=true`.
 
 ## What changes
 

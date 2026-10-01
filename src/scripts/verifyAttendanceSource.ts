@@ -9,10 +9,18 @@ import * as schema from "@/db/schema";
 import { attendanceSourceRuns as runs, attendanceSourceMappings as mappings, attendanceSourceEvents as events } from "@/db/attendanceSourceSchema";
 import { pullAttendanceSource, manilaWallTime, type SourcePunch } from "@/lib/payroll/attendanceSourceClient";
 import { reconcileAttendanceSource } from "@/lib/payroll/attendanceSourceSync";
+import { attendanceSchedulerAuthorized } from "@/lib/payroll/attendanceSourceScheduler";
 import { attendanceSourceVersion, assertAttendanceSourceReady, confirmAttendanceSourceSummaryRefresh, confirmAttendanceSourcePayrollInput, attendanceSourceDateFilter } from "@/lib/payroll/attendanceSourceGuard";
 import type { DbClient } from "@/db";
 
 async function main() {
+  const schedulerSecret = "synthetic-scheduler-secret-32-characters";
+  assert.equal(attendanceSchedulerAuthorized(true, schedulerSecret, `Bearer ${schedulerSecret}`), true);
+  assert.equal(attendanceSchedulerAuthorized(false, schedulerSecret, `Bearer ${schedulerSecret}`), false);
+  assert.equal(attendanceSchedulerAuthorized(true, "short", "Bearer short"), false);
+  assert.equal(attendanceSchedulerAuthorized(true, schedulerSecret, ""), false);
+  assert.equal(attendanceSchedulerAuthorized(true, schedulerSecret, `Bearer ${schedulerSecret.slice(0, -1)}x`), false);
+  assert.equal(attendanceSchedulerAuthorized(true, schedulerSecret, `Bearer ${"é".repeat(schedulerSecret.length)}`), false);
   const event: SourcePunch = { eventId: randomUUID(), employeeId: "0001", employeeName: "Synthetic employee", originalEmployeeId: "0001", originalEmployeeName: "Synthetic employee", branchId: "B2", type: "IN", capturedAt: "2026-09-10T16:30:00Z", receivedAt: "2026-09-12T01:00:00Z", updatedAt: "2026-09-12T01:00:00Z", status: "VALID", clockFlag: false, reviewFlags: [], reviewResolved: false };
   const page = (records: SourcePunch[], nextCursor: string | null = null) => Response.json({ schemaVersion: 2, timeZone: "Asia/Manila", from: "2026-09-01", through: "2026-09-15", records, nextCursor });
   const options = { origin: "https://attendance.example.test", token: "synthetic-test-key-only-".repeat(3), from: "2026-09-01", through: "2026-09-15" };
@@ -79,7 +87,7 @@ async function main() {
   const summaryInput=await database.select().from(schema.attendanceRawLogs).innerJoin(schema.attendanceImportBatches,eq(schema.attendanceRawLogs.batchId,schema.attendanceImportBatches.id)).where(attendanceSourceDateFilter(options.from,options.through));
   assert.ok(summaryInput.some(r=>r.attendance_raw_logs.logDate==="2026-08-31"),"API summary input retains the preceding overnight IN");
   assert.equal((await reconcile([...existingPunches,{...outside,status:"VOID"},overnight])).boundaryReview,1);
-  const [fileBatch]=await database.insert(schema.attendanceImportBatches).values({payrollPeriodId:periodId,sourceFileName:"legacy.csv",sourceFormat:"CSV",status:"Processed"}).returning();
+  const [fileBatch]=await database.insert(schema.attendanceImportBatches).values({payrollPeriodId:periodId,sourceFileName:`attendance-api:${periodId}`,sourceFormat:"CSV",status:"Processed"}).returning();
   await database.insert(schema.attendanceRawLogs).values({batchId:fileBatch.id,employeeId:person,employeeNo:"0001",direction:"IN",loggedAt:new Date(event.capturedAt),logDate:"2026-09-11",logTime:"00:30:00",rawText:"test",normalizedHash:"test"});
   await assert.rejects(()=>reconcile([...existingPunches,outside,overnight,{...event,eventId:randomUUID()}]),/overlapping file imports/);
   await pg.close(); console.log("Attendance source checks passed: transport, UTC/Manila, migration, idempotency, void/restore, reattribution, missing-event rollback, closed/posted freeze, immutable history, stale-summary/payroll guards, quarantine, overnight boundaries and file-import overlap.");
