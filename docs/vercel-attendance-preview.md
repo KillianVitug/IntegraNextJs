@@ -6,8 +6,10 @@ The owner authorized test setup and publication to draft PR #1, expressly exclud
 
 - Repository: `KillianVitug/IntegraNextJs`; draft PR: https://github.com/KillianVitug/IntegraNextJs/pull/1.
 - Neon project: Integra (`quiet-wildflower-71375304`). Existing branch: `attendance-test` (`br-dark-field-a1zdusec`), created from current main's schema and data. Integra Simulation is an older, different test project.
-- Independently verify the branch's exact compute endpoint in Neon before supplying its connection to the CLI or Vercel. The checked-in endpoint pin remains blank until verified.
+- The exact test compute endpoint was independently verified in Neon on 1 October 2026 and is recorded in the checked-in trust anchor. Reverify any replacement endpoint; never copy the production connection. The private test connection is configured locally, but Vercel's branch-specific database binding remains unverified.
 - The Vercel project/team must actually host this repository and be accessible to the operator. A different project under the operator's personal account is not a substitute.
+
+Verified progress and limits are in [the 1 October test evidence](attendance-test-evidence-20261001.md): backup/restore, test migration, two real reconciliations and rollback-only Neon scenarios passed. The team is `vitugs-projects` and the project is `integra-next-js`; operator access and branch-specific Preview configuration remain pending.
 
 ## Database preparation
 
@@ -71,4 +73,4 @@ To stop future syncing, disable cron and both source/GET flags, then redeploy. T
 - [Vercel Cron GET requests](https://vercel.com/docs/cron-jobs), [authorization and operation](https://vercel.com/docs/cron-jobs/manage-cron-jobs), and [plan limits](https://vercel.com/docs/cron-jobs/usage-and-pricing).
 - [Deployment protection](https://vercel.com/docs/deployment-protection).
 
-These instructions are preparation. They are not evidence that the live test migration, hosted preview or full payroll acceptance has completed.
+This runbook describes the complete setup sequence. Use the linked test evidence for completed database checks; hosted Preview and full payroll acceptance remain outstanding.

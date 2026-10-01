@@ -21,7 +21,7 @@ async function main() {
   const url = `postgresql://synthetic_user:synthetic_password@${pin.hosts[0]}/synthetic?sslmode=require`;
   const c: TestConfig = { databaseUrl: url, sourceToken: "synthetic-source-token-never-a-real-secret", periodId: randomUUID(), periodStart: "2026-09-10", periodEnd: "2026-09-11", actorUserId: randomUUID(), mappings: [{ sourceEmployeeId: "0001", employeeId: randomUUID(), reason: "Synthetic verified fixture" }], comparisons: [{ sourceEmployeeId: "0001", attendanceDate: "2026-09-10", checkInTime: "08:00", checkOutTime: "17:00", breakMinutes: 60, expectedWorkedMinutes: 480 }] };
   const command = ["sync", `--write-test=${BRANCH}`, `--period=${c.periodId}`];
-  await test("unverified shipped pin blocks before credentials or networking", () => assert.throws(() => validateDestination(url, destination), /endpoint_not_independently_verified/));
+  await test("unverified pin blocks before credentials or networking", () => assert.throws(() => validateDestination(url, { ...destination, endpointId: "", hosts: [] }), /endpoint_not_independently_verified/));
   await test("exact independent endpoint accepted", () => assert.equal(validateDestination(url, pin).branchId, BRANCH));
   await test("production/wrong endpoint refused despite test database name", () => assert.throws(() => validateDestination(url.replace(pin.endpointId, "ep-production-a2"), pin), /destination_mismatch/));
   await test("wrong project and branch refused", () => { for (const key of ["projectId", "branchId"] as const) assert.throws(() => validateDestination(url, { ...pin, [key]: "main" }), /wrong_destination_pin/); });

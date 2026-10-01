@@ -4,7 +4,9 @@ This CLI prepares a manual check against Neon project `quiet-wildflower-71375304
 
 ## Current state
 
-The endpoint trust anchor is deliberately blank. Every command stops before opening the private configuration or making a connection until the exact test endpoint has been independently verified. In the owner's existing checkout, the payroll-only source key is already saved privately and a read-only API pull succeeded on 1 October 2026. Do not request or create a replacement key. The test database connection, endpoint pin, employee mappings, period and audit actor remain to be configured. The test branch already exists; do not create another branch based on older planning notes.
+The endpoint was independently verified in the authorized Neon dashboard on 1 October 2026: `ep-silent-cherry-a15ljl8p`, database `neondb`, direct and pooled Singapore hosts. The nonsecret trust anchor is now populated. The owner's private connection and existing read-only source key work; do not request replacement credentials or recreate the branch. The test migration and two real reconciliations passed; see [test evidence and limitations](attendance-test-evidence-20261001.md).
+
+The real snapshot contains unresolved attendance and identity exceptions. A separate, precisely scoped acceptance harness retained all 77 records, verified the 58 eligible raw rows and asserted that payroll stays blocked. It did not weaken this CLI's strict scope/exception checks. The strict `sync` command intentionally refuses that exception-bearing period; do not copy its private configuration and expect a clean-payroll acceptance result. A fresh clean scope is required for normal CLI writes and hosted payroll acceptance.
 
 ## One-time secure setup
 
@@ -28,7 +30,7 @@ $testNode = $env:CODEX_TASK_WORKSPACE_NODE
 & $testNode .\scripts\attendance-test.cjs compare
 ```
 
-If that environment variable is absent, use the existing verified runtime's full path, currently `C:\Users\Admin\AppData\Local\OpenAI\Codex\runtimes\cua_node\154806497bb51bae\bin\node.exe`. No install/build is required. The launcher supplies a clean environment, strips inherited database/source credentials, proxies and Node preload options, and prevents dotenv development fallback. Invoke the launcher, not `main.ts` directly.
+If that environment variable is absent, use the existing verified runtime's full path, currently `C:\Users\Admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe`. No install/build is required. The launcher supplies a clean environment, strips inherited database/source credentials, proxies and Node preload options, and prevents dotenv development fallback. Invoke the launcher, not `main.ts` directly.
 
 `preflight` is the default and reads schema only. `compare` additionally reads the API, checks the chosen scope and reports current source/imported counts and hours. Both database transactions are read-only. Review the comparison before opting into a write. Replace the placeholder below with the same selected UUID in the private config:
 
