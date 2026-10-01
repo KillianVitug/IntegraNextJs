@@ -38,7 +38,11 @@
     "db:migrate": "tsx ./src/db/migrate.ts",
     "auth:bootstrap-admin": "tsx ./src/scripts/bootstrapAdmin.ts",
     "auth:create-admin": "tsx ./src/scripts/createAdmin.ts",
-    "verify:attendance-source": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceSource.ts"
+    "verify:attendance-source": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceSource.ts",
+    "verify:attendance-timezones": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceTimezones.ts",
+    "attendance:test": "node scripts/attendance-test.cjs",
+    "verify:attendance-test-setup": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceTestSetup.ts",
+    "verify:attendance-scheduler": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceScheduler.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

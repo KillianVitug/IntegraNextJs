@@ -5,6 +5,7 @@ import {
   shiftTableBreaks,
 } from "@/db/schema";
 import {
+  attendanceWallClockTime,
   groupLogsByEmployeeAndAttendanceDate,
   summarizeEmployeeDay,
   type ParsedAttendanceLog,
@@ -343,7 +344,7 @@ function buildAttendanceRow(args: {
     leaveCoverageByEmployeeDate: args.leaveCoverageByEmployeeDate,
   });
   const orderedLogs = [...args.logs].sort(
-    (left, right) => left.loggedAt.getTime() - right.loggedAt.getTime()
+    (left, right) => attendanceWallClockTime(left) - attendanceWallClockTime(right)
   );
   const effectiveLogs = applyApprovedAttendanceCorrections(
     orderedLogs,

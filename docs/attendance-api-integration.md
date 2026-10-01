@@ -25,17 +25,25 @@ ATTENDANCE_SOURCE_ORIGIN=https://attendance-pilot.wecaredrug.workers.dev
 ATTENDANCE_SOURCE_TOKEN=
 ATTENDANCE_SYNC_SECRET=
 ATTENDANCE_SYNC_ACTOR_ID=
+ATTENDANCE_VERCEL_CRON_ENABLED=false
+CRON_SECRET=
 ```
 
 `ATTENDANCE_SOURCE_TOKEN` is the existing attendance **payroll-only** read key, supplied privately by the owner. `ATTENDANCE_SYNC_SECRET` is a separate random secret of at least 32 characters. `ATTENDANCE_SYNC_ACTOR_ID` must identify an existing authorized service/admin account so audit records have a valid actor. The shorter domain can replace the origin after HTTPS, Access exceptions and API reads pass there; keep the current origin until then.
 
 ## Scheduling
 
-After staging acceptance, configure the deployment platform's scheduler to POST `/api/attendance-source/reconcile` with `Authorization: Bearer <ATTENDANCE_SYNC_SECRET>`. The endpoint has no public GET trigger and returns 401 while disabled. It reconciles periods that have started and ended within the recent 45-day window, including closed periods for late-change detection. It refuses more than 24 matching periods rather than silently skipping some. Monitor non-2xx responses; do not put the secret in a URL. No live scheduler was created by this contribution. Start hourly, measure duration, then choose a shorter interval if useful. Older periods can be reconciled manually.
+The private POST trigger at `/api/attendance-source/reconcile` uses `Authorization: Bearer <ATTENDANCE_SYNC_SECRET>`. For Vercel Cron, a GET adapter uses Vercel's `CRON_SECRET` and additionally requires `ATTENDANCE_VERCEL_CRON_ENABLED=true`. Both require the source feature flag and a configured secret of at least 32 characters. GET and POST credentials are checked separately; neither accepts a secret in the URL. No active `vercel.json` cron configuration or live schedule is supplied.
+
+Before reconciling, the scheduler verifies that `ATTENDANCE_SYNC_ACTOR_ID` belongs to an active, non-deleted administrator using Integra's assigned permission groups and legacy fallback rules. Missing, disabled, deleted and non-admin actors are rejected. It selects periods whose end date is on/after today minus 45 days and whose start date is on/before today, including closed periods for late-change detection. More than 24 matching periods is refused rather than silently truncated. Results are not cached and failures omit private diagnostics. Earlier periods may already have committed when a later one fails; repeats are reconciled idempotently. Monitor non-2xx responses and inspect sync history.
+
+Vercel Cron runs only against production deployments, so preview acceptance uses a manual authenticated invocation. Frequency and function duration must fit the actual project plan and measured workload; do not assume hourly availability on Hobby. See [Vercel preview and release preparation](vercel-attendance-preview.md). The schedule remains inactive until separate production acceptance.
 
 ## Validation and remaining acceptance
 
 `npm run verify:attendance-source` runs synthetic PGlite tests applying the actual new migration: pagination/partial HTTP failure, leading-zero IDs, UTC/Manila, idempotency, VOID/restore, reattribution, disappearance rollback, closed/posted freezes, immutable history, stale-summary/payroll commit guards, unmapped quarantine, overnight boundaries/summary input and file-import overlap. `npm run verify:attendance-parser`, `npx tsc --noEmit`, and `npm run build` passed. Next.js reported a workspace-root warning because this isolated clone is nested inside another repository; the build completed. These tests do not connect to production. PGlite is a development dependency only; its fixture creates the relevant existing columns and is not a substitute for running the complete migration history against staging.
+
+`npm run verify:attendance-scheduler` checks the actual GET/POST rejection paths and the shared runner's authorization, missing audit account, period limit, non-cacheable response and redacted failures. `npm run verify:attendance-test-setup` includes active/inactive/deleted/non-admin scheduler-account fixtures as well as the guarded CLI checks.
 
 Before production, the maintainer must verify hosted authentication, full summary/manual-payroll refresh, migration rollback operations, large-period execution time and deployment scheduler limits. The source client bounds a pull, but changed rows still require database writes; this is not a measured 30-branch throughput certification. Existing repository dependency advisories need the team's separate review; this contribution does not force unrelated dependency upgrades.
 
@@ -44,3 +52,13 @@ Before production, the maintainer must verify hosted authentication, full summar
 ## Disable/recover
 
 Stop the scheduler and set `ATTENDANCE_SOURCE_ENABLED=false`. Retain the additive tables and audit history. Already projected raw logs remain, so reconcile/remove them through an audited staging-tested recovery procedure before importing overlapping files. Disabling the feature does not undo previously paid payroll. Restore from the database backup only under the team's normal recovery procedure; do not drop tables or delete production attendance to resolve a test failure.
+
+## Host-timezone regression checks
+
+Run `npm run verify:attendance-timezones` with the existing dependencies. The test launches isolated processes in UTC, Asia/Manila and America/New_York, using synthetic in-memory PGlite only. It checks persisted API rows, day/overnight shifts, explicit source offsets, host DST transition dates, repeat-sync stability, and unchanged stored timestamps. No live credentials or migrations are used.
+
+Attendance `logDate`/`logTime` are the canonical Manila civil clock for calculation, ordering and overnight grouping. Calculation-only UTC dates prevent the host offset or daylight-saving rules from changing worked/night minutes. Original `loggedAt` values, source payloads and existing database column types are retained; no stored-row rewrite is required. Recompute affected draft summaries through the normal reviewed workflow after acceptance; posted payroll remains protected. These tests do not certify live Neon connectivity, the full production schema, or payroll/net-pay recalculation.
+
+## Guarded command-line test preparation
+
+See [attendance-test-cli.md](attendance-test-cli.md) for isolated configuration, the independently verified Neon endpoint pin, read-only preflight/comparison and explicit scoped test writes. The trust anchor is blank; live use stays blocked until verified setup.
