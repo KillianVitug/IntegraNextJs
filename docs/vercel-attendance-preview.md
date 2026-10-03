@@ -73,4 +73,4 @@ To stop future syncing, disable cron and both source/GET flags, then redeploy. T
 - [Vercel Cron GET requests](https://vercel.com/docs/cron-jobs), [authorization and operation](https://vercel.com/docs/cron-jobs/manage-cron-jobs), and [plan limits](https://vercel.com/docs/cron-jobs/usage-and-pricing).
 - [Deployment protection](https://vercel.com/docs/deployment-protection).
 
-This runbook describes the complete setup sequence. Use the linked test evidence for completed database checks; hosted Preview and full payroll acceptance remain outstanding.
+This runbook describes the setup sequence. Hosted Preview and a fictional CSV payroll lifecycle passed on 2 October at `033fd0e`. The [3 October review](attendance-release-review-20261003.md) distinguishes those results from newer local safeguards and the remaining real-source, migration and hosted acceptance work. Scheduling remains inactive.

@@ -39,6 +39,7 @@
     "auth:bootstrap-admin": "tsx ./src/scripts/bootstrapAdmin.ts",
     "auth:create-admin": "tsx ./src/scripts/createAdmin.ts",
     "verify:attendance-source": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceSource.ts",
+    "verify:attendance-release-guards": "node --conditions=react-server --require ./src/scripts/attendanceTest/framework-test-stub.cjs --import tsx ./src/scripts/verifyAttendanceReleaseGuards.ts",
     "verify:attendance-source-periods": "tsx ./src/scripts/verifyAttendanceSourcePeriods.ts",
     "verify:attendance-timezones": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceTimezones.ts",
     "attendance:test": "node scripts/attendance-test.cjs",

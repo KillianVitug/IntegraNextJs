@@ -6,6 +6,8 @@ import { employees, payrollPeriods, payrollRuns, attendanceImportBatches, attend
 import { attendanceSourceEvents as events, attendanceSourceMappings as mappings, attendanceSourceRuns as runs, attendanceSourceRevisions as revisions, attendanceSourceProjections as projections, attendanceSourcePeriods as sourcePeriods } from "@/db/attendanceSourceSchema";
 import { adminAuditEvents, payrollRunEvents } from "@/db/schema";
 import { manilaWallTime, pullAttendanceSource, sourceDayOffset, type SourcePunch } from "./attendanceSourceClient";
+import { lockAttendancePayrollInput } from "./attendanceSourceGuard";
+import { PayrollValidationError } from "./validation";
 
 export const attendanceSourceEnabled = () => process.env.ATTENDANCE_SOURCE_ENABLED === "true";
 export function requireAttendanceSource() { if (!attendanceSourceEnabled()) throw Error("Attendance API integration is disabled"); }
@@ -25,7 +27,10 @@ export async function syncAttendanceSourcePeriod(periodId: string, actorUserId: 
   const runId = randomUUID();
   // A partial pull never changes source events, summaries or payroll input.
   const from = sourceDayOffset(period.startDate, -1), through = sourceDayOffset(period.endDate, 1);
-  await db.insert(runs).values({ id: runId, payrollPeriodId: periodId, actorUserId, state: "Fetching", fromDate: from, throughDate: through });
+  await db.transaction(async tx => {
+    await lockAttendancePayrollInput(tx);
+    await tx.insert(runs).values({ id: runId, payrollPeriodId: periodId, actorUserId, state: "Fetching", fromDate: from, throughDate: through });
+  });
   try {
     const records = await pullAttendanceSource({ origin: process.env.ATTENDANCE_SOURCE_ORIGIN ?? "", token: process.env.ATTENDANCE_SOURCE_TOKEN ?? "", from, through });
     const counts = await reconcileAttendanceSource(db, periodId, runId, actorUserId, records);
@@ -33,7 +38,7 @@ export async function syncAttendanceSourcePeriod(periodId: string, actorUserId: 
   } catch {
     // Do not persist HTTP bodies, URLs containing credentials, or third-party error details.
     await db.update(runs).set({ state: "Failed", error: "Source pull or reconciliation failed; prior payroll input retained", completedAt: new Date() }).where(eq(runs.id, runId));
-    throw Error("Attendance sync failed. Prior payroll input was retained. Check server configuration and sync history.");
+    throw new PayrollValidationError("Attendance sync failed. Prior payroll input was retained. Check server configuration and sync history, then retry the whole period.");
   }
 }
 export async function reconcileAttendanceSource(database: typeof db, periodId: string, runId: string, actorUserId: string, records: SourcePunch[]) {
@@ -139,8 +144,30 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
 }
 export async function saveAttendanceSourceMapping(database: DbClient, actorUserId: string, sourceEmployeeId: string, employeeId: string, reason: string) {
   requireAttendanceSource();
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(sourceEmployeeId) || !/^[0-9a-f-]{36}$/.test(employeeId) || !reason.trim() || reason.length > 500) throw Error("Employee IDs and a verification reason are required");
-  const [person] = await database.select().from(employees).where(eq(employees.id, employeeId)); if (!person || person.deletedAt) throw Error("Select an active payroll employee");
-  await database.insert(mappings).values({ sourceEmployeeId, employeeId, actorUserId, reason }).onConflictDoUpdate({ target: mappings.sourceEmployeeId, set: { employeeId, actorUserId, reason, updatedAt: new Date() } });
-  await recordAdminAuditEvent({ actorUserId, entityType: "attendance_source_mapping", entityId: sourceEmployeeId, action: "attendance.mapping_saved", details: { employeeId, reason }, database });
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(sourceEmployeeId) || !/^[0-9a-f-]{36}$/.test(employeeId) || !reason.trim() || reason.length > 500) throw new PayrollValidationError("Employee IDs and a verification reason are required");
+  // Caller supplies a transaction; all mapping edits serialize with sync and payroll.
+  await lockAttendancePayrollInput(database);
+  const [person] = await database.select().from(employees).where(eq(employees.id, employeeId)); if (!person || person.deletedAt) throw new PayrollValidationError("Select an active payroll employee");
+  const [previous] = await database.select().from(mappings).where(eq(mappings.sourceEmployeeId, sourceEmployeeId));
+  const changed = previous?.employeeId !== employeeId;
+  await database.insert(mappings).values({ sourceEmployeeId, employeeId, actorUserId, reason }).onConflictDoUpdate({ target: mappings.sourceEmployeeId, set: { employeeId, actorUserId, reason, ...(changed ? { updatedAt: sql`clock_timestamp()` } : {}) } });
+  const affectedPeriodIds: string[] = [];
+  if (changed) {
+    const affected = await database.selectDistinct({ periodId: projections.payrollPeriodId })
+      .from(projections).innerJoin(events, eq(events.eventId, projections.eventId))
+      .where(eq(events.sourceEmployeeId, sourceEmployeeId));
+    for (const { periodId } of affected.sort((a, b) => a.periodId.localeCompare(b.periodId))) {
+      const [period] = await database.select().from(payrollPeriods).where(eq(payrollPeriods.id, periodId)).for("update");
+      const periodRuns = await database.select().from(payrollRuns).where(eq(payrollRuns.payrollPeriodId, periodId)).for("update");
+      if (!period || period.status !== "Open" || periodRuns.some(run => run.status === "Posted")) continue;
+      affectedPeriodIds.push(periodId);
+      await database.update(sourcePeriods).set({ summariesRunId: null }).where(eq(sourcePeriods.payrollPeriodId, periodId));
+      for (const run of periodRuns.filter(run => ["Draft", "Reviewed", "Approved"].includes(run.status))) {
+        await database.update(payrollRuns).set({ status: "Stale", reviewedAt: null, reviewedByUserId: null, approvedAt: null, approvedByUserId: null, updatedAt: new Date() }).where(eq(payrollRuns.id, run.id));
+        await recordPayrollRunEvent({ payrollRunId: run.id, actorUserId, eventType: "MarkedStale", fromStatus: run.status, toStatus: "Stale", notes: "Employee mapping changed. Sync attendance, refresh DTR summaries and recompute payroll.", database });
+      }
+    }
+  }
+  await recordAdminAuditEvent({ actorUserId, entityType: "attendance_source_mapping", entityId: sourceEmployeeId, action: "attendance.mapping_saved", details: { employeeId, previousEmployeeId: previous?.employeeId ?? null, reason, changed, affectedPeriodIds }, database });
+  return { changed, affectedPeriodIds };
 }

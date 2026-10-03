@@ -1,4 +1,5 @@
 "use server";
+import { assertFileAttendanceBatch } from "@/lib/payroll/validation";
 import { attendanceSourceVersion, confirmAttendanceSourceSummaryRefresh, attendanceSourceDateFilter } from "@/lib/payroll/attendanceSourceGuard";
 
 import { revalidatePath } from "next/cache";
@@ -3106,6 +3107,8 @@ async function revertAttendanceImportBatchForActor(
   if (!batch) {
     throw new Error("Attendance import batch not found.");
   }
+
+  assertFileAttendanceBatch(batch.sourceFormat);
 
   const payrollPeriod = batch.payrollPeriodId
     ? await db.query.payrollPeriods.findFirst({

@@ -1,5 +1,7 @@
 # Attendance API contribution — review before enabling
 
+Updated safeguards, current evidence and acceptance limits: [3 October review](attendance-release-review-20261003.md).
+
 Prepared 1 October 2026 against Integra commit `28012ea2b930ab68d86f1cc59d42ef27ee2cfd6b`, branch `codex/attendance-api-integration`. This contribution is proposed for maintainer review and staging acceptance; it does not include a production migration or deployment. The connection is disabled unless `ATTENDANCE_SOURCE_ENABLED=true`.
 
 ## What changes
@@ -23,6 +25,7 @@ Closed periods and any period containing posted payroll retain their original pa
 
 ```dotenv
 ATTENDANCE_SOURCE_ENABLED=false
+ATTENDANCE_API_REQUIRED_PERIOD_IDS=
 ATTENDANCE_SOURCE_ORIGIN=https://attendance-pilot.wecaredrug.workers.dev
 ATTENDANCE_SOURCE_TOKEN=
 ATTENDANCE_SYNC_SECRET=
@@ -63,4 +66,4 @@ Attendance `logDate`/`logTime` are the canonical Manila civil clock for calculat
 
 ## Guarded command-line test preparation
 
-See [attendance-test-cli.md](attendance-test-cli.md) for isolated configuration, the independently verified Neon endpoint pin, read-only preflight/comparison and explicit scoped test writes. The trust anchor is blank; live use stays blocked until verified setup.
+See [attendance-test-cli.md](attendance-test-cli.md) for isolated configuration, the independently verified Neon endpoint pin, read-only preflight/comparison and explicit scoped test writes. The test endpoint is pinned and its schema preflight was rechecked on 3 October. The CLI's narrow clean-period scope is still enforced; see the review above for the current comparison blockers.

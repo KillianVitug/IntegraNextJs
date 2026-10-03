@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { payrollActionResult } from "@/lib/payroll/validation";
 import type {
   PayrollAgencySummaryView,
   PayrollEmployeeDailyAdjustmentRowView,
@@ -297,37 +298,47 @@ export async function seedPayrollPeriods(year: number) {
 
 export async function computePayrollRun(payrollPeriodId: string) {
   const actor = await requireAdminActor();
-  const result = await createOrRecomputePayrollRun(payrollPeriodId, actor.userId);
-  revalidatePath("/payroll");
-  return result;
+  return payrollActionResult(async () => {
+    const result = await createOrRecomputePayrollRun(payrollPeriodId, actor.userId);
+    revalidatePath("/payroll");
+    return result;
+  });
 }
 
 export async function reviewPayrollRun(payrollRunId: string) {
   const actor = await requireAdminActor();
-  const result = await transitionPayrollRunStatus(payrollRunId, "Reviewed", actor.userId);
-  revalidatePath("/payroll");
-  return result;
+  return payrollActionResult(async () => {
+    const result = await transitionPayrollRunStatus(payrollRunId, "Reviewed", actor.userId);
+    revalidatePath("/payroll");
+    return result;
+  });
 }
 
 export async function approvePayrollRun(payrollRunId: string) {
   const actor = await requireAdminActor();
-  const result = await transitionPayrollRunStatus(payrollRunId, "Approved", actor.userId);
-  revalidatePath("/payroll");
-  return result;
+  return payrollActionResult(async () => {
+    const result = await transitionPayrollRunStatus(payrollRunId, "Approved", actor.userId);
+    revalidatePath("/payroll");
+    return result;
+  });
 }
 
 export async function postPayrollRun(payrollRunId: string) {
   const actor = await requireAdminActor();
-  const result = await transitionPayrollRunStatus(payrollRunId, "Posted", actor.userId);
-  revalidatePath("/payroll");
-  return result;
+  return payrollActionResult(async () => {
+    const result = await transitionPayrollRunStatus(payrollRunId, "Posted", actor.userId);
+    revalidatePath("/payroll");
+    return result;
+  });
 }
 
 export async function voidPayrollRun(payrollRunId: string, reason?: string | null) {
   const actor = await requireAdminActor();
-  const result = await transitionPayrollRunStatus(payrollRunId, "Void", actor.userId, reason ?? null);
-  revalidatePath("/payroll");
-  return result;
+  return payrollActionResult(async () => {
+    const result = await transitionPayrollRunStatus(payrollRunId, "Void", actor.userId, reason ?? null);
+    revalidatePath("/payroll");
+    return result;
+  });
 }
 
 export async function getPayrollRunById(payrollRunId: string) {

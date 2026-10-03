@@ -1,5 +1,6 @@
-import { assertAttendanceSourceReady, confirmAttendanceSourcePayrollInput } from "./attendanceSourceGuard";
-import { db } from "@/db";
+import { assertAttendanceSourceReady, confirmAttendanceSourcePayrollInput, lockAttendancePayrollInput, attendancePayrollSnapshot, assertAttendancePayrollSnapshot } from "./attendanceSourceGuard";
+import { assertPayrollTransition, PayrollValidationError } from "./validation";
+import { db, type DbClient } from "@/db";
 import {
   accountCode,
   attendanceDtrHoldApprovals,
@@ -2801,29 +2802,7 @@ function ensurePayrollTransitionAllowed(
   currentStatus: string,
   nextStatus: PayrollRunTransitionStatus
 ) {
-  if (nextStatus === "Reviewed" && ["Draft", "Stale"].includes(currentStatus)) {
-    return;
-  }
-
-  if (nextStatus === "Approved" && currentStatus === "Reviewed") {
-    return;
-  }
-
-  if (nextStatus === "Posted" && currentStatus === "Approved") {
-    return;
-  }
-
-  if (nextStatus === "Void" && ["Draft", "Stale", "Reviewed", "Approved"].includes(currentStatus)) {
-    return;
-  }
-
-  if (nextStatus === "Void" && currentStatus === "Posted") {
-    throw new Error(
-      "Posted payroll runs cannot be voided directly. Use a reversal workflow before corrections."
-    );
-  }
-
-  throw new Error(`Cannot move payroll run from ${currentStatus} to ${nextStatus}.`);
+  assertPayrollTransition(currentStatus, nextStatus);
 }
 
 async function getUnresolvedHeldDtrRowsForPeriod(period: {
@@ -2831,10 +2810,10 @@ async function getUnresolvedHeldDtrRowsForPeriod(period: {
   code: string;
   startDate: string;
   endDate: string;
-}) {
+}, database: DbClient = db) {
   const [manualHeldRows, flaggedSummaryRows, approvedHoldRows] =
     await Promise.all([
-      db
+      database
         .select({
           employeeId: employeeAttendanceDayStatusOverrides.employeeId,
           attendanceDate: employeeAttendanceDayStatusOverrides.attendanceDate,
@@ -2848,7 +2827,7 @@ async function getUnresolvedHeldDtrRowsForPeriod(period: {
             lte(employeeAttendanceDayStatusOverrides.attendanceDate, period.endDate)
           )
         ),
-      db
+      database
         .select({
           employeeId: attendanceDailySummaries.employeeId,
           attendanceDate: attendanceDailySummaries.attendanceDate,
@@ -2865,7 +2844,7 @@ async function getUnresolvedHeldDtrRowsForPeriod(period: {
             )
           )
         ),
-      db
+      database
         .select({
           employeeId: attendanceDtrHoldApprovals.employeeId,
           attendanceDate: attendanceDtrHoldApprovals.attendanceDate,
@@ -2915,8 +2894,8 @@ async function assertNoUnresolvedHeldDtrRowsForPayrollTransition(period: {
   code: string;
   startDate: string;
   endDate: string;
-}) {
-  const unresolvedRows = await getUnresolvedHeldDtrRowsForPeriod(period);
+}, database: DbClient = db) {
+  const unresolvedRows = await getUnresolvedHeldDtrRowsForPeriod(period, database);
 
   if (unresolvedRows.length === 0) return;
 
@@ -2925,7 +2904,7 @@ async function assertNoUnresolvedHeldDtrRowsForPayrollTransition(period: {
     .map((row) => `${row.employeeId}:${row.attendanceDate}`)
     .join(", ");
 
-  throw new Error(
+  throw new PayrollValidationError(
     `Payroll period ${period.code} has ${unresolvedRows.length} unresolved held DTR row(s). Resolve or approve held DTR before reviewing, approving, or posting payroll. Sample: ${sample}.`
   );
 }
@@ -3474,6 +3453,7 @@ export async function createOrRecomputePayrollRun(
       payrollRunId: runId,
       actorUserId,
       eventType: "Computed",
+      notes: JSON.stringify({ attendanceSourceInputRunId: await attendancePayrollSnapshot(tx, payrollPeriodId) }),
       fromStatus: latestRunForPeriod?.status ?? null,
       toStatus: "Draft",
       database: tx,
@@ -3497,68 +3477,44 @@ export async function transitionPayrollRunStatus(
   payrollRunId: string,
   nextStatus: PayrollRunTransitionStatus,
   actorUserId: string,
-  notes?: string | null
+  notes?: string | null,
+  database: typeof db = db
 ) {
-  const run = await db.query.payrollRuns.findFirst({
-    where: eq(payrollRuns.id, payrollRunId),
-    with: {
-      payrollPeriod: true,
-      employees: {
-        with: {
-          lines: true,
-        },
-      },
-    },
-  });
-
-  if (!run) {
-    throw new Error("Payroll run not found.");
-  }
-
-  if (isSameStatusTransition(run.status, nextStatus)) {
-    return run;
-  }
-
-  ensurePayrollTransitionAllowed(run.status, nextStatus);
-  if (nextStatus !== "Void") {
-    if (!run.payrollPeriod) {
-      throw new Error("Payroll period not found.");
-    }
-    await assertNoUnresolvedHeldDtrRowsForPayrollTransition(run.payrollPeriod);
-  }
-
-  if (nextStatus === "Posted") {
-    return db.transaction(async (tx) => {
-      await tx.execute(sql`select id from payroll_runs where id = ${payrollRunId} for update`);
-
-      const lockedRun = await tx.query.payrollRuns.findFirst({
-        where: eq(payrollRuns.id, payrollRunId),
-        with: {
-          payrollPeriod: true,
-          employees: {
-            with: {
-              lines: true,
-            },
+  return database.transaction(async tx => {
+    await lockAttendancePayrollInput(tx);
+    await tx.execute(sql`select id from payroll_periods where id = (select payroll_period_id from payroll_runs where id = ${payrollRunId}) for update`);
+    await tx.execute(sql`select id from payroll_runs where id = ${payrollRunId} for update`);
+    const run = await tx.query.payrollRuns.findFirst({
+      where: eq(payrollRuns.id, payrollRunId),
+      with: {
+        payrollPeriod: true,
+        employees: {
+          with: {
+            lines: true,
           },
         },
-      });
+      },
+    });
 
-      if (!lockedRun) {
-        throw new Error("Payroll run not found.");
-      }
+    if (!run) {
+      throw new Error("Payroll run not found.");
+    }
 
-      if (lockedRun.status === "Posted") {
-        return lockedRun;
-      }
+    if (isSameStatusTransition(run.status, nextStatus)) {
+      return run;
+    }
 
-      ensurePayrollTransitionAllowed(lockedRun.status, nextStatus);
-      if (!lockedRun.payrollPeriod) {
+    ensurePayrollTransitionAllowed(run.status, nextStatus);
+    if (nextStatus !== "Void") {
+      if (!run.payrollPeriod) {
         throw new Error("Payroll period not found.");
       }
-      await assertNoUnresolvedHeldDtrRowsForPayrollTransition(
-        lockedRun.payrollPeriod
-      );
+      await assertNoUnresolvedHeldDtrRowsForPayrollTransition(run.payrollPeriod, tx);
+      await assertAttendancePayrollSnapshot(tx, run.payrollPeriodId, run.id);
+    }
 
+    if (nextStatus === "Posted") {
+      const lockedRun = run;
       const loanLines = lockedRun.employees.flatMap((employeeRun) =>
         employeeRun.lines
           .filter(
@@ -3721,17 +3677,15 @@ export async function transitionPayrollRunStatus(
           },
         },
       });
-    });
-  }
+    }
 
-  const eventType =
-    nextStatus === "Reviewed"
-      ? "Reviewed"
-      : nextStatus === "Approved"
-        ? "Approved"
-        : "Voided";
+    const eventType =
+      nextStatus === "Reviewed"
+        ? "Reviewed"
+        : nextStatus === "Approved"
+          ? "Approved"
+          : "Voided";
 
-  return db.transaction(async (tx) => {
     const now = new Date();
 
     await tx
