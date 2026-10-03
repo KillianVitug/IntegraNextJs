@@ -1,6 +1,6 @@
 # Vercel preview and release preparation
 
-The owner authorized test setup and publication to draft PR #1, expressly excluding the merge. Work stays on `codex/attendance-api-integration`. Do not merge, push to `main`, change the production branch, use `vercel --prod`, or enable production syncing as part of this test.
+Historical Preview runbook. The owner subsequently authorized merging PR #1 and, on 3 October 2026, completing production activation. Use [the production rollout instructions](attendance-production-rollout.md) for that work. The Preview-specific settings below still apply to isolated tests.
 
 ## Existing destination and access
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { attendancePeriodUrl, selectAttendanceSourcePeriod, type AttendanceSourcePeriod } from "../lib/payroll/attendanceSourcePeriods";
+import { attendanceSourceStartDate, assertAttendanceSourcePeriodAllowed } from "../lib/payroll/attendanceSourceRollout";
 
 // Real failure shape: more than 120 seeded future periods pushed the current year out of the query.
 const periods: AttendanceSourcePeriod[] = [];
@@ -25,3 +26,15 @@ assert.equal(url, "/payroll/attendance-source?year=2026&periodId=test");
 assert.equal(selectAttendanceSourcePeriod(periods, Object.fromEntries(new URL(url, "https://example.test").searchParams), today).periodId, "test");
 assert.equal(attendancePeriodUrl("/payroll", 2026, "test"), "/payroll?year=2026&periodId=test");
 console.log("Attendance period selection passed: future years, explicit links, invalid/empty selection and return navigation.");
+
+assert.equal(attendanceSourceStartDate(""), null);
+assert.equal(attendanceSourceStartDate(" 2026-10-01 "), "2026-10-01");
+assert.equal(attendanceSourceStartDate("2028-02-29"), "2028-02-29");
+for (const invalid of ["2026-02-29", "2026-10-32", "2026-13-01", "10/01/2026", "invalid"]) {
+  assert.throws(() => attendanceSourceStartDate(invalid), /start date is invalid/);
+}
+assert.throws(() => assertAttendanceSourcePeriodAllowed("2026-09-16", "2026-10-01"), /earlier period retains/);
+assert.doesNotThrow(() => assertAttendanceSourcePeriodAllowed("2026-10-01", "2026-10-01"));
+assert.doesNotThrow(() => assertAttendanceSourcePeriodAllowed("2026-11-01", "2026-10-01"));
+assert.doesNotThrow(() => assertAttendanceSourcePeriodAllowed("2026-09-16", null));
+console.log("Attendance cutover checks passed: strict calendar dates, legacy opt-out, earlier-period rejection and future-period inclusion.");
