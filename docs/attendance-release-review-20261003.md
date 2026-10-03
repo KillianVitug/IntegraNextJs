@@ -1,7 +1,7 @@
 # Attendance integration review — 3 October 2026
 
 This update repairs review/approval safeguards without adding another migration.
-Keep the integration PR in draft until the outstanding acceptance below is complete.
+Historical pre-merge review. The owner subsequently authorized merging PR #1 and completing production activation; see [the rollout instructions](attendance-production-rollout.md). Unresolved payroll acceptance items below remain tracked separately.
 
 ## Implemented
 

@@ -8,6 +8,7 @@ import { adminAuditEvents, payrollRunEvents } from "@/db/schema";
 import { manilaWallTime, pullAttendanceSource, sourceDayOffset, type SourcePunch } from "./attendanceSourceClient";
 import { lockAttendancePayrollInput } from "./attendanceSourceGuard";
 import { PayrollValidationError } from "./validation";
+import { assertAttendanceSourcePeriodAllowed } from "./attendanceSourceRollout";
 
 export const attendanceSourceEnabled = () => process.env.ATTENDANCE_SOURCE_ENABLED === "true";
 export function requireAttendanceSource() { if (!attendanceSourceEnabled()) throw Error("Attendance API integration is disabled"); }
@@ -24,6 +25,7 @@ export async function syncAttendanceSourcePeriod(periodId: string, actorUserId: 
   requireAttendanceSource();
   const period = await db.query.payrollPeriods.findFirst({ where: eq(payrollPeriods.id, periodId) });
   if (!period) throw Error("Payroll period not found");
+  assertAttendanceSourcePeriodAllowed(period.startDate);
   const runId = randomUUID();
   // A partial pull never changes source events, summaries or payroll input.
   const from = sourceDayOffset(period.startDate, -1), through = sourceDayOffset(period.endDate, 1);
