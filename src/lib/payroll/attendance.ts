@@ -24,6 +24,16 @@ export type ParsedAttendanceLog = {
   isSyntheticCorrection?: boolean;
 };
 
+/** A calculation-only clock value; logDate/logTime are authoritative Manila wall time.
+ * UTC arithmetic here avoids the host's offset/DST. This is not a capture instant.
+ * Keep original loggedAt values for persistence, display and audit contracts.
+ */
+export function attendanceWallClockTime(log: Pick<ParsedAttendanceLog, "logDate" | "logTime">) {
+  return Date.parse(
+    `${log.logDate}T${log.logTime.length === 5 ? log.logTime + ":00" : log.logTime}Z`
+  );
+}
+
 export const ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG =
   "SPLIT_SHIFT_INCOMPLETE_PUNCHES";
 
@@ -984,12 +994,12 @@ function mapLoggedAtToAttendanceMinutes(args: {
   attendanceDate: string;
   shift: ShiftWindow;
 }) {
-  const baseMinutes = args.loggedAt.getHours() * 60 + args.loggedAt.getMinutes();
+  const baseMinutes = args.loggedAt.getUTCHours() * 60 + args.loggedAt.getUTCMinutes();
   if (!isOvernightShiftWindow(args.shift)) {
     return baseMinutes;
   }
 
-  return formatDateOnly(args.loggedAt) > args.attendanceDate
+  return args.loggedAt.toISOString().slice(0, 10) > args.attendanceDate
     ? baseMinutes + 1440
     : baseMinutes;
 }
@@ -1002,7 +1012,7 @@ function getNightMinutes(firstInAt: Date | null, lastOutAt: Date | null) {
 
   while (cursor < lastOutAt) {
     const next = new Date(Math.min(cursor.getTime() + 60_000, lastOutAt.getTime()));
-    const hour = cursor.getHours();
+    const hour = cursor.getUTCHours();
     if (hour >= 22 || hour < 6) total += 1;
     cursor.setTime(next.getTime());
   }
@@ -1047,8 +1057,8 @@ function getSegmentDurationMinutes(segment: WorkedSegment | null | undefined) {
 }
 
 function mapAttendanceMinutesToDate(attendanceDate: string, minutes: number) {
-  const mapped = new Date(`${attendanceDate}T00:00:00`);
-  mapped.setMinutes(minutes, 0, 0);
+  const mapped = new Date(`${attendanceDate}T00:00:00Z`);
+  mapped.setUTCMinutes(minutes, 0, 0);
   return mapped;
 }
 
@@ -1330,9 +1340,15 @@ export function summarizeEmployeeDay(
   paidLeaveMinutes = 0,
   unpaidLeaveMinutes = 0
 ): DailyAttendanceSummarySeed {
-  const orderedLogs = [...logs].sort(
-    (left, right) => left.loggedAt.getTime() - right.loggedAt.getTime()
+  const originalLogs = [...logs].sort(
+    (left, right) => attendanceWallClockTime(left) - attendanceWallClockTime(right)
   );
+  // Normalize only private calculation copies. Never rewrite stored/returned timestamps.
+  const orderedLogs = originalLogs.map(log => ({
+    ...log,
+    loggedAt: new Date(attendanceWallClockTime(log)),
+  }));
+  const originalTimes = new Map(orderedLogs.map((log, index) => [log.loggedAt, originalLogs[index].loggedAt]));
 
   const firstInAt = orderedLogs[0]?.loggedAt ?? null;
   const workedSegments = getWorkedSegments(orderedLogs);
@@ -1514,8 +1530,8 @@ export function summarizeEmployeeDay(
 
   return {
     attendanceDate,
-    firstInAt,
-    lastOutAt,
+    firstInAt: firstInAt ? originalTimes.get(firstInAt)! : null,
+    lastOutAt: lastOutAt ? originalTimes.get(lastOutAt)! : null,
     scheduledInTime: shift.checkInTime,
     scheduledOutTime: shift.checkOutTime,
     scheduledMinutes,
@@ -1543,12 +1559,12 @@ export function groupLogsByEmployeeAndAttendanceDate(
     let attendanceDate = log.logDate;
 
     if (resolveShiftWindow) {
-      const previousDate = formatDateOnly(
-        new Date(log.loggedAt.getTime() - 24 * 60 * 60 * 1000)
-      );
+      const previousDate = new Date(
+        Date.parse(`${log.logDate}T00:00:00Z`) - 24 * 60 * 60 * 1000
+      ).toISOString().slice(0, 10);
       const previousShift = resolveShiftWindow(log, previousDate);
       const previousOutMinutes = parseTimeToMinutes(previousShift?.checkOutTime ?? null);
-      const currentLogMinutes = log.loggedAt.getHours() * 60 + log.loggedAt.getMinutes();
+      const currentLogMinutes = parseTimeToMinutes(log.logTime)!;
 
       if (
         previousShift &&

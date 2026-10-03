@@ -14,6 +14,7 @@
     "start": "next start",
     "lint": "eslint src --max-warnings=0",
     "verify:attendance-parser": "tsx ./src/scripts/verifyAttendanceParser.ts",
+    "verify:attendance-civil-time": "tsx ./src/scripts/verifyAttendanceCivilTime.ts",
     "verify:philhealth-annualization": "tsx ./src/scripts/verifyPhilhealthAnnualization.ts",
     "verify:bir-tax": "tsx ./src/scripts/verifyBirTax.ts",
     "verify:loan-functionality": "tsx ./src/scripts/verifyLoanFunctionality.ts",
