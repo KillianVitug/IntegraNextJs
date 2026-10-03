@@ -1,5 +1,6 @@
 import {
   ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG,
+  attendanceWallClockTime,
   summarizeEmployeeDay,
   type DailyAttendanceSummarySeed,
   type ParsedAttendanceLog,
@@ -86,26 +87,6 @@ const DUPLICATE_CORRECTION_TYPES = new Set<AttendanceDtrCorrectionType>([
 ]);
 const SAME_DIRECTION_MAX_MINUTES = 120;
 
-function padTimePart(value: number) {
-  return String(value).padStart(2, "0");
-}
-
-function formatDateOnly(value: Date) {
-  return [
-    value.getFullYear(),
-    padTimePart(value.getMonth() + 1),
-    padTimePart(value.getDate()),
-  ].join("-");
-}
-
-function formatTimeOnly(value: Date) {
-  return [
-    padTimePart(value.getHours()),
-    padTimePart(value.getMinutes()),
-    padTimePart(value.getSeconds()),
-  ].join(":");
-}
-
 function parseTimeToMinutes(value: string | null | undefined) {
   if (!value) return null;
   const [hours, minutes] = value.split(":").map(Number);
@@ -118,11 +99,11 @@ function getScheduledOutAt(attendanceDate: string, shift: ShiftWindow) {
   const outMinutes = parseTimeToMinutes(shift.checkOutTime);
   if (inMinutes == null || outMinutes == null) return null;
 
-  const scheduledOutAt = new Date(`${attendanceDate}T00:00:00`);
-  scheduledOutAt.setMinutes(outMinutes, 0, 0);
+  const scheduledOutAt = new Date(`${attendanceDate}T00:00:00Z`);
+  scheduledOutAt.setUTCMinutes(outMinutes, 0, 0);
 
   if (outMinutes <= inMinutes) {
-    scheduledOutAt.setDate(scheduledOutAt.getDate() + 1);
+    scheduledOutAt.setUTCDate(scheduledOutAt.getUTCDate() + 1);
   }
 
   return scheduledOutAt;
@@ -176,9 +157,9 @@ function buildSyntheticScheduledOutPunch(args: {
   return serializePunch({
     ...firstLog,
     rawLogId: null,
-    loggedAt: scheduledOutAt,
-    logDate: formatDateOnly(scheduledOutAt),
-    logTime: formatTimeOnly(scheduledOutAt),
+    loggedAt: new Date(scheduledOutAt.toISOString().slice(0, -1)),
+    logDate: scheduledOutAt.toISOString().slice(0, 10),
+    logTime: scheduledOutAt.toISOString().slice(11, 19),
     direction: "OUT",
     sourceLine: 0,
     rawText: `Suggested scheduled OUT for ${args.attendanceDate}`,
@@ -301,7 +282,7 @@ export function applyApprovedAttendanceCorrections(
 ) {
   if (!corrections || corrections.length === 0) {
     return [...logs].sort(
-      (left, right) => left.loggedAt.getTime() - right.loggedAt.getTime()
+      (left, right) => attendanceWallClockTime(left) - attendanceWallClockTime(right)
     );
   }
 
@@ -324,7 +305,7 @@ export function applyApprovedAttendanceCorrections(
       (log) => log.rawLogId == null || !ignoredRawLogIds.has(log.rawLogId)
     ),
     ...syntheticPunches.map(deserializePunch),
-  ].sort((left, right) => left.loggedAt.getTime() - right.loggedAt.getTime());
+  ].sort((left, right) => attendanceWallClockTime(left) - attendanceWallClockTime(right));
 }
 
 function isSameDirectionDuplicateCandidate(
@@ -355,7 +336,7 @@ export function detectAttendanceCorrectionSuggestions(args: {
   const duplicateWindowMinutes =
     args.duplicateWindowMinutes ?? ATTENDANCE_DTR_DUPLICATE_WINDOW_MINUTES;
   const rawLogs = [...args.logs].sort(
-    (left, right) => left.loggedAt.getTime() - right.loggedAt.getTime()
+    (left, right) => attendanceWallClockTime(left) - attendanceWallClockTime(right)
   );
   const suggestions: AttendanceCorrectionSuggestionSeed[] = [];
   const duplicateRawLogIds = new Set<number>();
@@ -367,7 +348,7 @@ export function detectAttendanceCorrectionSuggestions(args: {
     if (currentRawLogId == null) continue;
 
     const minutesBetween = Math.round(
-      Math.abs(currentLog.loggedAt.getTime() - previousLog.loggedAt.getTime()) /
+      Math.abs(attendanceWallClockTime(currentLog) - attendanceWallClockTime(previousLog)) /
         60_000
     );
 
@@ -398,7 +379,7 @@ export function detectAttendanceCorrectionSuggestions(args: {
 
     const minutesBetween = Math.round(
       Math.abs(
-        currentLog.loggedAt.getTime() - previousLog.loggedAt.getTime()
+        attendanceWallClockTime(currentLog) - attendanceWallClockTime(previousLog)
       ) / 60_000
     );
     if (minutesBetween <= SAME_DIRECTION_MAX_MINUTES) {

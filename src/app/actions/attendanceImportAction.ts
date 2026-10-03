@@ -1,4 +1,6 @@
 "use server";
+import { assertFileAttendanceBatch } from "@/lib/payroll/validation";
+import { attendanceSourceVersion, confirmAttendanceSourceSummaryRefresh, attendanceSourceDateFilter } from "@/lib/payroll/attendanceSourceGuard";
 
 import { revalidatePath } from "next/cache";
 import { createHash } from "crypto";
@@ -734,8 +736,7 @@ async function loadAttendancePeriodSourceData(
           : scopedEmployeeIds
             ? inArray(attendanceRawLogs.employeeId, scopedEmployeeIds)
             : sql`TRUE`,
-        gte(attendanceRawLogs.logDate, payrollPeriod.startDate),
-        lte(attendanceRawLogs.logDate, payrollPeriod.endDate)
+        attendanceSourceDateFilter(payrollPeriod.startDate, payrollPeriod.endDate)
       )
     )
     .orderBy(
@@ -3107,6 +3108,8 @@ async function revertAttendanceImportBatchForActor(
     throw new Error("Attendance import batch not found.");
   }
 
+  assertFileAttendanceBatch(batch.sourceFormat);
+
   const payrollPeriod = batch.payrollPeriodId
     ? await db.query.payrollPeriods.findFirst({
         where: eq(payrollPeriods.id, batch.payrollPeriodId),
@@ -3604,6 +3607,7 @@ async function refreshAttendancePeriodSummariesForScope(args: {
   auditAction: string;
   auditDetails?: Record<string, unknown>;
 }) {
+  const sourceVersion = await attendanceSourceVersion(args.payrollPeriodId);
   const sourceData = await loadAttendancePeriodSourceData(
     db,
     args.payrollPeriodId,
@@ -3638,6 +3642,7 @@ async function refreshAttendancePeriodSummariesForScope(args: {
   });
 
   const summaryRefreshResult = await db.transaction(async (tx) => {
+    await confirmAttendanceSourceSummaryRefresh(tx, args.payrollPeriodId, sourceVersion, false);
     const staleRunCount = await markPayrollPeriodRunsStale({
       tx,
       payrollPeriodId: sourceData.payrollPeriod.id,
@@ -3742,6 +3747,9 @@ async function refreshAttendancePeriodSummariesForScope(args: {
     employeeIds: matchedEmployeeIds,
     refreshableExceptionRowIds: summaryRefreshResult.refreshableExceptionRowIds,
   });
+
+  // Only a successful full-period rebuild (including manual-payroll refresh) clears the guard.
+  await db.transaction(tx => confirmAttendanceSourceSummaryRefresh(tx, args.payrollPeriodId, sourceVersion, !args.employeeIds));
 
   await recordAdminAuditEvent({
     actorUserId: args.actorUserId,

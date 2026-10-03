@@ -14,6 +14,7 @@
     "start": "next start",
     "lint": "eslint src --max-warnings=0",
     "verify:attendance-parser": "tsx ./src/scripts/verifyAttendanceParser.ts",
+    "verify:attendance-civil-time": "tsx ./src/scripts/verifyAttendanceCivilTime.ts",
     "verify:philhealth-annualization": "tsx ./src/scripts/verifyPhilhealthAnnualization.ts",
     "verify:bir-tax": "tsx ./src/scripts/verifyBirTax.ts",
     "verify:loan-functionality": "tsx ./src/scripts/verifyLoanFunctionality.ts",
@@ -37,7 +38,14 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx ./src/db/migrate.ts",
     "auth:bootstrap-admin": "tsx ./src/scripts/bootstrapAdmin.ts",
-    "auth:create-admin": "tsx ./src/scripts/createAdmin.ts"
+    "auth:create-admin": "tsx ./src/scripts/createAdmin.ts",
+    "verify:attendance-source": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceSource.ts",
+    "verify:attendance-release-guards": "node --conditions=react-server --require ./src/scripts/attendanceTest/framework-test-stub.cjs --import tsx ./src/scripts/verifyAttendanceReleaseGuards.ts",
+    "verify:attendance-source-periods": "tsx ./src/scripts/verifyAttendanceSourcePeriods.ts",
+    "verify:attendance-timezones": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceTimezones.ts",
+    "attendance:test": "node scripts/attendance-test.cjs",
+    "verify:attendance-test-setup": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceTestSetup.ts",
+    "verify:attendance-scheduler": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceScheduler.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -83,6 +91,7 @@
     "zustand": "^5.0.11"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
     "@eslint/eslintrc": "^3",
     "@playwright/test": "^1.60.0",
     "@types/node": "^20",

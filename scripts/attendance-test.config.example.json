@@ -1,0 +1,11 @@
+{
+  "_instructions": "TEST ONLY. Copy to ignored .attendance-test/config.local.json; enter secrets privately. A maintainer must independently pin the Neon test endpoint first. Never use main/production. No inherited environment values are used.",
+  "databaseUrl": "",
+  "sourceToken": "",
+  "periodId": "",
+  "periodStart": "",
+  "periodEnd": "",
+  "actorUserId": "",
+  "mappings": [],
+  "comparisons": []
+}

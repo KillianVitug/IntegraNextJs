@@ -185,6 +185,7 @@ export const loanStatusEnum = pgEnum("loan_status_enum", [
 export const attendanceImportFormatEnum = pgEnum("attendance_import_format", [
   "CSV",
   "TXT",
+  "API",
 ]);
 
 export const attendanceImportStatusEnum = pgEnum("attendance_import_status", [
@@ -3801,3 +3802,5 @@ export const birWithholdingTaxBracketsRelations = relations(
     }),
   })
 );
+
+export * from "./attendanceSourceSchema";

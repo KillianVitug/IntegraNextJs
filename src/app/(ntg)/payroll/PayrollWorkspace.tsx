@@ -6958,7 +6958,10 @@ export function PayrollWorkspace({
   ) {
     try {
       setActionState(label);
-      await callback();
+      const result = await callback();
+      if (result && typeof result === "object" && "ok" in result && result.ok === false && "error" in result) {
+        throw new Error(String(result.error));
+      }
       invalidatePayrollResourceCache(["reports:", "payslip:"]);
       await refreshWorkspaceSnapshot();
       await refreshManualPayrollAfterExternalChange();
@@ -8586,7 +8589,8 @@ export function PayrollWorkspace({
                       void runAction(
                         "void-run",
                         async () => {
-                          await voidPayrollRun(selectedRun.id, reason);
+                          const outcome = await voidPayrollRun(selectedRun.id, reason);
+                          if (!outcome.ok) throw new Error(outcome.error);
                           invalidatePayrollResourceCache([
                             `account-code:${selectedPeriod.id}:`,
                             `manual:${selectedPeriod.id}:`,
@@ -12220,7 +12224,7 @@ export function PayrollWorkspace({
                   <TableBody>
                     {attendanceBatches.map((batch) => {
                       const revertActionKey = `revert-attendance-${batch.id}`;
-                      const canRevert = batch.status === "Processed";
+                      const canRevert = batch.status === "Processed" && batch.sourceFormat !== "API";
                       const isBatchExpanded = expandedAttendanceBatchIds.has(
                         batch.id
                       );
@@ -12297,7 +12301,7 @@ export function PayrollWorkspace({
                               >
                                 {actionState === revertActionKey
                                   ? "Reverting..."
-                                  : "Revert"}
+                                  : batch.sourceFormat === "API" ? "Managed by API" : "Revert"}
                               </Button>
                             </TableCell>
                           </TableRow>
