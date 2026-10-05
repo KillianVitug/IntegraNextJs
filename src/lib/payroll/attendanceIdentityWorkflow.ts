@@ -5,7 +5,7 @@ import { type DbClient } from "@/db";
 import { employees, payrollPeriods, payrollRuns, payrollRunEvents, adminAuditEvents } from "@/db/schema";
 import { attendanceSourceMappings as mappings, attendanceSourceIdentities as identities, attendanceMatchBatches as batches, attendanceMatchChanges as changes, attendanceSourceEvents as events, attendanceSourceProjections as projections, attendanceSourcePeriods as sourcePeriods } from "@/db/attendanceSourceSchema";
 import { attendanceMatchingInbox } from "./attendanceMatchingInbox";
-import { batchSuggestion, verificationReason, type IdentityClassification, type MatchBoard, type MatchHistoryBatch, type MatchMutation, type MatchPerson } from "./attendanceMatching";
+import { batchSuggestion, nameDifferenceWarning, verificationReason, type IdentityClassification, type MatchBoard, type MatchHistoryBatch, type MatchMutation, type MatchPerson } from "./attendanceMatching";
 import { lockAttendancePayrollInput } from "./attendanceSourceGuard";
 import { PayrollValidationError } from "./validation";
 
@@ -66,7 +66,7 @@ type ChangeSpec = { person: MatchPerson; employeeId: string | null; classificati
 export async function mutateAttendanceMatching(database: DbClient, actor: string, request: MatchMutation) {
   enabled();
   if (!request || request.confirmed !== true || !["Match", "Unmatch", "Undo", "TestOnly", "Restore"].includes(request.kind)) fail("Confirm the selected changes before saving.");
-  const reason = request.kind === "Match" ? (typeof request.method === "string" && typeof request.note === "string" ? verificationReason(request.method, request.note) : null) : request.reason;
+  let reason = request.kind === "Match" ? (typeof request.method === "string" && typeof request.note === "string" ? verificationReason(request.method, request.note) : null) : request.reason;
   if (typeof reason !== "string" || !reason.trim() || reason.length > 500) fail("Enter a verification reason of 1–500 characters.");
   await lockAttendancePayrollInput(database);
   // Keep active/name/number checks stable through the write, including undo to a
@@ -74,6 +74,7 @@ export async function mutateAttendanceMatching(database: DbClient, actor: string
   await database.select({ id: employees.id }).from(employees).for("share");
   const board = await loadMatchBoard(database);
   const specs: ChangeSpec[] = [];
+  const nameWarningSourceIds: string[] = [];
   function checked(sourceId: string, version: string) {
     const person = board.people.find(p => p.sourceId === sourceId);
     if (!person || typeof version !== "string" || person.version !== version) fail("The attendance identity, employee roster or match changed while you were reviewing. Refresh and review the batch again; nothing was saved.");
@@ -88,6 +89,7 @@ export async function mutateAttendanceMatching(database: DbClient, actor: string
       const person = checked(item.sourceId, item.version); activeEmployee(item.employeeId);
       if (person.classification === "TestOnly") fail("A test-only identity cannot be matched. Restore it to Needs review first.");
       if (item.reviewed !== true && (person.classification !== "Active" || person.employeeId || batchSuggestion(person, board.people, board.employees)?.id !== item.employeeId)) fail("This person needs individual identity verification before joining the batch.");
+      if (nameDifferenceWarning(person, board.employees.find(e => e.id === item.employeeId)!)) nameWarningSourceIds.push(person.sourceId);
       specs.push({ person, employeeId: item.employeeId, classification: "Active" });
     }
   } else if (request.kind === "Undo") {
@@ -118,6 +120,10 @@ export async function mutateAttendanceMatching(database: DbClient, actor: string
       specs.push({ person, employeeId: null, classification: "NeedsReview" });
     }
   }
+  if (nameWarningSourceIds.length) {
+    if (request.kind !== "Match" || request.nameDifferencesAcknowledged !== true) fail("Acknowledge the highlighted name differences or missing names before saving. Nothing was saved.");
+    reason = `${reason.trim()} Name differences or missing names acknowledged for ${nameWarningSourceIds.length} selected identities.`;
+  }
   const changed = specs.filter(s => s.employeeId !== s.person.employeeId || s.classification !== s.person.classification);
   if (!changed.length) fail("These matches are already current. No changes were needed.");
   const batchId = randomUUID();
@@ -138,13 +144,13 @@ export async function mutateAttendanceMatching(database: DbClient, actor: string
       beforeClassification: spec.person.classification, afterClassification: spec.classification, afterRevision: revision, reversesChangeId: spec.reversesChangeId ?? null });
   }
   const impact = mappingChanges.length ? await invalidateMappings(database, actor, mappingChanges) : { affectedPeriodIds: [], protectedPeriodIds: [] };
-  await database.insert(adminAuditEvents).values({ actorUserId: actor, entityType: "attendance_match_batch", entityId: batchId, action: `attendance.matching.${request.kind.toLowerCase()}`, details: JSON.stringify({ sourceIds: changed.map(s => s.person.sourceId), reason, ...impact }) });
+  await database.insert(adminAuditEvents).values({ actorUserId: actor, entityType: "attendance_match_batch", entityId: batchId, action: `attendance.matching.${request.kind.toLowerCase()}`, details: JSON.stringify({ sourceIds: changed.map(s => s.person.sourceId), reason, nameWarningSourceIds, nameDifferencesAcknowledged: nameWarningSourceIds.length > 0, ...impact }) });
   const message = request.kind === "TestOnly" ? "Moved to Test only. Matching queues are updated; existing punches and payroll exceptions still need separate review." : request.kind === "Restore" ? "Restored to Needs review. Verify the identity before matching; attendance corrections are unchanged." : `${changed.length} employee match(es) updated. Sync affected periods, refresh DTR and recompute/review open payroll. ${impact.affectedPeriodIds.length} open period(s) need reconciliation.${impact.protectedPeriodIds.length ? ` ${impact.protectedPeriodIds.length} closed/posted period(s) were preserved and need separate reviewed adjustments.` : ""}`;
   return { batchId, message, ...impact };
 }
 
 /** Trusted CLI compatibility. Browser actions must provide their reviewed version. */
-export async function saveAttendanceSourceMapping(database: DbClient, actor: string, sourceId: string, employeeId: string, reason: string) {
+export async function saveAttendanceSourceMapping(database: DbClient, actor: string, sourceId: string, employeeId: string, reason: string, nameDifferencesAcknowledged = false) {
   enabled(); await lockAttendancePayrollInput(database);
   const board = await loadMatchBoard(database), person = board.people.find(p => p.sourceId === sourceId);
   if (!person) fail("Sync this attendance identity before matching it.");
@@ -152,6 +158,6 @@ export async function saveAttendanceSourceMapping(database: DbClient, actor: str
   if (!board.employees.some(e => e.id === employeeId)) fail("Select an active payroll employee");
   if (typeof reason !== "string" || !reason.trim() || reason.length > 450) fail("Employee IDs and a verification reason are required");
   if (person!.employeeId === employeeId) return { changed: false, affectedPeriodIds: [] as string[] };
-  const result = await mutateAttendanceMatching(database, actor, { kind: "Match", items: [{ sourceId, employeeId, version: person!.version, reviewed: true }], method: "other", note: reason, confirmed: true });
+  const result = await mutateAttendanceMatching(database, actor, { kind: "Match", items: [{ sourceId, employeeId, version: person!.version, reviewed: true }], method: "other", note: reason, confirmed: true, nameDifferencesAcknowledged });
   return { changed: true, affectedPeriodIds: result.affectedPeriodIds };
 }

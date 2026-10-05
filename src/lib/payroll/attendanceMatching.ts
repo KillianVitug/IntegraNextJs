@@ -57,17 +57,30 @@ export type MatchHistoryChange = {
 export type MatchHistoryBatch = { id: string; kind: string; actor: string; reason: string; createdAt: string; changes: MatchHistoryChange[] };
 export type MatchBoard = { people: MatchPerson[]; employees: PayrollMatchEmployee[]; history: MatchHistoryBatch[]; historyCursor: string | null };
 export type MatchMutation =
-  | { kind: "Match"; items: BatchMatchItem[]; method: string; note: string; confirmed: boolean }
+  | { kind: "Match"; items: BatchMatchItem[]; method: string; note: string; confirmed: boolean; nameDifferencesAcknowledged?: boolean }
   | { kind: "Unmatch" | "TestOnly" | "Restore"; sourceId: string; version: string; reason: string; confirmed: boolean }
   | { kind: "Undo"; batchId: string; items: { changeId: string; version: string }[]; reason: string; confirmed: boolean };
 export type WorkflowResult = { ok: true; data: { message: string; board: MatchBoard; batchId: string } } | { ok: false; error: string };
 
-/** Conservative bulk suggestions; all recorded names and both ID namespaces must agree. */
+export function sameIdCandidates(person: AttendancePerson, employees: PayrollMatchEmployee[]) {
+  const key = codeKey(person.sourceId);
+  return key ? employees.filter(e => codeKey(e.employeeNo) === key) : [];
+}
+export function nameDifferenceWarning(person: AttendancePerson, employee: PayrollMatchEmployee) {
+  if (!person.names.length || person.names.some(name => !nameKey(name)) || !nameKey(employee.name)) return "Name information is missing. Check this identity before confirming.";
+  return person.names.every(name => nameKey(name) === nameKey(employee.name)) ? null : "Names differ. Check this identity before confirming.";
+}
+export function identityReviewReason(person: AttendancePerson, people: AttendancePerson[], employees: PayrollMatchEmployee[]) {
+  if (people.filter(p => codeKey(p.sourceId) === codeKey(person.sourceId)).length > 1) return "Multiple attendance IDs become the same number after removing leading zeros. Review individually.";
+  const candidates = sameIdCandidates(person, employees);
+  return candidates.length > 1 ? `${candidates.length} Integra employees share this employee number. Choose the correct person in Review match.` : "No active Integra employee has this employee number. Review individually.";
+}
+/** Unique IDs create suggestions; name differences require acknowledgment at save. */
 export function batchSuggestion(person: AttendancePerson, people: AttendancePerson[], employees: PayrollMatchEmployee[]) {
   const key = codeKey(person.sourceId);
   if (!key || people.filter(p => codeKey(p.sourceId) === key).length !== 1) return null;
-  const candidates = employees.filter(e => codeKey(e.employeeNo) === key);
-  if (candidates.length !== 1 || !person.names.length || !person.names.every(name => nameKey(name) && nameKey(name) === nameKey(candidates[0].name))) return null;
+  const candidates = sameIdCandidates(person, employees);
+  if (candidates.length !== 1) return null;
   return candidates[0];
 }
 export function matchQueue(person: MatchPerson, people: MatchPerson[], employees: PayrollMatchEmployee[]) {

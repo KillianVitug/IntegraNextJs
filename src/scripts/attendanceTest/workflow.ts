@@ -158,7 +158,7 @@ export async function writeOnce(database: Database, c: TestConfig, records: Sour
     }
     for (const m of c.mappings) {
       const existing = await query("SELECT source_employee_id FROM attendance_source_mappings WHERE source_employee_id=$1", [m.sourceEmployeeId]);
-      if (!existing.rows.length) await saveAttendanceSourceMapping(tx, c.actorUserId, m.sourceEmployeeId, m.employeeId, m.reason);
+      if (!existing.rows.length) await saveAttendanceSourceMapping(tx, c.actorUserId, m.sourceEmployeeId, m.employeeId, m.reason, m.nameDifferencesAcknowledged === true);
     }
     const id = randomUUID();
     await tx.insert(schema.attendanceSourceRuns).values({ id, payrollPeriodId: c.periodId, state: "Fetching", startedAt: sql`clock_timestamp()`, actorUserId: c.actorUserId, fromDate: sourceDayOffset(c.periodStart, -1), throughDate: sourceDayOffset(c.periodEnd, 1) });

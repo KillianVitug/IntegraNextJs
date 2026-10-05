@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { EmployeeMatching } from "../app/(ntg)/payroll/attendance-source/employee-matching";
-import { verificationReason, type MatchBoard, type MatchHistoryBatch, type MatchHistoryChange, type MatchMutation, type WorkflowResult } from "../lib/payroll/attendanceMatching";
+import { nameDifferenceWarning, verificationReason, type MatchBoard, type MatchHistoryBatch, type MatchHistoryChange, type MatchMutation, type WorkflowResult } from "../lib/payroll/attendanceMatching";
 
 const employees = [
   { id: "maria", employeeNo: "00404", name: "Maria Santos" },
@@ -10,11 +10,12 @@ const employees = [
   { id: "ana", employeeNo: "00615", name: "Ana Cruz" },
   { id: "luis", employeeNo: "00790", name: "Luis Garcia" },
   { id: "jose", employeeNo: "00818", name: "Jose Dela Cruz" },
+  { id: "juan", employeeNo: "818", name: "Juan Dela Cruz" },
   { id: "paolo", employeeNo: "00905", name: "Paolo Ramos" },
   { id: "miguel", employeeNo: "00906", name: "Miguel Ramos" },
 ];
 const initial: MatchBoard = { employees, history: [], historyCursor: null, people: [
-  ["404", "Maria Santos", "North"], ["521", "REYES, CARLO", "Central"], ["615", "Ana Cruz", "South"], ["790", "Luis Garcia", "East"],
+  ["404", "Maria Santos", "North"], ["521", "REYES, CARLO", "Central"], ["615", "", "South"], ["790", "Luis Garcia", "East"],
   ["818", "J. Dela Cruz", "North"], ["905", "Miguel Ramos", "South"], ["2", "Training account", "TEST"],
 ].map(([sourceId, personName, branch]) => ({ sourceId, names: [personName], branches: [branch], punchCount: 2, validCount: 2, lastCapturedAt: "2026-10-05T01:00:00Z", employeeId: null, classification: "Active", version: sourceId + "-initial", classificationReason: "", classificationActor: null, classificationAt: null })) };
 function Preview() {
@@ -24,7 +25,12 @@ function Preview() {
     const next: MatchBoard = JSON.parse(JSON.stringify(board));
     const batchId = crypto.randomUUID(), rows: MatchHistoryChange[] = [];
     const selected = request.kind === "Match" ? request.items.map(i => ({ sourceId: i.sourceId, employeeId: i.employeeId, classification: "Active" as const })) : request.kind === "Undo" ? request.items.map(i => { const old = board.history.find(b => b.id === request.batchId)!.changes.find(c => c.id === i.changeId)!; return { sourceId: old.sourceId, employeeId: old.beforeEmployeeId, classification: old.beforeClassification as "Active", reversal: old.id }; }) : [{ sourceId: request.sourceId, employeeId: null, classification: request.kind === "TestOnly" ? "TestOnly" as const : "NeedsReview" as const }];
-    const reason = request.kind === "Match" ? verificationReason(request.method, request.note)! : request.reason;
+    let reason = request.kind === "Match" ? verificationReason(request.method, request.note)! : request.reason;
+    if (request.kind === "Match") {
+      const warned = request.items.filter(i => nameDifferenceWarning(board.people.find(p => p.sourceId === i.sourceId)!, employees.find(e => e.id === i.employeeId)!));
+      if (warned.length && request.nameDifferencesAcknowledged !== true) return { ok: false, error: "Acknowledge the highlighted name differences or missing names before saving." };
+      if (warned.length) reason += ` Name differences or missing names acknowledged for ${warned.length} selected identities.`;
+    }
     for (const entry of selected) {
       const person = next.people.find(p => p.sourceId === entry.sourceId)!;
       const label = (id: string | null) => { const e = employees.find(e => e.id === id); return e ? `${e.name} · ${e.employeeNo}` : null; };

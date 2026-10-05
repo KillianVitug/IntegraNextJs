@@ -85,7 +85,7 @@ async function main() {
     await database.transaction(tx => saveAttendanceSourceMapping(tx as unknown as DbClient, actor, "10001", employee, "Verify unchanged"));
     assert.equal((await database.select().from(schema.payrollRuns))[0].status, "Approved");
     const rawBefore = await database.select().from(schema.attendanceRawLogs);
-    await database.transaction(tx => saveAttendanceSourceMapping(tx as unknown as DbClient, actor, "10001", replacement, "Verified correction"));
+    await database.transaction(tx => saveAttendanceSourceMapping(tx as unknown as DbClient, actor, "10001", replacement, "Verified correction", true));
     const stale = (await database.select().from(schema.payrollRuns))[0];
     assert.equal(stale.status, "Stale"); assert.equal(stale.reviewedAt, null); assert.equal(stale.approvedAt, null);
     assert.deepEqual(await database.select().from(schema.attendanceRawLogs), rawBefore, "Mapping save cannot rewrite evidence before sync");
@@ -125,7 +125,7 @@ async function main() {
     assert.equal((await database.select().from(schema.loanInstallments))[0].status, "Paid");
     await assert.rejects(() => transitionPayrollRunStatus(payrollId, "Void", actor, "Forbidden posted void", engineDb), /cannot be voided/);
     const postedRaw = await database.select().from(schema.attendanceRawLogs);
-    await database.transaction(tx => saveAttendanceSourceMapping(tx as unknown as DbClient, actor, "10001", employee, "After-post mapping review"));
+    await database.transaction(tx => saveAttendanceSourceMapping(tx as unknown as DbClient, actor, "10001", employee, "After-post mapping review", true));
     assert.equal((await database.select().from(schema.payrollRuns))[0].status, "Posted");
     assert.deepEqual(await database.select().from(schema.attendanceRawLogs), postedRaw);
     assert.throws(() => assertFileAttendanceBatch("API"), /cannot be reverted/);

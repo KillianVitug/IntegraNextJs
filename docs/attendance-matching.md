@@ -4,11 +4,11 @@ Open **Payroll → Attendance connection** as an administrator. The connection m
 
 ## Verify a batch
 
-1. Open **Suggested**. Suggestions require a unique matching employee number (leading zeros are ignored) and agreeing full names. Equal numbers with conflicting or missing names stay in **Needs review**. Nobody is selected or matched automatically.
+1. Open **Suggested**. Suggestions require a unique matching employee number (leading zeros are ignored). Names are supporting information: different or missing names stay in **Suggested** with a visible warning. Duplicate numbers require individual review in **Needs review**. Nobody is selected or matched automatically.
 2. Select individual people or **Select all suggestions**, then **Review matches**. Review the attendance person and Integra employee side by side.
-3. Choose the verification method, optionally add a batch note, and confirm that every selected identity is correct. **Other evidence** requires a note. Save up to 100 people together.
+3. Choose the verification method, optionally add a batch note, and confirm that every selected identity is correct. **Other evidence** requires a note. When any selected names differ or are missing, also acknowledge the highlighted differences after verifying the people. Save up to 100 people together.
 4. For a conflict, open **Needs review → Review match**, search for the confirmed employee, verify the identity, and **Add verified person to batch**. Differences require human confirmation; mixed people sharing one attendance ID require correction in Attendance first.
-5. After saving, sync each affected period, refresh DTR summaries, and recompute/review affected open payroll. Matching applies across periods. Closed or posted payroll remains unchanged and requires a separate reviewed correction.
+5. After saving, sync each affected period, refresh DTR summaries, and recompute/review affected open payroll. Matching applies across periods. Name-warning acknowledgment is recorded in the existing batch history and audit. Closed or posted payroll remains unchanged and requires a separate reviewed correction.
 
 If a person, employee roster or mapping changes during review, the server rejects the entire selected batch. Refresh and review again. A failed save keeps the selection and entered evidence available to retry.
 
@@ -28,7 +28,7 @@ Later edits and inactive prior employees block an old reversal. The batch either
 
 ## Release and data controls
 
-Migration `0120_attendance_matching_workflow` adds three empty classification/history tables. It does not classify any real identity, modify existing matches or alter punches/payroll. Deploy it before this application build; old application code remains compatible. No sample choices are seeded into production.
+Migration `0120_attendance_matching_workflow` adds three empty classification/history tables. It does not classify any real identity, modify existing matches or alter punches/payroll. Deploy it before this application build; old application code remains compatible. No sample choices are seeded into production. The subsequent ID-first suggestion update requires no additional migration.
 
 All writes require administrator access and the enabled connection. A shared attendance/payroll input lock serializes batch mutations, sync and payroll input checks; employee row locks keep reviewed roster values stable during writes. Open payroll input is invalidated on mapping changes. Identity revisions also require a fresh sync after removal/restoration, including when the old mapping no longer exists. Closed/Posted periods are preserved.
 
