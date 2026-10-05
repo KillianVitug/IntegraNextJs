@@ -4,6 +4,9 @@ import { attendanceSourcePeriods, attendanceSourceRuns, attendanceSourceMappings
 import { attendanceImportBatches, attendanceRawLogs, payrollRunEvents } from "@/db/schema";
 import { sourceDayOffset } from "./attendanceSourceClient";
 import { PayrollValidationError } from "./validation";
+export class AttendanceSourceIssue extends PayrollValidationError {
+  constructor(public code:string, message:string, public needsSync:boolean) { super(message); }
+}
 
 export async function lockAttendancePayrollInput(tx: DbClient) {
   await tx.execute(sql`select pg_advisory_xact_lock(73612849)`);
@@ -19,7 +22,8 @@ export function attendanceApiRequired(periodId: string) {
 export function attendanceSourceDateFilter(start: string, end: string) {
   const original=and(gte(attendanceRawLogs.logDate,start),lte(attendanceRawLogs.logDate,end));
   if(process.env.ATTENDANCE_SOURCE_ENABLED !== "true") return original;
-  return or(original,and(eq(attendanceImportBatches.sourceFormat,"API"),gte(attendanceRawLogs.logDate,sourceDayOffset(start,-1)),lte(attendanceRawLogs.logDate,sourceDayOffset(end,1))));
+  const dates=or(original,and(eq(attendanceImportBatches.sourceFormat,"API"),gte(attendanceRawLogs.logDate,sourceDayOffset(start,-1)),lte(attendanceRawLogs.logDate,sourceDayOffset(end,1))));
+  return process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"?and(dates,sql`not exists(select 1 from attendance_work_exclusions x where x.raw_log_id=${attendanceRawLogs.id} and x.active)`):dates;
 }
 export async function attendanceSourceVersion(periodId: string, database: DbClient = db) {
   if (process.env.ATTENDANCE_SOURCE_ENABLED !== "true") return null;
@@ -46,7 +50,7 @@ export async function assertAttendanceSourceReady(periodId: string, database: Db
   const [latest] = await database.select().from(attendanceSourceRuns).where(eq(attendanceSourceRuns.payrollPeriodId, periodId)).orderBy(desc(attendanceSourceRuns.startedAt)).limit(1);
   const [run] = await database.select().from(attendanceSourceRuns).where(and(eq(attendanceSourceRuns.payrollPeriodId, periodId), eq(attendanceSourceRuns.state, "Complete"))).orderBy(desc(attendanceSourceRuns.startedAt)).limit(1);
   const resolutionChanges = await database.select({ id: attendanceResolutions.id }).from(attendanceResolutions).where(and(or(eq(attendanceResolutions.payrollPeriodId, periodId), sql`${attendanceResolutions.duplicateMetadata}->'impactedPeriodIds' @> jsonb_build_array(${periodId}::text)`, sql`exists (select 1 from attendance_source_projections rp where rp.payroll_period_id = ${periodId}::uuid and ${attendanceResolutions.eventIds} @> jsonb_build_array(rp.event_id::text))`), or(sql`${attendanceResolutions.state} IN ('Pending','Sending','Failed')`, run ? sql`${attendanceResolutions.updatedAt} > ${run.startedAt}` : sql`true`))).limit(1);
-  if (resolutionChanges.length) throw new PayrollValidationError("Attendance resolutions need approval or changed after this pull. Resolve pending cases, sync again and refresh DTR before continuing payroll.");
+  if (resolutionChanges.length) throw new AttendanceSourceIssue("RESOLUTION_CHANGED","Attendance resolutions need approval or changed after this pull. Resolve pending cases, sync again and refresh DTR before continuing payroll.",true);
   if (!run) {
     if (latest || required) throw new PayrollValidationError("This period has no successful attendance API sync. Open Attendance connection and sync the whole period before computing payroll.");
     return null;
@@ -57,18 +61,19 @@ export async function assertAttendanceSourceReady(periodId: string, database: Db
     .innerJoin(attendanceSourceEvents, eq(attendanceSourceEvents.sourceEmployeeId, attendanceSourceMappings.sourceEmployeeId))
     .innerJoin(attendanceSourceProjections, eq(attendanceSourceProjections.eventId, attendanceSourceEvents.eventId))
     .where(and(eq(attendanceSourceProjections.payrollPeriodId, periodId), sql`${attendanceSourceMappings.updatedAt} > ${run.startedAt}`)).limit(1);
-  if (changedMappings.length) throw new PayrollValidationError("Employee mappings changed after this attendance pull started. Sync the period again, refresh DTR summaries and recompute payroll.");
+  if (changedMappings.length) throw new AttendanceSourceIssue("MAPPING_CHANGED","Employee mappings changed after this attendance pull started. Sync the period again, refresh DTR summaries and recompute payroll.",true);
   // Durable identity revisions also cover removed mappings; absence of a mapping
   // must never let an old successful sync/summarization authorize payroll.
   const identityChanges = await database.select({ sourceId: attendanceSourceIdentities.sourceEmployeeId }).from(attendanceSourceIdentities)
     .innerJoin(attendanceSourceEvents, eq(attendanceSourceEvents.sourceEmployeeId, attendanceSourceIdentities.sourceEmployeeId))
     .innerJoin(attendanceSourceProjections, eq(attendanceSourceProjections.eventId, attendanceSourceEvents.eventId))
     .where(and(eq(attendanceSourceProjections.payrollPeriodId, periodId), sql`${attendanceSourceIdentities.updatedAt} > ${run.startedAt}`)).limit(1);
-  if (identityChanges.length) throw new PayrollValidationError("Employee mappings or classifications changed after this attendance pull started. Sync again and refresh DTR before continuing payroll.");
+  if (identityChanges.length) throw new AttendanceSourceIssue("IDENTITY_CHANGED","Employee mappings or classifications changed after this attendance pull started. Sync again and refresh DTR before continuing payroll.",true);
   const changedEvidence = await database.select({ id: attendanceSourceEvents.eventId }).from(attendanceSourceProjections).innerJoin(attendanceSourceEvents, eq(attendanceSourceEvents.eventId, attendanceSourceProjections.eventId)).where(and(eq(attendanceSourceProjections.payrollPeriodId, periodId), sql`${attendanceSourceEvents.seenAt} > ${run.completedAt}`)).limit(1);
-  if (changedEvidence.length) throw new PayrollValidationError("Source evidence changed since this period was synced. Sync again and review the updated attendance.");
+  if (changedEvidence.length) throw new AttendanceSourceIssue("SOURCE_CHANGED","Source evidence changed since this period was synced. Sync again and review the updated attendance.",true);
   const [state] = await database.select().from(attendanceSourcePeriods).where(eq(attendanceSourcePeriods.payrollPeriodId, periodId));
   const counts = run?.counts as Record<string, number> | null;
+  if(process.env.ATTENDANCE_WORKBENCH_ENABLED==="true")await (await import("./attendanceWorkbenchDelivery")).assertWorkbenchReady(periodId,database);
   if (!counts || counts.unmatched || counts.withheld || counts.lateChanges || counts.boundaryReview || counts.clearedEmployees) throw new PayrollValidationError(`Attendance source has unresolved exceptions: ${counts?.unmatched ?? 0} unmatched, ${counts?.withheld ?? 0} withheld, ${counts?.boundaryReview ?? 0} boundary reviews, ${counts?.clearedEmployees ?? 0} cleared employee-periods and ${counts?.lateChanges ?? 0} late changes. Open Attendance connection, resolve the listed issues and sync again. Counts can overlap.`);
   if (state && state.inputRunId !== state.summariesRunId) throw new PayrollValidationError("Attendance API input changed. Refresh attendance summaries before computing payroll.");
   return run.id;

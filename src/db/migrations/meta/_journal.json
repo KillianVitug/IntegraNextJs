@@ -841,6 +841,13 @@
       "when": 1791331200000,
       "tag": "0122_attendance_duplicates",
       "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1791417600000,
+      "tag": "0123_attendance_workbench",
+      "breakpoints": true
     }
   ]
 }

@@ -4,7 +4,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { db, type DbClient } from "@/db";
 import { employees, payrollPeriods, payrollRuns, payrollRunEvents, adminAuditEvents } from "@/db/schema";
 import { attendanceResolutions as resolutions, attendanceSourceEvents as events, attendanceSourceProjections as projections, attendanceSourceMappings as mappings, attendanceSourceIdentities as identities, attendanceSourceRuns as runs, attendanceSourcePeriods as periods } from "@/db/attendanceSourceSchema";
-import { assertAttendanceSourceReady, lockAttendancePayrollInput } from "./attendanceSourceGuard";
+import { assertAttendanceSourceReady, lockAttendancePayrollInput, AttendanceSourceIssue } from "./attendanceSourceGuard";
 import { chronological, periodAttendanceScope, validateManualSequence, type AttendanceReadiness, type ManualPunch, type ResolutionPerson, type ResolutionRequest } from "./attendanceResolutionModel";
 import { type SourcePunch } from "./attendanceSourceClient";
 import { PayrollValidationError } from "./validation";
@@ -23,7 +23,7 @@ export async function resolutionPeople(database: DbClient, period: { id: string;
   return [...new Set(records.map(p => p.employeeId))].sort().map(sourceId => {
     const group = records.filter(p => p.employeeId === sourceId).sort(chronological), link = links.find(p => p.sourceId === sourceId && !p.deleted), classification = states.find(s => s.sourceEmployeeId === sourceId);
     const version = resolutionDigest([period, group, link ?? null, classification?.revision ?? null]);
-    const decision = decisions.find(d => d.sourceEmployeeId === sourceId && ["Pending", "Approved", "Sending", "Failed"].includes(d.state));
+    const decision = decisions.find(d => d.sourceEmployeeId === sourceId && ["Pending", "Approved", "Sending", "Failed", "Expired"].includes(d.state));
     const relevant = group.filter(p => scope.relevant.has(p.eventId)), valid = relevant.filter(p => p.status === "VALID");
     const approved = decision?.state === "Approved" && decision.sourceVersion === version;
     const issues: string[] = [];
@@ -52,10 +52,11 @@ export async function loadAttendanceReadiness(periodId: string, database: DbClie
   const history = await database.select().from(resolutions).where(eq(resolutions.payrollPeriodId, periodId)).orderBy(desc(resolutions.createdAt), desc(resolutions.id)).limit(51).offset(Math.max(0, Math.min(10000, Math.floor(historyPage))) * 50);
   const posted = await database.select({ id: payrollRuns.id }).from(payrollRuns).where(and(eq(payrollRuns.payrollPeriodId, periodId), eq(payrollRuns.status, "Posted"))).limit(1);
   const blockers: string[] = [];
-  try { await assertAttendanceSourceReady(periodId, database); } catch (error) { if (error instanceof PayrollValidationError) blockers.push(error.message); else throw error; }
+  let needsSync=!run||run.state!=="Complete";
+  try { await assertAttendanceSourceReady(periodId, database); } catch (error) { if(error instanceof AttendanceSourceIssue)needsSync ||= error.needsSync; if (error instanceof PayrollValidationError) blockers.push(error.message); else throw error; }
   if (!run) blockers.push("Sync attendance for this period before continuing.");
   const counts = (run?.counts ?? {}) as Record<string, number>;
-  return { periodId, code: period.code, startDate: period.startDate, endDate: period.endDate, periodOpen: period.status === "Open" && !posted.length, runState: run?.state ?? null, syncedAt: run?.completedAt?.toISOString() ?? null, needsSync: !run || run.state !== "Complete" || blockers.some(b => /sync.*again|changed after|changed since/i.test(b)), summariesOutdated: !!state && state.inputRunId !== state.summariesRunId, ready: !blockers.length, blockers, counts, people, history: history.slice(0, 50).map(h => ({ id: h.id, sourceId: h.sourceEmployeeId, kind: h.kind, state: h.state, reason: h.reason, evidence: h.evidence, createdAt: h.createdAt.toISOString(), updatedAt: h.updatedAt.toISOString(), actor: h.actorUserId, reviewer: h.reviewerUserId, manualPunches: h.manualPunches as ManualPunch[], eventIds: h.eventIds as string[], result: h.result })), historyHasMore: history.length > 50, sourceCorrectionsEnabled: (process.env.ATTENDANCE_CORRECTION_TOKEN?.length ?? 0) >= 32 };
+  return { periodId, code: period.code, startDate: period.startDate, endDate: period.endDate, periodOpen: period.status === "Open" && !posted.length, runState: run?.state ?? null, syncedAt: run?.completedAt?.toISOString() ?? null, needsSync, summariesOutdated: !!state && state.inputRunId !== state.summariesRunId, ready: !blockers.length, blockers, counts, people, history: history.slice(0, 50).map(h => ({ id: h.id, sourceId: h.sourceEmployeeId, kind: h.kind, state: h.state, reason: h.reason, evidence: h.evidence, createdAt: h.createdAt.toISOString(), updatedAt: h.updatedAt.toISOString(), actor: h.actorUserId, reviewer: h.reviewerUserId, manualPunches: h.manualPunches as ManualPunch[], eventIds: h.eventIds as string[], result: h.result })), historyHasMore: history.length > 50, sourceCorrectionsEnabled: (process.env.ATTENDANCE_CORRECTION_TOKEN?.length ?? 0) >= 32 };
 }
 
 async function openPeriod(tx: DbClient, id: string) {

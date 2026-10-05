@@ -17,7 +17,7 @@ export function requireAttendanceSource() { if (!attendanceSourceEnabled()) thro
 const canonical = (value: unknown): string => Array.isArray(value) ? "[" + value.map(canonical).join(",") + "]" : value && typeof value === "object" ? "{" + Object.keys(value).sort().map(k => JSON.stringify(k) + ":" + canonical((value as Record<string, unknown>)[k])).join(",") + "}" : JSON.stringify(value);
 const hash = (value: unknown) => createHash("sha256").update(canonical(value)).digest("hex");
 // Extra device/duplicate audit metadata must not rewrite unchanged payable input.
-const payablePunch = (p: SourcePunch) => { const value={...p}; delete value.deviceId; delete value.duplicateExcluded; delete value.duplicateGroupId; return value; };
+const payablePunch = (p: SourcePunch) => { const value={...p}; delete value.deviceId; delete value.duplicateExcluded; delete value.duplicateGroupId; delete value.inRequestedWindow; return value; };
 // Storage-only audit helpers keep the reconciler independent of browser/session imports.
 async function recordAdminAuditEvent(args: Parameters<typeof import("@/lib/admin").recordAdminAuditEvent>[0]) {
   await (args.database ?? db).insert(adminAuditEvents).values({ actorUserId: args.actorUserId, entityType: args.entityType, entityId: args.entityId == null ? null : String(args.entityId), action: args.action, details: JSON.stringify(args.details) });
@@ -38,7 +38,7 @@ export async function syncAttendanceSourcePeriod(periodId: string, actorUserId: 
     await tx.insert(runs).values({ id: runId, payrollPeriodId: periodId, actorUserId, state: "Fetching", fromDate: from, throughDate: through });
   });
   try {
-    const records = await pullAttendanceSource({ origin: process.env.ATTENDANCE_SOURCE_ORIGIN ?? "", token: process.env.ATTENDANCE_SOURCE_TOKEN ?? "", from, through });
+    const records = await pullAttendanceSource({ origin: process.env.ATTENDANCE_SOURCE_ORIGIN ?? "", token: process.env.ATTENDANCE_SOURCE_TOKEN ?? "", from, through, version:process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"?3:2 });
     const counts = await reconcileAttendanceSource(db, periodId, runId, actorUserId, records);
     // Source reconciliation is committed before optional automatic correction work.
     // Its successful run must not be relabeled Failed if automation is unavailable.
@@ -91,7 +91,7 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
       if (d.employeeId) touched.add(d.employeeId);
     }
     const boundaryIds = new Set([...scope.boundary].filter(id => !approved.has(records.find(p => p.eventId === id)!.employeeId)));
-    const fileLogs = await tx.select({ employeeId: attendanceRawLogs.employeeId, day: attendanceRawLogs.logDate }).from(attendanceRawLogs).innerJoin(attendanceImportBatches,eq(attendanceImportBatches.id,attendanceRawLogs.batchId)).where(and(eq(attendanceImportBatches.payrollPeriodId,periodId),ne(attendanceImportBatches.sourceFormat, "API")));
+    const fileLogs = await tx.select({ employeeId: attendanceRawLogs.employeeId, day: attendanceRawLogs.logDate }).from(attendanceRawLogs).innerJoin(attendanceImportBatches,eq(attendanceImportBatches.id,attendanceRawLogs.batchId)).where(and(eq(attendanceImportBatches.payrollPeriodId,periodId),ne(attendanceImportBatches.sourceFormat, "API"),process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"?sql`not exists(select 1 from attendance_work_exclusions x where x.raw_log_id=${attendanceRawLogs.id} and x.active)`:undefined));
     const fileDays = new Set(fileLogs.map(r=>`${r.employeeId}|${r.day}`));
     let batchId: string | undefined;
     async function ensureBatch() {
@@ -105,28 +105,35 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
     const changedRecords: SourcePunch[] = [];
     for (const punch of records) {
       const previous=storedEvents.get(punch.eventId)?.payload as SourcePunch | undefined;
-      if (previous && (previous.capturedAt !== punch.capturedAt || previous.branchId !== punch.branchId || previous.type !== punch.type || previous.originalEmployeeId !== punch.originalEmployeeId)) throw Error("Source event changed immutable capture data");
+      if (previous && ((previous.originalCapturedAt??previous.capturedAt) !== (punch.originalCapturedAt??punch.capturedAt) || previous.branchId !== punch.branchId || (previous.originalType??previous.type) !== (punch.originalType??punch.type) || previous.originalEmployeeId !== punch.originalEmployeeId)) throw Error("Source event changed immutable capture data");
       if (previous && Date.parse(previous.updatedAt)>Date.parse(punch.updatedAt)) throw Error("A newer source revision was already received");
       if(!previous || hash(previous)!==hash(punch))changedRecords.push(punch);
     }
     for(let offset=0;offset<changedRecords.length;offset+=100){
       const chunk=changedRecords.slice(offset,offset+100);
-      await tx.insert(events).values(chunk.map(punch=>({eventId:punch.eventId,sourceEmployeeId:punch.employeeId,capturedAt:new Date(punch.capturedAt),payload:punch,firstPayload:punch}))).onConflictDoUpdate({target:events.eventId,set:{sourceEmployeeId:sql`excluded.source_employee_id`,payload:sql`excluded.payload`,revision:sql`${events.revision}+1`,seenAt:new Date()}});
+      await tx.insert(events).values(chunk.map(punch=>({eventId:punch.eventId,sourceEmployeeId:punch.employeeId,capturedAt:new Date(punch.capturedAt),payload:punch,firstPayload:punch}))).onConflictDoUpdate({target:events.eventId,set:{sourceEmployeeId:sql`excluded.source_employee_id`,capturedAt:sql`excluded.captured_at`,payload:sql`excluded.payload`,revision:sql`${events.revision}+1`,seenAt:new Date()}});
       await tx.insert(revisions).values(chunk.map(punch=>({eventId:punch.eventId,runId,payload:punch})));
     }
     counts.changed=changedRecords.length;
+    const workbench=process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"?await (await import("./attendanceWorkbenchDelivery")).reconcileWorkbenchInputs(tx,periodId,records,runId):{accepted:new Set<string>(),touched:new Set<string>(),excluded:new Set<string>()};
+    for(const id of workbench.touched)touched.add(id);
+    if(workbench.touched.size){fileDays.clear();const effectiveFiles=await tx.select({employeeId:attendanceRawLogs.employeeId,day:attendanceRawLogs.logDate}).from(attendanceRawLogs).innerJoin(attendanceImportBatches,eq(attendanceImportBatches.id,attendanceRawLogs.batchId)).where(and(eq(attendanceImportBatches.payrollPeriodId,periodId),ne(attendanceImportBatches.sourceFormat,"API"),sql`not exists(select 1 from attendance_work_exclusions x where x.raw_log_id=${attendanceRawLogs.id} and x.active)`));for(const row of effectiveFiles)fileDays.add(`${row.employeeId}|${row.day}`);}
+    const accepted=(p:SourcePunch)=>workbench.accepted.has(`${mapping.get(p.employeeId)?.employeeId}|${manilaWallTime(p.capturedAt).date}`);
+    const clockIssue=(p:SourcePunch)=>p.clockFlag&&!p.clockVerified;
     for (const punch of records) {
       const relevant = scope.relevant.has(punch.eventId);
       const decision = approved.get(punch.employeeId);
       const person = mapping.get(punch.employeeId); if (!person && relevant && punch.status === "VALID") counts.unmatched++;
-      const boundary = boundaryIds.has(punch.eventId);
+      const boundary = boundaryIds.has(punch.eventId)&&!accepted(punch)&&!workbench.excluded.has(punch.eventId);
       if (boundary) counts.boundaryReview++;
-      if (relevant && punch.status === "VALID" && (!person || punch.clockFlag || !decision && !punch.reviewResolved && punch.reviewFlags.length > 0)) counts.withheld++;
-      const prior = oldById.get(punch.eventId); const fingerprint = decision ? hash([payablePunch(punch), person?.employeeId ?? null, relevant, decision.id]) : relevant ? hash([payablePunch(punch), person?.employeeId ?? null]) : hash([payablePunch(punch), person?.employeeId ?? null, false]);
+      if (relevant && !workbench.excluded.has(punch.eventId) && punch.status === "VALID" && (!person || clockIssue(punch) || !decision && !accepted(punch) && !punch.reviewResolved && punch.reviewFlags.length > 0)) counts.withheld++;
+      const fileOverlap = !!person && fileDays.has(`${person.employeeId}|${manilaWallTime(punch.capturedAt).date}`);
+      if (process.env.ATTENDANCE_WORKBENCH_ENABLED === "true" && fileOverlap && relevant && !workbench.excluded.has(punch.eventId) && punch.status === "VALID") counts.withheld++;
+      const prior = oldById.get(punch.eventId); const base = decision ? [payablePunch(punch), person?.employeeId ?? null, relevant, decision.id] : relevant ? [payablePunch(punch), person?.employeeId ?? null] : [payablePunch(punch), person?.employeeId ?? null, false];const fingerprint=hash(workbench.excluded.has(punch.eventId)?[base,"excluded-workbench"]:process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"&&fileOverlap?[base,"file-overlap"]:accepted(punch)?[base,"verified-workbench"]:base);
       if (prior?.payloadHash === fingerprint) continue;
       if (protectedPeriod) { if(relevant)counts.lateChanges++; continue; }
       // Unresolved source review flags stay in the source inbox, never silently paid.
-      const eligible = relevant && person && punch.status === "VALID" && !punch.clockFlag && (decision?.kind === "Manual" || punch.reviewResolved || punch.reviewFlags.length === 0);
+      const eligible = relevant && !workbench.excluded.has(punch.eventId) && person && punch.status === "VALID" && !clockIssue(punch) && (process.env.ATTENDANCE_WORKBENCH_ENABLED !== "true" || !fileOverlap) && (decision?.kind === "Manual" || accepted(punch) || punch.reviewResolved || punch.reviewFlags.length === 0);
       if (prior?.employeeId) touched.add(prior.employeeId); if (person) touched.add(person.employeeId);
       if (prior?.rawLogId) {
         await tx.update(projections).set({ rawLogId: null }).where(and(eq(projections.payrollPeriodId, periodId), eq(projections.eventId, punch.eventId)));
@@ -136,7 +143,7 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
       if (eligible) {
         const wall = manilaWallTime(punch.capturedAt);
         // Transition is explicit: don't double-count any file-imported punches for this employee/day.
-        if (fileDays.has(`${person.employeeId}|${wall.date}`)) throw Error("Resolve overlapping file imports before enabling the API source");
+        if (fileDays.has(`${person.employeeId}|${wall.date}`)&&!accepted(punch)) throw Error("Resolve overlapping file imports before enabling the API source");
         await ensureBatch();
         const [inserted] = await tx.insert(attendanceRawLogs).values({ batchId: batchId!, employeeId: person.employeeId, employeeNo: person.employeeNo!, siteCode: punch.branchId, direction: punch.type, loggedAt: sql`${wall.timestamp}::timestamp`, logDate: wall.date, logTime: wall.time, rawText: JSON.stringify(punch), normalizedHash: hash(["attendance-api", punch.eventId]) }).returning({ id: attendanceRawLogs.id }); rawLogId = inserted.id; counts.projected++;
       }
@@ -156,9 +163,9 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
         if (decision.kind !== "Manual" || !person) continue;
         for (const [index, punch] of (decision.manualPunches as ManualPunch[]).entries()) {
           if (existingManual.some(p => p.resolutionId === decision.id && p.punchIndex === index)) continue;
-          const day = punch.localDateTime.slice(0, 10), time = punch.localDateTime.slice(11) + ":00";
+          const wall=manilaWallTime(new Date(punch.localDateTime+"+08:00").toISOString()); const day=wall.date,time=wall.time;
           if (fileDays.has(`${person.employeeId}|${day}`)) throw Error("Resolve overlapping file imports before applying manual DTR evidence");
-          const [inserted] = await tx.insert(attendanceRawLogs).values({ batchId: await ensureBatch(), employeeId: person.employeeId, employeeNo: person.employeeNo!, siteCode: records.find(p => p.employeeId === decision.sourceEmployeeId)?.branchId ?? "MANUAL", direction: punch.type, loggedAt: sql`${punch.localDateTime.replace("T", " ") + ":00"}::timestamp`, logDate: day, logTime: time, rawText: JSON.stringify({ source: "MANUAL_DTR", resolutionId: decision.id, evidence: decision.evidence, reason: decision.reason, approvedBy: decision.reviewerUserId }), normalizedHash: hash(["attendance-manual-dtr", decision.id, index]) }).returning({ id: attendanceRawLogs.id });
+          const [inserted] = await tx.insert(attendanceRawLogs).values({ batchId: await ensureBatch(), employeeId: person.employeeId, employeeNo: person.employeeNo!, siteCode: records.find(p => p.employeeId === decision.sourceEmployeeId)?.branchId ?? "MANUAL", direction: punch.type, loggedAt: sql`${wall.timestamp}::timestamp`, logDate: day, logTime: time, rawText: JSON.stringify({ source: "MANUAL_DTR", resolutionId: decision.id, evidence: decision.evidence, reason: decision.reason, approvedBy: decision.reviewerUserId }), normalizedHash: hash(["attendance-manual-dtr", decision.id, index]) }).returning({ id: attendanceRawLogs.id });
           await tx.insert(manualLogs).values({ resolutionId: decision.id, punchIndex: index, rawLogId: inserted.id });
           touched.add(person.employeeId); counts.projected++;
         }
@@ -180,7 +187,7 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
       await tx.update(attendanceImportBatches).set({totalRows:total,matchedRows:total}).where(eq(attendanceImportBatches.id,managedBatch.id));
     }
     // Adjacent-day context alone cannot clear an employee's period. Real overnight partners remain relevant.
-    counts.clearedEmployees = [...new Set(current.filter(r => scope.relevant.has(r.eventId)).map(r => r.employeeId).filter(Boolean))].filter(id => !current.some(r => r.employeeId === id && scope.relevant.has(r.eventId) && r.rawLogId !== null) && ![...approved.values()].some(d => d.employeeId === id && d.kind === "NoAttendance")).length;
+    counts.clearedEmployees = [...new Set(current.filter(r => scope.relevant.has(r.eventId)).map(r => r.employeeId).filter(Boolean))].filter(id => ![...workbench.accepted].some(key=>key.startsWith(`${id}|`)) && !current.some(r => r.employeeId === id && scope.relevant.has(r.eventId) && r.rawLogId !== null) && ![...approved.values()].some(d => d.employeeId === id && d.kind === "NoAttendance")).length;
     await tx.update(runs).set({ state: "Complete", counts, completedAt: new Date() }).where(eq(runs.id, runId));
     await recordAdminAuditEvent({ actorUserId, entityType: "attendance_source_run", entityId: runId, action: "attendance.api_reconciled", details: { periodId, ...counts }, database: tx });
     return counts;

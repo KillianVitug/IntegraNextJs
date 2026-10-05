@@ -8001,6 +8001,7 @@ async function loadAttendanceDtrHeldRows(
           eq(attendanceImportBatches.payrollPeriodId, periodId),
           isNotNull(attendanceRawLogs.employeeId),
           inArray(attendanceRawLogs.employeeId, allEmployeeIds),
+          process.env.ATTENDANCE_WORKBENCH_ENABLED === "true" ? sql`not exists(select 1 from attendance_work_exclusions x where x.raw_log_id=${attendanceRawLogs.id} and x.active)` : undefined,
           gte(attendanceRawLogs.logDate, period.startDate),
           lte(attendanceRawLogs.logDate, period.endDate)
         )

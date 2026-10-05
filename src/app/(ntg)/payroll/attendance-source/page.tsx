@@ -10,6 +10,7 @@ import { selectAttendanceSourcePeriod } from "@/lib/payroll/attendanceSourcePeri
 import { loadAttendanceReadiness } from "@/lib/payroll/attendanceResolution";
 import { loadMatchBoard } from "@/lib/payroll/attendanceIdentityWorkflow";
 import { loadDuplicateBoard } from "@/lib/payroll/attendanceDuplicates";
+import { loadWorkBoard, workbenchEnabled } from "@/lib/payroll/attendanceWorkbench";
 export const maxDuration = 60;
 export default async function AttendanceSourcePage({ searchParams }: { searchParams: Promise<{ year?: string; periodId?: string }> }) {
   await requireAdminActor(); if (!attendanceSourceEnabled()) notFound();
@@ -22,10 +23,11 @@ export default async function AttendanceSourcePage({ searchParams }: { searchPar
   const selection = selectAttendanceSourcePeriod(periods, params, today);
   const readiness = selection.periodId ? await loadAttendanceReadiness(selection.periodId) : null;
   const duplicates = selection.periodId ? await loadDuplicateBoard(selection.periodId) : null;
+  const workbench = selection.periodId && workbenchEnabled() ? await loadWorkBoard(selection.periodId) : null;
   const runs = selection.periodId ? await db.select().from(attendanceSourceRuns).where(eq(attendanceSourceRuns.payrollPeriodId, selection.periodId)).orderBy(desc(attendanceSourceRuns.startedAt)).limit(30) : [];
   return <AttendanceSourcePanel
     key={`${selection.year}:${selection.periodId}`} initialYear={selection.year} initialPeriodId={selection.periodId} today={today}
-    matching={matching} readiness={readiness} duplicates={duplicates} inbox={readiness?.people.flatMap(p => p.records) ?? []} periods={periods}
+    matching={matching} readiness={readiness} duplicates={duplicates} workbench={workbench} inbox={readiness?.people.flatMap(p => p.records) ?? []} periods={periods}
     runs={runs.map(r => ({ id: r.id, state: r.state, startedAt: r.startedAt.toISOString(), counts: JSON.stringify(r.counts), error: r.error }))}
   />;
 }

@@ -4544,3 +4544,4 @@ export const birWithholdingTaxBracketsRelations = relations(
 );
 
 export * from "./attendanceSourceSchema";
+export * from "./attendanceWorkbenchSchema";

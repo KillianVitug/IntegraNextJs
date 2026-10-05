@@ -12,10 +12,12 @@ import { AttendanceReview, AttendanceReadinessCard } from "./attendance-review";
 import { EmployeeMatching } from "./employee-matching";
 import { DuplicateReview } from "./duplicate-review";
 import type { DuplicateBoard } from "@/lib/payroll/attendanceDuplicateModel";
+import { AttendanceWorkbench } from "./workbench";
+import type { WorkBoard } from "@/lib/payroll/attendanceWorkbenchModel";
 
 type Props = {
   initialYear: number; initialPeriodId: string; today: string; inbox: SourcePunch[]; matching: MatchBoard;
-  periods: AttendanceSourcePeriod[]; readiness: AttendanceReadiness | null; duplicates?: DuplicateBoard | null;
+  periods: AttendanceSourcePeriod[]; readiness: AttendanceReadiness | null; duplicates?: DuplicateBoard | null; workbench?:WorkBoard|null;
   runs: { id: string; state: string; startedAt: string; counts: string; error: string | null }[];
 };
 const controlClass = "mt-1 block w-full rounded-lg border border-slate-300 bg-white p-2.5 text-sm text-slate-900 disabled:opacity-60";
@@ -70,7 +72,8 @@ export function AttendanceSourcePanel(props: Props) {
     </section>
 
     {props.duplicates && <DuplicateReview key={`${period}:${props.duplicates.policy.revision}:${props.duplicates.history.map(h=>h.id+h.state).join()}:${props.duplicates.candidates.map(c=>c.version).join()}`} periodId={period} initial={props.duplicates} refresh={() => startRefresh(() => router.refresh())} />}
-    {props.readiness && <AttendanceReview data={props.readiness} refresh={() => startRefresh(() => router.refresh())} />}
+    {props.workbench ? <AttendanceWorkbench initial={props.workbench}/> : props.readiness && <AttendanceReview data={props.readiness} refresh={() => startRefresh(() => router.refresh())} />}
+    {props.workbench&&props.readiness&&<details className="rounded-xl border p-4"><summary className="cursor-pointer font-semibold">Source identities, test punches and earlier proposals</summary><AttendanceReview data={props.readiness} refresh={() => startRefresh(() => router.refresh())}/></details>}
     <section id="employee-matching"><EmployeeMatching board={props.matching} busy={busy} mutate={saveMatch} loadHistory={attendanceMatchingHistoryAction} /></section>
     <details className="min-w-0 rounded-xl border border-slate-200 bg-white p-5 text-sm">
       <summary className="min-h-8 cursor-pointer font-semibold">All records for this period</summary><p className="my-3 text-slate-600">All records from the selected period and its neighboring days. Employee matching includes identities across periods.</p>
