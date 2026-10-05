@@ -1,0 +1,12 @@
+import React from "react";
+import {createRoot} from "react-dom/client";
+import {DuplicateReview} from "@/app/(ntg)/payroll/attendance-source/duplicate-review";
+import {duplicateCandidates,type DuplicateBoard} from "@/lib/payroll/attendanceDuplicateModel";
+import type {SourcePunch} from "@/lib/payroll/attendanceSourceClient";
+
+const p=(id:number,type:"IN"|"OUT",time:string,person="1",device="phone-a"):SourcePunch=>({eventId:`fixture-event-${id}`,employeeId:person,employeeName:person==="1"?"Alex Example":"Sam Sample",originalEmployeeId:person,originalEmployeeName:"Example only",branchId:"Example branch",deviceId:device,type,capturedAt:time,receivedAt:time,updatedAt:time,status:"VALID",clockFlag:false,correctionVersion:"original",reviewResolved:false,reviewFlags:[]});
+export const previewState={failNext:false};
+const records=[p(1,"IN","2026-10-01T23:59:20Z"),p(2,"IN","2026-10-01T23:59:50Z"),p(3,"OUT","2026-10-02T09:00:00Z"),p(4,"IN","2026-10-02T00:00:00Z","2"),p(5,"OUT","2026-10-02T09:01:00Z","2"),p(6,"OUT","2026-10-02T09:03:10Z","2","phone-b")];
+export const board:DuplicateBoard={policy:{mode:"Suggest",revision:"fixture-policy",enabledAfter:null},candidates:["1","2"].flatMap(id=>duplicateCandidates(records.filter(r=>r.employeeId===id),"2026-10-01","2026-10-15",{mode:"Suggest",revision:"fixture-policy",enabledAfter:null},{verified:true,conflictingDecision:false,version:"fixture-source"})),history:[]};
+function App(){return <main className="mx-auto max-w-4xl space-y-4 p-3 sm:p-6"><div className="rounded-lg bg-amber-100 p-4 text-sm"><strong>Fictional interactive example</strong><p>This uses the actual new component with simulated actions. It cannot contact or change production.</p></div><h1 className="text-2xl font-bold">Attendance review &amp; sync</h1><p className="text-sm">Example period: October A · All capture times shown in Philippine time.</p><button className="min-h-11 rounded-lg border bg-white px-4 text-sm" onClick={()=>{previewState.failNext=true;}}>Simulate next save failing</button><DuplicateReview periodId="fixture-period" initial={board} refresh={()=>{}}/><section id="reconcile-title" className="rounded-lg border bg-white p-4"><h2 className="font-semibold">Sync this period and check again</h2><p className="text-sm">Example only: live sync is available from the production Attendance review &amp; sync menu. Review DTR summaries before recomputing payroll.</p></section></main>;}
+createRoot(document.getElementById("root")!).render(<App/>);

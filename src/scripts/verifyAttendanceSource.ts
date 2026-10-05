@@ -48,6 +48,7 @@ async function main() {
   await pg.exec(await readFile("src/db/migrations/0119_attendance_source.sql", "utf8"));
   await pg.exec(await readFile("src/db/migrations/0120_attendance_matching_workflow.sql", "utf8"));
   await pg.exec(await readFile("src/db/migrations/0121_attendance_resolution.sql", "utf8"));
+  await pg.exec(await readFile("src/db/migrations/0122_attendance_duplicates.sql", "utf8"));
   const person = randomUUID(), person2 = randomUUID(), periodId = randomUUID(), actor = randomUUID();
   await database.insert(schema.employees).values([{ id: person, employeeNo: "0001", firstName: "Test", lastName: "One" }, { id: person2, employeeNo: "0002", firstName: "Test", lastName: "Two" }]);
   await database.insert(schema.payrollPeriods).values({ id: periodId, code: "TEST-202609-A", payrollTerms: "Semi-Monthly", cycle: "A", year: 2026, month: 9, startDate: options.from, endDate: options.through, nominalPayDate: options.through, adjustedPayDate: options.through });
@@ -65,6 +66,10 @@ async function main() {
   const repeated = await reconcile([event]); assert.equal(repeated.projected, 0); assert.equal(repeated.changed, 0); assert.equal((await database.select().from(schema.attendanceRawLogs)).length, 1);
   await assert.rejects(()=>database.transaction(tx=>confirmAttendanceSourcePayrollInput(tx as unknown as DbClient,periodId,sourceVersion)),/changed while payroll/);
   const raw = (await database.select().from(schema.attendanceRawLogs))[0]; assert.equal(raw.logDate, "2026-09-11"); assert.equal(raw.logTime, "00:30:00");
+  const metadataOnly=await reconcile([{...event,deviceId:randomUUID(),duplicateExcluded:false}]);
+  assert.equal(metadataOnly.projected,0,"device/audit metadata must not rewrite paid attendance");
+  assert.deepEqual((await database.select().from(schema.attendanceRawLogs))[0],raw);
+  assert.deepEqual((await database.select().from(events))[0].firstPayload,event,"bulk upserts preserve the original evidence");
   await reconcile([{ ...event, status: "VOID" }]); assert.equal((await database.select().from(schema.attendanceRawLogs)).length, 0);
   await assert.rejects(()=>assertAttendanceSourceReady(periodId,client),/unresolved exceptions/);
   await reconcile([{ ...event, employeeId: "0002", employeeName: "Test Two" }]); assert.equal((await database.select().from(schema.attendanceRawLogs))[0].employeeId, person2);

@@ -43,7 +43,9 @@ export async function syncAttendanceSourceAction(periodId: string) {
   return payrollActionResult(async () => {
     const result = await syncAttendanceSourcePeriod(periodId, actor.userId);
     revalidatePath("/payroll/attendance-source"); revalidatePath("/payroll");
-    return `Sync complete: ${result.received} received, ${result.projected} punches updated, ${result.unmatched} unmatched, ${result.withheld} withheld, ${result.boundaryReview} boundary reviews, ${result.clearedEmployees} cleared employee-periods, ${result.lateChanges} late changes. Counts can overlap. Resolve issues, then refresh DTR summaries.`;
+    const duplicates=result.duplicateHandled ? ` ${result.duplicateHandled} duplicate group(s) handled automatically; inspect their history.` : "";
+    if(result.duplicateSyncPending)return `Duplicate corrections were confirmed, but the follow-up sync did not finish.${duplicates} Sync this period again before refreshing DTR. Payroll was not recomputed.`;
+    return `Sync complete: ${result.received} received, ${result.projected} punches updated, ${result.unmatched} unmatched, ${result.withheld} withheld, ${result.boundaryReview} boundary reviews, ${result.clearedEmployees} cleared employee-periods, ${result.lateChanges} late changes. Counts can overlap.${duplicates} Resolve issues, then refresh DTR summaries.`;
   });
 }
 export async function saveAttendanceSourceMappingAction(sourceId: string, employeeId: string, reason: string, version?: string, nameDifferencesAcknowledged = false) {

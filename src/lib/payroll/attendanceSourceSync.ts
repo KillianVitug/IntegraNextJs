@@ -16,6 +16,8 @@ export const attendanceSourceEnabled = () => process.env.ATTENDANCE_SOURCE_ENABL
 export function requireAttendanceSource() { if (!attendanceSourceEnabled()) throw Error("Attendance API integration is disabled"); }
 const canonical = (value: unknown): string => Array.isArray(value) ? "[" + value.map(canonical).join(",") + "]" : value && typeof value === "object" ? "{" + Object.keys(value).sort().map(k => JSON.stringify(k) + ":" + canonical((value as Record<string, unknown>)[k])).join(",") + "}" : JSON.stringify(value);
 const hash = (value: unknown) => createHash("sha256").update(canonical(value)).digest("hex");
+// Extra device/duplicate audit metadata must not rewrite unchanged payable input.
+const payablePunch = (p: SourcePunch) => { const value={...p}; delete value.deviceId; delete value.duplicateExcluded; delete value.duplicateGroupId; return value; };
 // Storage-only audit helpers keep the reconciler independent of browser/session imports.
 async function recordAdminAuditEvent(args: Parameters<typeof import("@/lib/admin").recordAdminAuditEvent>[0]) {
   await (args.database ?? db).insert(adminAuditEvents).values({ actorUserId: args.actorUserId, entityType: args.entityType, entityId: args.entityId == null ? null : String(args.entityId), action: args.action, details: JSON.stringify(args.details) });
@@ -23,7 +25,7 @@ async function recordAdminAuditEvent(args: Parameters<typeof import("@/lib/admin
 async function recordPayrollRunEvent(args: Parameters<typeof import("@/lib/admin").recordPayrollRunEvent>[0]) {
   await (args.database ?? db).insert(payrollRunEvents).values({ payrollRunId: args.payrollRunId, actorUserId: args.actorUserId, eventType: args.eventType, fromStatus: args.fromStatus, toStatus: args.toStatus, notes: args.notes });
 }
-export async function syncAttendanceSourcePeriod(periodId: string, actorUserId: string) {
+export async function syncAttendanceSourcePeriod(periodId: string, actorUserId: string, options: { allowDuplicateAutomation?: boolean } = {}): Promise<{runId:string;received:number;changed:number;unmatched:number;withheld:number;projected:number;lateChanges:number;boundaryReview:number;clearedEmployees:number;duplicateHandled:number;duplicateSyncPending:boolean}> {
   requireAttendanceSource();
   const period = await db.query.payrollPeriods.findFirst({ where: eq(payrollPeriods.id, periodId) });
   if (!period) throw Error("Payroll period not found");
@@ -38,7 +40,17 @@ export async function syncAttendanceSourcePeriod(periodId: string, actorUserId: 
   try {
     const records = await pullAttendanceSource({ origin: process.env.ATTENDANCE_SOURCE_ORIGIN ?? "", token: process.env.ATTENDANCE_SOURCE_TOKEN ?? "", from, through });
     const counts = await reconcileAttendanceSource(db, periodId, runId, actorUserId, records);
-    return { runId, ...counts };
+    // Source reconciliation is committed before optional automatic correction work.
+    // Its successful run must not be relabeled Failed if automation is unavailable.
+    let duplicateHandled = 0;
+    if (options.allowDuplicateAutomation !== false) {
+      try { const { processAutomaticDuplicates } = await import("./attendanceDuplicates"); duplicateHandled = await processAutomaticDuplicates(periodId, actorUserId); } catch { /* Review-only when policy/source checks cannot complete. */ }
+    }
+    if (duplicateHandled) {
+      try { const refreshed = await syncAttendanceSourcePeriod(periodId, actorUserId, { allowDuplicateAutomation: false }); return { ...refreshed, duplicateHandled }; }
+      catch { return { runId, ...counts, duplicateHandled, duplicateSyncPending: true }; }
+    }
+    return { runId, ...counts, duplicateHandled, duplicateSyncPending: false };
   } catch {
     // Do not persist HTTP bodies, URLs containing credentials, or third-party error details.
     await db.update(runs).set({ state: "Failed", error: "Source pull or reconciliation failed; prior payroll input retained", completedAt: new Date() }).where(eq(runs.id, runId));
@@ -90,23 +102,27 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
       else { const [created] = await tx.insert(attendanceImportBatches).values({ payrollPeriodId: periodId, sourceFileName: name, sourceFormat: "API", status: "Processed", notes: "Managed attendance input. Original captures and approved manual DTR evidence remain separately identified." }).returning({ id: attendanceImportBatches.id }); batchId = created.id; }
       return batchId!;
     }
+    const changedRecords: SourcePunch[] = [];
     for (const punch of records) {
-      const old = storedEvents.get(punch.eventId);
-      const previous = old?.payload as SourcePunch | undefined;
+      const previous=storedEvents.get(punch.eventId)?.payload as SourcePunch | undefined;
       if (previous && (previous.capturedAt !== punch.capturedAt || previous.branchId !== punch.branchId || previous.type !== punch.type || previous.originalEmployeeId !== punch.originalEmployeeId)) throw Error("Source event changed immutable capture data");
       if (previous && Date.parse(previous.updatedAt)>Date.parse(punch.updatedAt)) throw Error("A newer source revision was already received");
-      const changed = !previous || hash(previous) !== hash(punch);
-      if (changed) {
-        await tx.insert(events).values({ eventId: punch.eventId, sourceEmployeeId: punch.employeeId, capturedAt: new Date(punch.capturedAt), payload: punch, firstPayload: punch }).onConflictDoUpdate({ target: events.eventId, set: { sourceEmployeeId: punch.employeeId, payload: punch, revision: sql`${events.revision}+1`, seenAt: new Date() } });
-        await tx.insert(revisions).values({ eventId: punch.eventId, runId, payload: punch }); counts.changed++;
-      }
+      if(!previous || hash(previous)!==hash(punch))changedRecords.push(punch);
+    }
+    for(let offset=0;offset<changedRecords.length;offset+=100){
+      const chunk=changedRecords.slice(offset,offset+100);
+      await tx.insert(events).values(chunk.map(punch=>({eventId:punch.eventId,sourceEmployeeId:punch.employeeId,capturedAt:new Date(punch.capturedAt),payload:punch,firstPayload:punch}))).onConflictDoUpdate({target:events.eventId,set:{sourceEmployeeId:sql`excluded.source_employee_id`,payload:sql`excluded.payload`,revision:sql`${events.revision}+1`,seenAt:new Date()}});
+      await tx.insert(revisions).values(chunk.map(punch=>({eventId:punch.eventId,runId,payload:punch})));
+    }
+    counts.changed=changedRecords.length;
+    for (const punch of records) {
       const relevant = scope.relevant.has(punch.eventId);
       const decision = approved.get(punch.employeeId);
       const person = mapping.get(punch.employeeId); if (!person && relevant && punch.status === "VALID") counts.unmatched++;
       const boundary = boundaryIds.has(punch.eventId);
       if (boundary) counts.boundaryReview++;
       if (relevant && punch.status === "VALID" && (!person || punch.clockFlag || !decision && !punch.reviewResolved && punch.reviewFlags.length > 0)) counts.withheld++;
-      const prior = oldById.get(punch.eventId); const fingerprint = decision ? hash([punch, person?.employeeId ?? null, relevant, decision.id]) : relevant ? hash([punch, person?.employeeId ?? null]) : hash([punch, person?.employeeId ?? null, false]);
+      const prior = oldById.get(punch.eventId); const fingerprint = decision ? hash([payablePunch(punch), person?.employeeId ?? null, relevant, decision.id]) : relevant ? hash([payablePunch(punch), person?.employeeId ?? null]) : hash([payablePunch(punch), person?.employeeId ?? null, false]);
       if (prior?.payloadHash === fingerprint) continue;
       if (protectedPeriod) { if(relevant)counts.lateChanges++; continue; }
       // Unresolved source review flags stay in the source inbox, never silently paid.
@@ -135,7 +151,7 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
         await tx.delete(attendanceRawLogs).where(eq(attendanceRawLogs.id, log.rawLogId));
       }
       for (const decision of approved.values()) {
-        if (decision.kind === "NoAttendance" && decision.employeeId && !oldProjections.some(p => p.payloadHash === hash([records.find(r => r.eventId === p.eventId), decision.employeeId, scope.relevant.has(p.eventId), decision.id]))) touched.add(decision.employeeId);
+        if (decision.kind === "NoAttendance" && decision.employeeId && !oldProjections.some(p => p.payloadHash === hash([records.find(r => r.eventId === p.eventId) && payablePunch(records.find(r => r.eventId === p.eventId)!), decision.employeeId, scope.relevant.has(p.eventId), decision.id]))) touched.add(decision.employeeId);
         const person = mapping.get(decision.sourceEmployeeId);
         if (decision.kind !== "Manual" || !person) continue;
         for (const [index, punch] of (decision.manualPunches as ManualPunch[]).entries()) {

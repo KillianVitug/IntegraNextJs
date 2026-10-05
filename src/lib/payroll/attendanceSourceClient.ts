@@ -3,7 +3,7 @@ export type SourcePunch = {
   eventId: string; branchId: string; employeeId: string; employeeName: string;
   originalEmployeeId: string; originalEmployeeName: string; type: "IN" | "OUT";
   capturedAt: string; receivedAt: string; updatedAt: string; status: "VALID" | "VOID";
-  correctionVersion?: string; clockFlag: boolean; reviewFlags: string[]; reviewResolved: boolean;
+  correctionVersion?: string; deviceId?: string; duplicateExcluded?: boolean; duplicateGroupId?: string; clockFlag: boolean; reviewFlags: string[]; reviewResolved: boolean;
 };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const code = /^[A-Za-z0-9_-]{1,64}$/;
@@ -39,6 +39,9 @@ export async function pullAttendanceSource(options: { origin: string; token: str
       const r = value as SourcePunch;
       if (!r || !uuid.test(r.eventId) || r.eventId <= lastId || !code.test(r.employeeId) || !code.test(r.originalEmployeeId) || !code.test(r.branchId) || !["IN", "OUT"].includes(r.type) || !["VALID", "VOID"].includes(r.status) || !instant(r.capturedAt) || !instant(r.receivedAt) || !instant(r.updatedAt) || typeof r.employeeName !== "string" || r.employeeName.length > 100 || typeof r.originalEmployeeName !== "string" || r.originalEmployeeName.length > 100 || typeof r.clockFlag !== "boolean" || typeof r.reviewResolved !== "boolean" || !Array.isArray(r.reviewFlags) || r.reviewFlags.length > 20 || r.reviewFlags.some(f => typeof f !== "string" || f.length > 100)) throw Error("Invalid or duplicated source attendance event");
       if (r.correctionVersion !== undefined && r.correctionVersion !== "original" && !uuid.test(r.correctionVersion)) throw Error("Invalid source correction version");
+      if (r.deviceId !== undefined && !uuid.test(r.deviceId)) throw Error("Invalid source device");
+      if (r.duplicateExcluded !== undefined && typeof r.duplicateExcluded !== "boolean") throw Error("Invalid duplicate exception");
+      if (r.duplicateGroupId !== undefined && !uuid.test(r.duplicateGroupId)) throw Error("Invalid duplicate group");
       const day = manilaWallTime(r.capturedAt).date; if (day < options.from || day > options.through) throw Error("Source event falls outside the requested period");
       records.push(r); lastId = r.eventId;
     }

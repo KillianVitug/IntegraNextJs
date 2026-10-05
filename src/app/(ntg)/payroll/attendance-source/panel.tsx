@@ -10,10 +10,12 @@ import { attendancePeriodUrl, selectAttendanceSourcePeriod, type AttendanceSourc
 import type { AttendanceReadiness } from "@/lib/payroll/attendanceResolutionModel";
 import { AttendanceReview, AttendanceReadinessCard } from "./attendance-review";
 import { EmployeeMatching } from "./employee-matching";
+import { DuplicateReview } from "./duplicate-review";
+import type { DuplicateBoard } from "@/lib/payroll/attendanceDuplicateModel";
 
 type Props = {
   initialYear: number; initialPeriodId: string; today: string; inbox: SourcePunch[]; matching: MatchBoard;
-  periods: AttendanceSourcePeriod[]; readiness: AttendanceReadiness | null;
+  periods: AttendanceSourcePeriod[]; readiness: AttendanceReadiness | null; duplicates?: DuplicateBoard | null;
   runs: { id: string; state: string; startedAt: string; counts: string; error: string | null }[];
 };
 const controlClass = "mt-1 block w-full rounded-lg border border-slate-300 bg-white p-2.5 text-sm text-slate-900 disabled:opacity-60";
@@ -67,6 +69,7 @@ export function AttendanceSourcePanel(props: Props) {
       <p role="status" className="break-words text-sm font-medium text-blue-800">{busy ? "Working…" : message}</p>
     </section>
 
+    {props.duplicates && <DuplicateReview key={`${period}:${props.duplicates.policy.revision}:${props.duplicates.history.map(h=>h.id+h.state).join()}:${props.duplicates.candidates.map(c=>c.version).join()}`} periodId={period} initial={props.duplicates} refresh={() => startRefresh(() => router.refresh())} />}
     {props.readiness && <AttendanceReview data={props.readiness} refresh={() => startRefresh(() => router.refresh())} />}
     <section id="employee-matching"><EmployeeMatching board={props.matching} busy={busy} mutate={saveMatch} loadHistory={attendanceMatchingHistoryAction} /></section>
     <details className="min-w-0 rounded-xl border border-slate-200 bg-white p-5 text-sm">

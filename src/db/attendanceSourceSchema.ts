@@ -1,10 +1,20 @@
 import { pgTable, text, uuid, timestamp, jsonb, integer, primaryKey, index } from "drizzle-orm/pg-core";
 import { employees, payrollPeriods, attendanceRawLogs } from "./schema";
 
+export const attendanceDuplicatePolicy = pgTable("attendance_duplicate_policy", {
+  id: text("id").primaryKey().default("global"), mode: text("mode").notNull().default("Suggest"), revision: uuid("revision").notNull().defaultRandom(),
+  enabledAfter: timestamp("enabled_after", { withTimezone: true }), actorUserId: text("actor_user_id").notNull(), updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export const attendanceDuplicateChecks = pgTable("attendance_duplicate_checks", {
+  payrollPeriodId: uuid("payroll_period_id").notNull().references(()=>payrollPeriods.id), keptEventId: uuid("kept_event_id").notNull(),
+  sourceVersion: text("source_version").notNull(), policyRevision: text("policy_revision").notNull(), result:text("result").notNull(), checkedAt:timestamp("checked_at",{withTimezone:true}).notNull().defaultNow(),
+},t=>[primaryKey({columns:[t.payrollPeriodId,t.keptEventId]})]);
+
 export const attendanceResolutions = pgTable("attendance_resolutions", {
   id: uuid("id").primaryKey().defaultRandom(), payrollPeriodId: uuid("payroll_period_id").notNull().references(() => payrollPeriods.id),
   sourceEmployeeId: text("source_employee_id").notNull(), kind: text("kind").notNull(), state: text("state").notNull(),
   sourceVersion: text("source_version").notNull(), employeeId: uuid("employee_id").references(() => employees.id),
+  duplicateMetadata: jsonb("duplicate_metadata"),
   reason: text("reason").notNull(), evidence: text("evidence").notNull(), manualPunches: jsonb("manual_punches").notNull().default([]), eventIds: jsonb("event_ids").notNull().default([]), sourceRequests: jsonb("source_requests").notNull().default([]), result: text("result"),
   actorUserId: text("actor_user_id").notNull(), reviewerUserId: text("reviewer_user_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(), updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
