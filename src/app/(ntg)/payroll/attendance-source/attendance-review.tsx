@@ -29,7 +29,7 @@ function OriginalSequence({ person }: { person: ResolutionPerson }) {
   return <section className={box}><h3 className="font-semibold">Original attendance · Philippine time (UTC+8)</h3><p className="mt-1 text-sm text-slate-600">Capture date and time are shown for every record. Adjacent-day context and voided records remain visible.</p><ol className="mt-4 space-y-3">{person.records.map(p => <li key={p.eventId} className="rounded-lg border border-slate-200 p-3"><div className="flex flex-wrap items-start justify-between gap-2"><strong>{p.type} · {originalPunchDateTime(p.capturedAt)}</strong><span className="rounded-full bg-slate-100 px-2 py-1 text-xs">{p.status === "VOID" ? "Voided · original retained" : person.relevantIds.includes(p.eventId) ? "Original capture" : "Adjacent-day context"}</span></div><p className="mt-1 text-sm">{p.employeeId} · {p.employeeName} · Branch {p.branchId}</p><p className="mt-1 text-xs text-slate-600">{p.clockFlag ? "Device clock warning. " : ""}{p.reviewResolved ? "Source flag acknowledged; paid hours still require review." : p.reviewFlags.join(" · ").replaceAll("_", " ") || "No source warning"}</p><details className="mt-2 text-xs text-slate-500"><summary className="cursor-pointer">Record details</summary><p className="mt-2 break-all">Record {p.eventId}</p><p>Uploaded {originalPunchDateTime(p.receivedAt)}</p></details></li>)}</ol></section>;
 }
 
-export function AttendanceReview({ data, refresh }: { data: AttendanceReadiness; refresh: () => void }) {
+export function AttendanceReview({ data, refresh, anchorId = "attendance-review" }: { data: AttendanceReadiness; refresh: () => void; anchorId?: string }) {
   const [tab, setTab] = useState<"review" | "coverage" | "history">("review");
   const [filter, setFilter] = useState("Needs review"), [page, setPage] = useState(0), [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false), [message, setMessage] = useState("");
@@ -42,7 +42,7 @@ export function AttendanceReview({ data, refresh }: { data: AttendanceReadiness;
     catch { setMessage("The request could not be confirmed. Your choices are retained. Refresh or sign in again, then check history before retrying."); }
     finally { setBusy(false); }
   }
-  return <section id="attendance-review" className="scroll-mt-4 space-y-4">
+  return <section id={anchorId} className="scroll-mt-4 space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-xl font-semibold">Attendance review</h2><p className="mt-1 text-sm text-slate-600">{data.code} · {data.startDate}–{data.endDate}</p></div><nav aria-label="Attendance review views" className="flex flex-wrap gap-2">{([['review','Review records'],['coverage','Period coverage'],['history','Resolution history']] as const).map(([value, label]) => <button className={`${button} ${tab === value ? "bg-slate-900 text-white" : "bg-white"}`} aria-pressed={tab === value} key={value} onClick={() => setTab(value)}>{label}</button>)}</nav></div>
     {message && <div role="status" className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm leading-6">{message}</div>}
     {!data.periodOpen && <p className="rounded-lg bg-amber-50 p-4 text-sm">This period is closed or has posted payroll. Records are available for review; corrections require a linked payroll adjustment.</p>}

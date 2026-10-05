@@ -58,7 +58,7 @@ export function AttendanceWorkbench({initial}:{initial:WorkBoard}) {
   const days=[...new Set(changes.map(c=>c.day))].sort(),next:WorkDraft={employeeId:p.id,days,changes,ownerId:existing?.ownerId??"",reason:existing?.reason??"",needed:existing?.needed??"",rejected:false,version:days.map(day=>`${day}:${p.days.find(x=>x.day===day)?.version}`).join("|")};
   changeDrafts([...drafts.filter(x=>x.employeeId!==p.id),...(changes.length?[next]:[])]);
  }
- return <section className="space-y-4 rounded-xl border bg-slate-50 p-3 sm:p-5" aria-label="Attendance resolution workspace">
+ return <section id="attendance-review" className="scroll-mt-20 space-y-4 rounded-xl border bg-slate-50 p-3 sm:p-5" aria-label="Attendance resolution workspace">
   <div><p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Attendance review & sync</p><h2 className="text-xl font-bold">{board.period.code} · Resolve attendance</h2><p className="text-sm text-slate-600">{board.period.startDate} – {board.period.endDate} · Philippine time (UTC+8)</p></div>
   <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">{Object.entries(board.statuses).map(([key,value])=><div key={key} className="rounded-lg border bg-white p-3"><div className="text-xs font-semibold uppercase">{{sync:"Source sync",review:"Attendance review",delivery:"Correction delivery",dtr:"DTR freshness",payroll:"Payroll"}[key]}</div><div className="mt-1 text-sm">{value}</div></div>)}</div>
   <p className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm">Payroll has not been recomputed by this workflow. Review and approve corrections explicitly, then inspect refreshed DTR before recomputing.</p>
