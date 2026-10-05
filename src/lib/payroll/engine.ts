@@ -81,6 +81,11 @@ import {
   type ScheduleFlagsLike,
 } from "./statutory";
 import {
+  assertRequiredStatutoryRulesPublished,
+  preflightPayroll,
+  type PayrollPreflightOptions,
+} from "./control";
+import {
   getEffectiveRateDivisor,
   resolvePhilhealthMonthlyCompensationBase,
 } from "./philhealthAnnualization";
@@ -2963,7 +2968,8 @@ export async function getPayrollPeriod(periodId: string) {
 
 export async function createOrRecomputePayrollRun(
   payrollPeriodId: string,
-  actorUserId: string
+  actorUserId: string,
+  options: Pick<PayrollPreflightOptions, "bypassTemporaryReadinessCategories"> = {}
 ) {
   await ensurePayrollFoundationData();
 
@@ -2975,6 +2981,24 @@ export async function createOrRecomputePayrollRun(
   if (period.payrollTerms !== "Semi-Monthly") {
     throw new Error("Only semi-monthly payroll periods are supported in v1.");
   }
+
+  const preflight = await preflightPayroll(payrollPeriodId, options);
+  if (!preflight.canCompute) {
+    const blockerCount =
+      preflight.statutoryBlockers.length +
+      preflight.employeeReadiness.reduce(
+        (total, employee) => total + employee.blockers.length,
+        0
+      );
+    throw new Error(
+      `Payroll preflight failed with ${blockerCount} blocker(s). Resolve payroll readiness checks before computing ${period.code}.`
+    );
+  }
+
+  await assertRequiredStatutoryRulesPublished({
+    asOfDate: period.adjustedPayDate,
+    payrollTerms: "Semi-Monthly",
+  });
 
   const holidays = await fetchConfirmedHolidayRowsForRange(
     period.startDate,
@@ -3556,7 +3580,7 @@ export async function transitionPayrollRunStatus(
         lockedRun.payrollPeriod
       );
 
-      const loanLines = lockedRun.employees.flatMap((employeeRun) =>
+      const loanLines = lockedRun.runType === "Reversal" ? [] : lockedRun.employees.flatMap((employeeRun) =>
         employeeRun.lines
           .filter(
             (line) =>
@@ -3696,6 +3720,13 @@ export async function transitionPayrollRunStatus(
           updatedAt: new Date(),
         })
         .where(eq(payrollRuns.id, payrollRunId));
+
+      if (lockedRun.runType === "Regular") {
+        await tx
+          .update(payrollPeriods)
+          .set({ status: "Processed", updatedAt: new Date() })
+          .where(eq(payrollPeriods.id, lockedRun.payrollPeriodId));
+      }
 
       await recordPayrollRunEvent({
         payrollRunId,

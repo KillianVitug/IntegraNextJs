@@ -45,20 +45,22 @@ export default async function ManagerHomePage() {
         description="Department-scoped leave and schedule activity."
       />
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-3 md:grid-cols-3 md:gap-4">
         {stats.map((stat) => {
           const Icon = stat.icon;
 
           return (
-            <Card key={stat.label}>
-              <CardHeader className="pb-2">
+            <Card key={stat.label} className="rounded-md">
+              <CardHeader className="p-3 pb-2 sm:p-4 sm:pb-2">
                 <div className="flex items-center justify-between">
                   <CardDescription>{stat.label}</CardDescription>
                   <Icon className="h-4 w-4 text-muted-foreground" />
                 </div>
-                <CardTitle className="text-2xl">{stat.value}</CardTitle>
+                <CardTitle className="text-2xl tabular-nums">
+                  {stat.value}
+                </CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="p-3 pt-0 sm:p-4 sm:pt-0">
                 <p className="text-sm text-muted-foreground">{stat.description}</p>
               </CardContent>
             </Card>
@@ -66,16 +68,16 @@ export default async function ManagerHomePage() {
         })}
       </div>
 
-      <Card>
+      <Card className="rounded-md">
         <CardHeader>
           <CardTitle>Department Employees</CardTitle>
           <CardDescription>Recent employees available in your workspace.</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-2 sm:gap-3 md:grid-cols-2">
             {data.employees.map((employee) => (
               <div key={employee.id} className="rounded-md border p-3">
-                <div className="font-medium">
+                <div className="break-words font-medium">
                   {employee.lastName}, {employee.firstName}
                 </div>
                 <div className="text-sm text-muted-foreground">

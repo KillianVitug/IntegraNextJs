@@ -118,7 +118,14 @@ export default function StatutoryRuleVersionForm({
 
   function handleDelete() {
     if (!selectedVersion?.id) return;
-    if (!window.confirm("Delete this statutory rule version?")) return;
+    if (
+      !window.confirm(
+        "Delete this statutory rule version? Related contribution rates, brackets, or withholding rows for this version will also be deleted."
+      )
+    ) {
+      return;
+    }
+
     removeVersion({ id: selectedVersion.id });
   }
 

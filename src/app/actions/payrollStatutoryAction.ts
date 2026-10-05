@@ -13,6 +13,7 @@ import { recordAdminAuditEvent, requireAdminActor } from "@/lib/admin";
 import { actionClient } from "@/lib/safe-action";
 import { and, eq, ne } from "drizzle-orm";
 import { flattenValidationErrors } from "next-safe-action";
+import { z } from "zod";
 import {
   deleteBirWithholdingTaxBracketSchema,
   insertBirWithholdingTaxBracketSchema,
@@ -38,8 +39,10 @@ import {
   insertStatutoryRuleVersionSchema,
   type InsertStatutoryRuleVersionSchemaType,
 } from "@/zod-schemas/statutoryRuleVersion";
-
-type StatutoryRuleType = "SSS" | "PHILHEALTH" | "PAGIBIG" | "TAX";
+import {
+  getLatestStatutoryRateSource,
+  type StatutoryRuleType,
+} from "@/lib/payroll/statutoryRateImport";
 
 function decimalMoney(value: number | null | undefined) {
   if (value == null) return null;
@@ -281,12 +284,6 @@ export const deleteStatutoryRuleVersionAction = actionClient
     }
 
     const dependencies = await getVersionDeleteDependencies(parsedInput.id);
-    if (dependencies.hasChildren) {
-      return {
-        error:
-          "Delete the related contribution or withholding rows first before deleting this version.",
-      };
-    }
 
     await db
       .delete(statutoryRuleVersions)
@@ -297,9 +294,14 @@ export const deleteStatutoryRuleVersionAction = actionClient
       entityType: "statutory_rule_version",
       entityId: parsedInput.id,
       action: "statutory_rule_version.deleted",
+      details: { deletedRelatedRows: dependencies.hasChildren },
     });
 
     revalidateTag("statutory-rule-versions");
+    revalidateTag("sss-brackets");
+    revalidateTag("philhealth-rates");
+    revalidateTag("pagibig-rates");
+    revalidateTag("bir-tax-brackets");
     return { message: "Statutory rule version deleted." };
   });
 
@@ -317,6 +319,144 @@ async function ensureVersionMatches(
 
   return { version, error: null };
 }
+
+const importLatestStatutoryRatesSchema = z.object({
+  versionId: z.coerce.number().positive("Version is required"),
+  ruleType: z.enum(["SSS", "PHILHEALTH", "PAGIBIG", "TAX"]),
+});
+
+const statutoryRateCacheTags: Record<StatutoryRuleType, string> = {
+  SSS: "sss-brackets",
+  PHILHEALTH: "philhealth-rates",
+  PAGIBIG: "pagibig-rates",
+  TAX: "bir-tax-brackets",
+};
+
+export const importLatestStatutoryRatesAction = actionClient
+  .metadata({ actionName: "importLatestStatutoryRatesAction" })
+  .schema(importLatestStatutoryRatesSchema)
+  .action(async ({ parsedInput }) => {
+    const actor = await requireAdminActor();
+    const { version, error } = await ensureVersionMatches(
+      parsedInput.versionId,
+      parsedInput.ruleType
+    );
+
+    if (error) return { error };
+
+    if (version?.isDefault) {
+      return {
+        error:
+          "Default seeded statutory versions cannot be replaced. Create a new version first, then import the latest rates into it.",
+      };
+    }
+
+    const source = getLatestStatutoryRateSource(parsedInput.ruleType);
+    const rowCount = await db.transaction(async (tx) => {
+      switch (source.ruleType) {
+        case "SSS":
+          await tx
+            .delete(sssContributionBrackets)
+            .where(eq(sssContributionBrackets.versionId, parsedInput.versionId));
+          await tx.insert(sssContributionBrackets).values(
+            source.rows.map((row) => ({
+              versionId: parsedInput.versionId,
+              rangeFrom: decimalMoney(row.rangeFrom)!,
+              rangeTo: decimalMoney(row.rangeTo)!,
+              salaryCredit: decimalMoney(row.salaryCredit)!,
+              employeeShare: decimalMoney(row.employeeShare)!,
+              employerShare: decimalMoney(row.employerShare)!,
+              ecShare: decimalMoney(row.ecShare)!,
+            }))
+          );
+          break;
+
+        case "PHILHEALTH":
+          await tx
+            .delete(philhealthContributionRates)
+            .where(eq(philhealthContributionRates.versionId, parsedInput.versionId));
+          await tx.insert(philhealthContributionRates).values(
+            source.rows.map((row) => ({
+              versionId: parsedInput.versionId,
+              monthlyBasicSalaryFloor: decimalMoney(row.monthlyBasicSalaryFloor)!,
+              monthlyBasicSalaryCeiling: decimalMoney(row.monthlyBasicSalaryCeiling)!,
+              premiumRate: decimalRate(row.premiumRate)!,
+              employeeShareRate: decimalRate(row.employeeShareRate)!,
+              employerShareRate: decimalRate(row.employerShareRate)!,
+            }))
+          );
+          break;
+
+        case "PAGIBIG":
+          await tx
+            .delete(pagibigContributionRates)
+            .where(eq(pagibigContributionRates.versionId, parsedInput.versionId));
+          await tx.insert(pagibigContributionRates).values(
+            source.rows.map((row) => ({
+              versionId: parsedInput.versionId,
+              rangeFrom: decimalMoney(row.rangeFrom)!,
+              rangeTo: decimalMoney(row.rangeTo)!,
+              employeeRate: decimalRate(row.employeeRate)!,
+              employerRate: decimalRate(row.employerRate)!,
+              maxCompensationBase: decimalMoney(row.maxCompensationBase),
+            }))
+          );
+          break;
+
+        case "TAX":
+          await tx
+            .delete(birWithholdingTaxBrackets)
+            .where(eq(birWithholdingTaxBrackets.versionId, parsedInput.versionId));
+          await tx.insert(birWithholdingTaxBrackets).values(
+            source.rows.map((row) => ({
+              versionId: parsedInput.versionId,
+              payrollTerms: row.payrollTerms,
+              compensationFrom: decimalMoney(row.compensationFrom)!,
+              compensationTo: decimalMoney(row.compensationTo),
+              baseTax: decimalMoney(row.baseTax)!,
+              overPercentage: decimalRate(row.overPercentage)!,
+            }))
+          );
+          break;
+      }
+
+      await tx
+        .update(statutoryRuleVersions)
+        .set({
+          officialSourceLabel: source.sourceLabel,
+          officialSourceUrl: source.sourceUrl,
+          validatedAt: new Date(),
+          validatedByUserId: actor.userId,
+          updatedAt: new Date(),
+        })
+        .where(eq(statutoryRuleVersions.id, parsedInput.versionId));
+
+      await recordAdminAuditEvent({
+        actorUserId: actor.userId,
+        entityType: "statutory_rule_version",
+        entityId: parsedInput.versionId,
+        action: "statutory_rates.imported",
+        details: {
+          ruleType: parsedInput.ruleType,
+          rowCount: source.rows.length,
+          sourceLabel: source.sourceLabel,
+          sourceUrl: source.sourceUrl,
+        },
+        database: tx,
+      });
+
+      return source.rows.length;
+    });
+
+    revalidateTag(statutoryRateCacheTags[parsedInput.ruleType]);
+    revalidateTag("statutory-rule-versions");
+
+    return {
+      message: `Imported ${rowCount} latest ${parsedInput.ruleType} statutory row${
+        rowCount === 1 ? "" : "s"
+      }.`,
+    };
+  });
 
 export const saveSssContributionBracketAction = actionClient
   .metadata({ actionName: "saveSssContributionBracketAction" })

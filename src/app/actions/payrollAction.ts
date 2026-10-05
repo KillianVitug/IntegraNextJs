@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { desc, eq } from "drizzle-orm";
 import type {
   PayrollAgencySummaryView,
   PayrollEmployeeDailyAdjustmentRowView,
@@ -18,7 +19,17 @@ import type {
   PayrollRunPeriodView,
   PayrollWorkspaceSnapshotView,
 } from "@/app/(ntg)/payroll/types";
+import { db } from "@/db";
+import {
+  payrollArtifacts,
+  payrollDisbursementBatches,
+  payrollJournalBatches,
+  payrollRunEvents,
+  statutoryFilingPackages,
+} from "@/db/schema";
 import { requireAdminActor } from "@/lib/admin";
+import { AUTH_PERMISSIONS } from "@/lib/auth/permissions";
+import { requirePermission } from "@/lib/auth/server";
 import {
   getEmployeeDepartmentMetadata,
   loadEmployeeDepartmentMetadataByEmployeeId,
@@ -35,6 +46,16 @@ import {
   parsePayrollBreakdownNotes,
   transitionPayrollRunStatus,
 } from "@/lib/payroll/engine";
+import {
+  generateBankBatch,
+  generateGlJournal,
+  generateStatutoryPackage,
+  preflightPayroll,
+  publishPayslips,
+  reversePayrollRun,
+  transitionPayrollRun,
+  type PayrollPreflightOptions,
+} from "@/lib/payroll/control";
 import {
   getEmployeePayrollAdjustmentRows,
   saveEmployeePayrollOvertimeOverride,
@@ -284,48 +305,267 @@ function serializePayrollPayslip(
   };
 }
 
+function serializePayrollControlDate(value: Date | null | undefined) {
+  return value ? value.toISOString() : null;
+}
+
+function serializePayrollControlMoney(value: string | number | null | undefined) {
+  return value == null ? "0.00" : String(value);
+}
+
 export async function seedPayrollFoundation() {
-  await requireAdminActor();
+  await requirePermission(AUTH_PERMISSIONS.PAYROLL_RULES_MANAGE);
   await ensurePayrollFoundationData();
   return { ok: true };
 }
 
 export async function seedPayrollPeriods(year: number) {
-  await requireAdminActor();
+  await requirePermission(AUTH_PERMISSIONS.PAYROLL_MANAGE);
   return ensureSemiMonthlyPayrollPeriods(year);
 }
 
-export async function computePayrollRun(payrollPeriodId: string) {
-  const actor = await requireAdminActor();
-  const result = await createOrRecomputePayrollRun(payrollPeriodId, actor.userId);
+type PayrollReadinessBypassOptions = Pick<
+  PayrollPreflightOptions,
+  "bypassTemporaryReadinessCategories"
+>;
+
+export async function preflightPayrollAction(
+  payrollPeriodId: string,
+  options: PayrollReadinessBypassOptions = {}
+) {
+  await requirePermission(AUTH_PERMISSIONS.PAYROLL_COMPUTE);
+  return preflightPayroll(payrollPeriodId, options);
+}
+
+export async function computePayrollRun(
+  payrollPeriodId: string,
+  options: PayrollReadinessBypassOptions = {}
+) {
+  const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_COMPUTE);
+  const result = await createOrRecomputePayrollRun(
+    payrollPeriodId,
+    actor.accountId,
+    options
+  );
   revalidatePath("/payroll");
   return result;
 }
 
 export async function reviewPayrollRun(payrollRunId: string) {
-  const actor = await requireAdminActor();
-  const result = await transitionPayrollRunStatus(payrollRunId, "Reviewed", actor.userId);
+  const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_REVIEW);
+  const result = await transitionPayrollRun({
+    payrollRunId,
+    nextStatus: "Reviewed",
+    actorUserId: actor.accountId,
+    transition: transitionPayrollRunStatus,
+  });
   revalidatePath("/payroll");
   return result;
 }
 
 export async function approvePayrollRun(payrollRunId: string) {
-  const actor = await requireAdminActor();
-  const result = await transitionPayrollRunStatus(payrollRunId, "Approved", actor.userId);
+  const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_APPROVE);
+  const result = await transitionPayrollRun({
+    payrollRunId,
+    nextStatus: "Approved",
+    actorUserId: actor.accountId,
+    transition: transitionPayrollRunStatus,
+  });
   revalidatePath("/payroll");
   return result;
 }
 
 export async function postPayrollRun(payrollRunId: string) {
-  const actor = await requireAdminActor();
-  const result = await transitionPayrollRunStatus(payrollRunId, "Posted", actor.userId);
+  const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_POST);
+  const result = await transitionPayrollRun({
+    payrollRunId,
+    nextStatus: "Posted",
+    actorUserId: actor.accountId,
+    transition: transitionPayrollRunStatus,
+  });
   revalidatePath("/payroll");
   return result;
 }
 
 export async function voidPayrollRun(payrollRunId: string, reason?: string | null) {
-  const actor = await requireAdminActor();
-  const result = await transitionPayrollRunStatus(payrollRunId, "Void", actor.userId, reason ?? null);
+  const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_REVERSE);
+  const result = await transitionPayrollRun({
+    payrollRunId,
+    nextStatus: "Void",
+    actorUserId: actor.accountId,
+    transition: transitionPayrollRunStatus,
+    notes: reason ?? null,
+  });
+  revalidatePath("/payroll");
+  return result;
+}
+
+export async function reversePostedPayrollRunAction(
+  payrollRunId: string,
+  reason: string
+) {
+  const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_REVERSE);
+  const result = await reversePayrollRun({
+    payrollRunId,
+    actorUserId: actor.accountId,
+    reason,
+  });
+  revalidatePath("/payroll");
+  return result;
+}
+
+export async function publishPayslipsAction(payrollRunId: string) {
+  const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_PUBLISH_PAYSLIPS);
+  const result = await publishPayslips({
+    payrollRunId,
+    actorUserId: actor.accountId,
+  });
+  revalidatePath("/payroll");
+  return result;
+}
+
+export async function generateBankBatchAction(payrollRunId: string) {
+  const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_EXPORT);
+  const result = await generateBankBatch({
+    payrollRunId,
+    actorUserId: actor.accountId,
+    batchType: "Bank",
+    bankAdapter: "PNB",
+  });
+  revalidatePath("/payroll");
+  return result;
+}
+
+export async function generateCashBatchAction(payrollRunId: string) {
+  const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_EXPORT);
+  const result = await generateBankBatch({
+    payrollRunId,
+    actorUserId: actor.accountId,
+    batchType: "Cash",
+  });
+  revalidatePath("/payroll");
+  return result;
+}
+
+export async function generateGlJournalAction(payrollRunId: string) {
+  const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_EXPORT);
+  const result = await generateGlJournal({
+    payrollRunId,
+    actorUserId: actor.accountId,
+  });
+  revalidatePath("/payroll");
+  return result;
+}
+
+export async function getPayrollControlBundleAction(payrollRunId: string) {
+  await requireAdminActor();
+
+  const [artifacts, disbursements, journals, statutoryPackages, events] =
+    await Promise.all([
+      db
+        .select()
+        .from(payrollArtifacts)
+        .where(eq(payrollArtifacts.payrollRunId, payrollRunId))
+        .orderBy(desc(payrollArtifacts.createdAt)),
+      db
+        .select()
+        .from(payrollDisbursementBatches)
+        .where(eq(payrollDisbursementBatches.payrollRunId, payrollRunId))
+        .orderBy(desc(payrollDisbursementBatches.createdAt)),
+      db
+        .select()
+        .from(payrollJournalBatches)
+        .where(eq(payrollJournalBatches.payrollRunId, payrollRunId))
+        .orderBy(desc(payrollJournalBatches.createdAt)),
+      db
+        .select()
+        .from(statutoryFilingPackages)
+        .where(eq(statutoryFilingPackages.payrollRunId, payrollRunId))
+        .orderBy(desc(statutoryFilingPackages.createdAt)),
+      db
+        .select()
+        .from(payrollRunEvents)
+        .where(eq(payrollRunEvents.payrollRunId, payrollRunId))
+        .orderBy(desc(payrollRunEvents.createdAt)),
+    ]);
+
+  return {
+    artifacts: artifacts.map((artifact) => ({
+      id: artifact.id,
+      kind: artifact.kind,
+      status: artifact.status,
+      format: artifact.format,
+      fileName: artifact.fileName,
+      storageKey: artifact.storageKey,
+      metadata: artifact.metadata,
+      generatedByUserId: artifact.generatedByUserId,
+      generatedAt: serializePayrollControlDate(artifact.generatedAt),
+      publishedByUserId: artifact.publishedByUserId,
+      publishedAt: serializePayrollControlDate(artifact.publishedAt),
+      createdAt: artifact.createdAt.toISOString(),
+    })),
+    disbursements: disbursements.map((batch) => ({
+      id: batch.id,
+      batchType: batch.batchType,
+      status: batch.status,
+      bankAdapter: batch.bankAdapter,
+      employeeCount: batch.employeeCount,
+      totalNetPay: serializePayrollControlMoney(batch.totalNetPay),
+      artifactId: batch.artifactId,
+      createdByUserId: batch.createdByUserId,
+      createdAt: batch.createdAt.toISOString(),
+      approvedAt: serializePayrollControlDate(batch.approvedAt),
+      releasedAt: serializePayrollControlDate(batch.releasedAt),
+      reconciledAt: serializePayrollControlDate(batch.reconciledAt),
+    })),
+    journals: journals.map((journal) => ({
+      id: journal.id,
+      status: journal.status,
+      totalDebits: serializePayrollControlMoney(journal.totalDebits),
+      totalCredits: serializePayrollControlMoney(journal.totalCredits),
+      artifactId: journal.artifactId,
+      createdByUserId: journal.createdByUserId,
+      createdAt: journal.createdAt.toISOString(),
+      postedAt: serializePayrollControlDate(journal.postedAt),
+      reversedAt: serializePayrollControlDate(journal.reversedAt),
+    })),
+    statutoryPackages: statutoryPackages.map((filing) => ({
+      id: filing.id,
+      kind: filing.kind,
+      status: filing.status,
+      periodStart: filing.periodStart,
+      periodEnd: filing.periodEnd,
+      dueDate: filing.dueDate,
+      amountDue: serializePayrollControlMoney(filing.amountDue),
+      artifactId: filing.artifactId,
+      paymentReference: filing.paymentReference,
+      preparedByUserId: filing.preparedByUserId,
+      submittedAt: serializePayrollControlDate(filing.submittedAt),
+      paidAt: serializePayrollControlDate(filing.paidAt),
+      createdAt: filing.createdAt.toISOString(),
+    })),
+    events: events.map((event) => ({
+      id: event.id,
+      eventType: event.eventType,
+      fromStatus: event.fromStatus,
+      toStatus: event.toStatus,
+      actorUserId: event.actorUserId,
+      notes: event.notes,
+      createdAt: event.createdAt.toISOString(),
+    })),
+  };
+}
+
+export async function generateStatutoryPackageAction(
+  payrollRunId: string,
+  kind: Parameters<typeof generateStatutoryPackage>[0]["kind"]
+) {
+  const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_EXPORT);
+  const result = await generateStatutoryPackage({
+    payrollRunId,
+    actorUserId: actor.accountId,
+    kind,
+  });
   revalidatePath("/payroll");
   return result;
 }

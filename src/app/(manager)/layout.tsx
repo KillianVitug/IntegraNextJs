@@ -3,6 +3,7 @@ import { requireManager } from "@/lib/auth/server";
 import { SideBar, SidebarItem } from "@/components/SideBar";
 import { PageShell } from "@/components/layout/page-layout";
 import { connection } from "next/server";
+import { ManagerMobileNav } from "./ManagerMobileNav";
 
 const sidebarItems: SidebarItem[] = [
   { label: "Dashboard", href: "/managerHome", icon: "home" },
@@ -20,11 +21,16 @@ export default async function ManagerLayout({ children }: { children: ReactNode 
     auth.email;
 
   return (
-    <div className="flex h-screen">
-      <SideBar items={sidebarItems} userLabel={userLabel} showLogout />
+    <div className="flex min-h-[100svh] bg-background">
+      <div className="hidden md:flex">
+        <SideBar items={sidebarItems} userLabel={userLabel} showLogout />
+      </div>
       <main className="min-w-0 flex-1 overflow-auto">
-        <PageShell size="full">{children}</PageShell>
+        <PageShell size="full" className="pb-24 md:pb-4">
+          {children}
+        </PageShell>
       </main>
+      <ManagerMobileNav />
     </div>
   );
 }

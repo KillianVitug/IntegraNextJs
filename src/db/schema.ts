@@ -215,6 +215,15 @@ export const payrollRunStatusEnum = pgEnum("payroll_run_status", [
   "Void",
 ]);
 
+export const payrollRunTypeEnum = pgEnum("payroll_run_type", [
+  "Regular",
+  "OffCycle",
+  "FinalPay",
+  "Supplemental",
+  "Reversal",
+  "ThirteenthMonth",
+]);
+
 export const payrollRunEventTypeEnum = pgEnum("payroll_run_event_type", [
   "Computed",
   "MarkedStale",
@@ -222,6 +231,9 @@ export const payrollRunEventTypeEnum = pgEnum("payroll_run_event_type", [
   "Approved",
   "Posted",
   "Voided",
+  "Reversed",
+  "PayslipsPublished",
+  "Exported",
 ]);
 
 export const payrollLineTypeEnum = pgEnum("payroll_line_type", [
@@ -354,6 +366,79 @@ export const statutoryRuleTypeEnum = pgEnum("statutory_rule_type", [
   "TAX",
 ]);
 
+export const payrollPolicyStatusEnum = pgEnum("payroll_policy_status", [
+  "Draft",
+  "Validated",
+  "Published",
+  "Retired",
+]);
+
+export const payrollReadinessSeverityEnum = pgEnum(
+  "payroll_readiness_severity",
+  ["Blocker", "Warning"]
+);
+
+export const payrollArtifactKindEnum = pgEnum("payroll_artifact_kind", [
+  "Payslip",
+  "PayrollRegister",
+  "BankFile",
+  "CashPayrollList",
+  "GlJournal",
+  "SssContribution",
+  "SssLoan",
+  "PhilhealthEprs",
+  "PagibigMcrf",
+  "Bir1601C",
+  "Bir1604C",
+  "Bir2316",
+  "Dole13thMonth",
+  "Other",
+]);
+
+export const payrollArtifactStatusEnum = pgEnum("payroll_artifact_status", [
+  "Draft",
+  "Generated",
+  "Published",
+  "Submitted",
+  "Paid",
+  "Voided",
+]);
+
+export const payrollExportFormatEnum = pgEnum("payroll_export_format", [
+  "CSV",
+  "XLSX",
+  "PDF",
+  "TXT",
+  "JSON",
+]);
+
+export const payrollDisbursementStatusEnum = pgEnum(
+  "payroll_disbursement_status",
+  ["Draft", "Generated", "Approved", "Released", "Reconciled", "Voided"]
+);
+
+export const payrollJournalStatusEnum = pgEnum("payroll_journal_status", [
+  "Draft",
+  "Balanced",
+  "Posted",
+  "Reversed",
+  "Voided",
+]);
+
+export const statutoryFilingStatusEnum = pgEnum("statutory_filing_status", [
+  "Draft",
+  "Generated",
+  "Submitted",
+  "Paid",
+  "Reconciled",
+  "Voided",
+]);
+
+export const payslipPublicationStatusEnum = pgEnum(
+  "payslip_publication_status",
+  ["Draft", "Published", "Revoked"]
+);
+
 export const employeeFileTypeEnum = pgEnum("employee_file_type_enum", [
   "Admin",
   "Leave",
@@ -457,6 +542,48 @@ export const position = pgTable("position", {
     .defaultNow()
     .$onUpdate(() => new Date()),
 });
+
+export const employerPayrollProfiles = pgTable(
+  "employer_payroll_profiles",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    legalName: varchar("legal_name", { length: 180 }).notNull(),
+    tradeName: varchar("trade_name", { length: 180 }),
+    tin: varchar("tin", { length: 30 }),
+    rdoCode: varchar("rdo_code", { length: 20 }),
+    registeredAddress: text("registered_address"),
+    sssEmployerNumber: varchar("sss_employer_number", { length: 40 }),
+    philhealthEmployerNumber: varchar("philhealth_employer_number", {
+      length: 40,
+    }),
+    pagibigEmployerNumber: varchar("pagibig_employer_number", { length: 40 }),
+    bankFundingAccountName: varchar("bank_funding_account_name", {
+      length: 120,
+    }),
+    bankFundingAccountNumber: varchar("bank_funding_account_number", {
+      length: 80,
+    }),
+    bankFundingBankCode: bankCodeTypeEnum("bank_funding_bank_code"),
+    payrollSignatoryName: varchar("payroll_signatory_name", { length: 120 }),
+    payrollSignatoryTitle: varchar("payroll_signatory_title", { length: 120 }),
+    timezone: varchar("timezone", { length: 80 }).notNull().default("Asia/Manila"),
+    currency: varchar("currency", { length: 3 }).notNull().default("PHP"),
+    isDefault: boolean("is_default").notNull().default(true),
+    createdByUserId: varchar("created_by_user_id", { length: 255 }),
+    updatedByUserId: varchar("updated_by_user_id", { length: 255 }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("uq_employer_payroll_profile_default")
+      .on(table.isDefault)
+      .where(sql`${table.isDefault} = true`),
+    index("idx_employer_payroll_profile_legal_name").on(table.legalName),
+  ]
+);
 
 export const slvlGroup = pgTable("slvl_group", {
   id: integer("id").primaryKey(),
@@ -745,6 +872,100 @@ export const employeesRecurringEntries = pgTable(
   ]
 );
 
+export const employeeTaxProfiles = pgTable(
+  "employee_tax_profiles",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    employeeId: uuid("employee_id")
+      .notNull()
+      .references(() => employees.id, { onDelete: "cascade" })
+      .unique(),
+    taxStatus: taxStatusEnum("tax_status"),
+    isMinimumWageEarner: boolean("is_minimum_wage_earner")
+      .notNull()
+      .default(false),
+    wageRegion: varchar("wage_region", { length: 80 }),
+    dailyMinimumWage: decimal("daily_minimum_wage", { precision: 10, scale: 2 }),
+    previousEmployerTaxablePay: decimal("previous_employer_taxable_pay", {
+      precision: 12,
+      scale: 2,
+    })
+      .notNull()
+      .default("0.00"),
+    previousEmployerTaxWithheld: decimal("previous_employer_tax_withheld", {
+      precision: 12,
+      scale: 2,
+    })
+      .notNull()
+      .default("0.00"),
+    bir2316Received: boolean("bir_2316_received").notNull().default(false),
+    effectiveFrom: date("effective_from").notNull(),
+    effectiveTo: date("effective_to"),
+    notes: text("notes"),
+    createdByUserId: varchar("created_by_user_id", { length: 255 }),
+    updatedByUserId: varchar("updated_by_user_id", { length: 255 }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("idx_employee_tax_profile_employee").on(table.employeeId),
+    index("idx_employee_tax_profile_effective").on(
+      table.employeeId,
+      table.effectiveFrom,
+      table.effectiveTo
+    ),
+  ]
+);
+
+export const employeeOpeningYearToDateBalances = pgTable(
+  "employee_opening_year_to_date_balances",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    employeeId: uuid("employee_id")
+      .notNull()
+      .references(() => employees.id, { onDelete: "cascade" }),
+    taxYear: integer("tax_year").notNull(),
+    taxablePay: decimal("taxable_pay", { precision: 12, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    nonTaxablePay: decimal("non_taxable_pay", { precision: 12, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    withholdingTax: decimal("withholding_tax", { precision: 12, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    sssEmployee: decimal("sss_employee", { precision: 12, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    philhealthEmployee: decimal("philhealth_employee", {
+      precision: 12,
+      scale: 2,
+    })
+      .notNull()
+      .default("0.00"),
+    pagibigEmployee: decimal("pagibig_employee", { precision: 12, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    sourceNote: text("source_note"),
+    createdByUserId: varchar("created_by_user_id", { length: 255 }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("uq_employee_opening_ytd_year").on(
+      table.employeeId,
+      table.taxYear
+    ),
+    index("idx_employee_opening_ytd_employee").on(table.employeeId),
+  ]
+);
+
 //EMPLOYEE RELATIONS
 export const employeesRelations = relations(employees, ({ one, many }) => ({
   generalInfo: one(employeesGeneralInfo, {
@@ -763,7 +984,12 @@ export const employeesRelations = relations(employees, ({ one, many }) => ({
     fields: [employees.id],
     references: [employeesTimekeeping.employeeId],
   }),
+  taxProfile: one(employeeTaxProfiles, {
+    fields: [employees.id],
+    references: [employeeTaxProfiles.employeeId],
+  }),
   recurringEntries: many(employeesRecurringEntries),
+  openingYearToDateBalances: many(employeeOpeningYearToDateBalances),
 
   leaveRecords: many(employeesLeaveRecords),
 
@@ -792,6 +1018,26 @@ export const employeesRecurringEntriesRelations = relations(
   ({ one }) => ({
     employee: one(employees, {
       fields: [employeesRecurringEntries.employeeId],
+      references: [employees.id],
+    }),
+  })
+);
+
+export const employeeTaxProfilesRelations = relations(
+  employeeTaxProfiles,
+  ({ one }) => ({
+    employee: one(employees, {
+      fields: [employeeTaxProfiles.employeeId],
+      references: [employees.id],
+    }),
+  })
+);
+
+export const employeeOpeningYearToDateBalancesRelations = relations(
+  employeeOpeningYearToDateBalances,
+  ({ one }) => ({
+    employee: one(employees, {
+      fields: [employeeOpeningYearToDateBalances.employeeId],
       references: [employees.id],
     }),
   })
@@ -2753,6 +2999,14 @@ export const statutoryRuleVersions = pgTable(
     payrollTerms: payrollTermsEnum("payroll_terms").notNull(),
     effectiveFrom: date("effective_from").notNull(),
     effectiveTo: date("effective_to"),
+    status: payrollPolicyStatusEnum("status").notNull().default("Published"),
+    officialSourceLabel: varchar("official_source_label", { length: 180 }),
+    officialSourceUrl: text("official_source_url"),
+    validatedAt: timestamp("validated_at"),
+    validatedByUserId: varchar("validated_by_user_id", { length: 255 }),
+    publishedAt: timestamp("published_at"),
+    publishedByUserId: varchar("published_by_user_id", { length: 255 }),
+    lockedAt: timestamp("locked_at"),
     isDefault: boolean("is_default").notNull().default(false),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
@@ -2764,6 +3018,57 @@ export const statutoryRuleVersions = pgTable(
     index("idx_statutory_rule_type_effective").on(
       table.ruleType,
       table.effectiveFrom
+    ),
+  ]
+);
+
+export const payrollPolicyVersions = pgTable(
+  "payroll_policy_versions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    employerProfileId: uuid("employer_profile_id").references(
+      () => employerPayrollProfiles.id,
+      { onDelete: "set null" }
+    ),
+    code: varchar("code", { length: 80 }).notNull().unique(),
+    name: varchar("name", { length: 160 }).notNull(),
+    status: payrollPolicyStatusEnum("status").notNull().default("Draft"),
+    payrollTerms: payrollTermsEnum("payroll_terms").notNull().default("Semi-Monthly"),
+    effectiveFrom: date("effective_from").notNull(),
+    effectiveTo: date("effective_to"),
+    deductionPriority: jsonb("deduction_priority")
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'["TAX","SSS","PHILHEALTH","PAGIBIG","LOAN","OTHER"]'::jsonb`),
+    netPayFloor: decimal("net_pay_floor", { precision: 12, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    roundingPolicy: jsonb("rounding_policy").$type<Record<string, unknown>>(),
+    overtimePolicy: jsonb("overtime_policy").$type<Record<string, unknown>>(),
+    tardinessPolicy: jsonb("tardiness_policy").$type<Record<string, unknown>>(),
+    thirteenthMonthPolicy: jsonb("thirteenth_month_policy").$type<
+      Record<string, unknown>
+    >(),
+    finalPayPolicy: jsonb("final_pay_policy").$type<Record<string, unknown>>(),
+    createdByUserId: varchar("created_by_user_id", { length: 255 }),
+    validatedAt: timestamp("validated_at"),
+    validatedByUserId: varchar("validated_by_user_id", { length: 255 }),
+    publishedAt: timestamp("published_at"),
+    publishedByUserId: varchar("published_by_user_id", { length: 255 }),
+    retiredAt: timestamp("retired_at"),
+    retiredByUserId: varchar("retired_by_user_id", { length: 255 }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("idx_payroll_policy_status").on(table.status),
+    index("idx_payroll_policy_effective").on(
+      table.payrollTerms,
+      table.effectiveFrom,
+      table.effectiveTo
     ),
   ]
 );
@@ -2865,8 +3170,16 @@ export const payrollRuns = pgTable(
     payrollPeriodId: uuid("payroll_period_id")
       .notNull()
       .references(() => payrollPeriods.id, { onDelete: "cascade" }),
+    runType: payrollRunTypeEnum("run_type").notNull().default("Regular"),
+    policyVersionId: uuid("policy_version_id").references(
+      () => payrollPolicyVersions.id,
+      { onDelete: "set null" }
+    ),
     status: payrollRunStatusEnum("status").notNull().default("Draft"),
     runNumber: integer("run_number").notNull().default(1),
+    idempotencyKey: varchar("idempotency_key", { length: 120 }),
+    inputSnapshot: jsonb("input_snapshot").$type<Record<string, unknown>>(),
+    calculationTrace: jsonb("calculation_trace").$type<Record<string, unknown>>(),
     notes: text("notes"),
     computedAt: timestamp("computed_at"),
     computedByUserId: varchar("computed_by_user_id", { length: 255 }),
@@ -2885,7 +3198,16 @@ export const payrollRuns = pgTable(
       .defaultNow()
       .$onUpdate(() => new Date()),
   },
-  (table) => [index("idx_payroll_run_period_id").on(table.payrollPeriodId)]
+  (table) => [
+    index("idx_payroll_run_period_id").on(table.payrollPeriodId),
+    index("idx_payroll_run_type_status").on(table.runType, table.status),
+    uniqueIndex("uq_payroll_run_idempotency_key")
+      .on(table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} is not null`),
+    uniqueIndex("uq_payroll_run_posted_regular_period")
+      .on(table.payrollPeriodId)
+      .where(sql`${table.runType} = 'Regular' and ${table.status} = 'Posted'`),
+  ]
 );
 
 // PAYROLL RUN EMPLOYEES
@@ -2982,6 +3304,272 @@ export const payrollRunLines = pgTable(
       table.payrollRunEmployeeId,
       table.code
     ),
+  ]
+);
+
+export const employeePayrollReadinessChecks = pgTable(
+  "employee_payroll_readiness_checks",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    payrollPeriodId: uuid("payroll_period_id")
+      .notNull()
+      .references(() => payrollPeriods.id, { onDelete: "cascade" }),
+    employeeId: uuid("employee_id")
+      .notNull()
+      .references(() => employees.id, { onDelete: "cascade" }),
+    checkKey: varchar("check_key", { length: 80 }).notNull(),
+    severity: payrollReadinessSeverityEnum("severity").notNull(),
+    message: text("message").notNull(),
+    resolvedAt: timestamp("resolved_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_employee_payroll_readiness_period").on(table.payrollPeriodId),
+    index("idx_employee_payroll_readiness_employee").on(table.employeeId),
+    uniqueIndex("uq_employee_payroll_readiness_check").on(
+      table.payrollPeriodId,
+      table.employeeId,
+      table.checkKey
+    ),
+  ]
+);
+
+export const payrollArtifacts = pgTable(
+  "payroll_artifacts",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    payrollRunId: uuid("payroll_run_id").references(() => payrollRuns.id, {
+      onDelete: "cascade",
+    }),
+    payrollRunEmployeeId: uuid("payroll_run_employee_id").references(
+      () => payrollRunEmployees.id,
+      { onDelete: "cascade" }
+    ),
+    kind: payrollArtifactKindEnum("kind").notNull(),
+    status: payrollArtifactStatusEnum("status").notNull().default("Draft"),
+    format: payrollExportFormatEnum("format"),
+    storageKey: text("storage_key"),
+    fileName: varchar("file_name", { length: 255 }),
+    contentHash: varchar("content_hash", { length: 128 }),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    generatedByUserId: varchar("generated_by_user_id", { length: 255 }),
+    generatedAt: timestamp("generated_at"),
+    publishedByUserId: varchar("published_by_user_id", { length: 255 }),
+    publishedAt: timestamp("published_at"),
+    submittedByUserId: varchar("submitted_by_user_id", { length: 255 }),
+    submittedAt: timestamp("submitted_at"),
+    voidedByUserId: varchar("voided_by_user_id", { length: 255 }),
+    voidedAt: timestamp("voided_at"),
+    voidReason: text("void_reason"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("idx_payroll_artifact_run").on(table.payrollRunId),
+    index("idx_payroll_artifact_employee_run").on(table.payrollRunEmployeeId),
+    index("idx_payroll_artifact_kind_status").on(table.kind, table.status),
+  ]
+);
+
+export const payslipPublications = pgTable(
+  "payslip_publications",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    payrollRunEmployeeId: uuid("payroll_run_employee_id")
+      .notNull()
+      .references(() => payrollRunEmployees.id, { onDelete: "cascade" }),
+    artifactId: uuid("artifact_id").references(() => payrollArtifacts.id, {
+      onDelete: "set null",
+    }),
+    status: payslipPublicationStatusEnum("status").notNull().default("Draft"),
+    publishedByUserId: varchar("published_by_user_id", { length: 255 }),
+    publishedAt: timestamp("published_at"),
+    revokedByUserId: varchar("revoked_by_user_id", { length: 255 }),
+    revokedAt: timestamp("revoked_at"),
+    revokeReason: text("revoke_reason"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("uq_payslip_publication_employee_run").on(
+      table.payrollRunEmployeeId
+    ),
+    index("idx_payslip_publication_status").on(table.status),
+  ]
+);
+
+export const payrollDisbursementBatches = pgTable(
+  "payroll_disbursement_batches",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    payrollRunId: uuid("payroll_run_id")
+      .notNull()
+      .references(() => payrollRuns.id, { onDelete: "cascade" }),
+    batchType: varchar("batch_type", { length: 20 }).notNull(),
+    status: payrollDisbursementStatusEnum("status").notNull().default("Draft"),
+    bankAdapter: varchar("bank_adapter", { length: 80 }),
+    employeeCount: integer("employee_count").notNull().default(0),
+    totalNetPay: decimal("total_net_pay", { precision: 14, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    controlHash: varchar("control_hash", { length: 128 }),
+    artifactId: uuid("artifact_id").references(() => payrollArtifacts.id, {
+      onDelete: "set null",
+    }),
+    approvedByUserId: varchar("approved_by_user_id", { length: 255 }),
+    approvedAt: timestamp("approved_at"),
+    releasedByUserId: varchar("released_by_user_id", { length: 255 }),
+    releasedAt: timestamp("released_at"),
+    reconciledByUserId: varchar("reconciled_by_user_id", { length: 255 }),
+    reconciledAt: timestamp("reconciled_at"),
+    createdByUserId: varchar("created_by_user_id", { length: 255 }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("idx_payroll_disbursement_run").on(table.payrollRunId),
+    index("idx_payroll_disbursement_status").on(table.status),
+  ]
+);
+
+export const payrollBankFiles = pgTable(
+  "payroll_bank_files",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    disbursementBatchId: uuid("disbursement_batch_id")
+      .notNull()
+      .references(() => payrollDisbursementBatches.id, { onDelete: "cascade" }),
+    artifactId: uuid("artifact_id").references(() => payrollArtifacts.id, {
+      onDelete: "set null",
+    }),
+    bankAdapter: varchar("bank_adapter", { length: 80 }).notNull(),
+    fileName: varchar("file_name", { length: 255 }).notNull(),
+    employeeCount: integer("employee_count").notNull().default(0),
+    totalAmount: decimal("total_amount", { precision: 14, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    controlHash: varchar("control_hash", { length: 128 }),
+    generatedByUserId: varchar("generated_by_user_id", { length: 255 }),
+    generatedAt: timestamp("generated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_payroll_bank_file_batch").on(table.disbursementBatchId),
+  ]
+);
+
+export const payrollJournalBatches = pgTable(
+  "payroll_journal_batches",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    payrollRunId: uuid("payroll_run_id")
+      .notNull()
+      .references(() => payrollRuns.id, { onDelete: "cascade" }),
+    status: payrollJournalStatusEnum("status").notNull().default("Draft"),
+    totalDebits: decimal("total_debits", { precision: 14, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    totalCredits: decimal("total_credits", { precision: 14, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    artifactId: uuid("artifact_id").references(() => payrollArtifacts.id, {
+      onDelete: "set null",
+    }),
+    postedByUserId: varchar("posted_by_user_id", { length: 255 }),
+    postedAt: timestamp("posted_at"),
+    reversedByUserId: varchar("reversed_by_user_id", { length: 255 }),
+    reversedAt: timestamp("reversed_at"),
+    createdByUserId: varchar("created_by_user_id", { length: 255 }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("idx_payroll_journal_run").on(table.payrollRunId),
+    index("idx_payroll_journal_status").on(table.status),
+  ]
+);
+
+export const payrollJournalLines = pgTable(
+  "payroll_journal_lines",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    journalBatchId: uuid("journal_batch_id")
+      .notNull()
+      .references(() => payrollJournalBatches.id, { onDelete: "cascade" }),
+    accountCode: varchar("account_code", { length: 80 }).notNull(),
+    accountName: varchar("account_name", { length: 180 }).notNull(),
+    departmentId: integer("department_id").references(() => department.id, {
+      onDelete: "set null",
+    }),
+    debit: decimal("debit", { precision: 14, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    credit: decimal("credit", { precision: 14, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    memo: text("memo"),
+    sourceLineType: payrollLineTypeEnum("source_line_type"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_payroll_journal_line_batch").on(table.journalBatchId),
+    index("idx_payroll_journal_line_account").on(table.accountCode),
+  ]
+);
+
+export const statutoryFilingPackages = pgTable(
+  "statutory_filing_packages",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    payrollRunId: uuid("payroll_run_id").references(() => payrollRuns.id, {
+      onDelete: "cascade",
+    }),
+    employerProfileId: uuid("employer_profile_id").references(
+      () => employerPayrollProfiles.id,
+      { onDelete: "set null" }
+    ),
+    kind: payrollArtifactKindEnum("kind").notNull(),
+    status: statutoryFilingStatusEnum("status").notNull().default("Draft"),
+    periodStart: date("period_start").notNull(),
+    periodEnd: date("period_end").notNull(),
+    dueDate: date("due_date"),
+    amountDue: decimal("amount_due", { precision: 14, scale: 2 })
+      .notNull()
+      .default("0.00"),
+    artifactId: uuid("artifact_id").references(() => payrollArtifacts.id, {
+      onDelete: "set null",
+    }),
+    paymentReference: varchar("payment_reference", { length: 120 }),
+    receiptArtifactId: uuid("receipt_artifact_id").references(
+      () => payrollArtifacts.id,
+      { onDelete: "set null" }
+    ),
+    preparedByUserId: varchar("prepared_by_user_id", { length: 255 }),
+    submittedByUserId: varchar("submitted_by_user_id", { length: 255 }),
+    submittedAt: timestamp("submitted_at"),
+    paidByUserId: varchar("paid_by_user_id", { length: 255 }),
+    paidAt: timestamp("paid_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("idx_statutory_filing_run").on(table.payrollRunId),
+    index("idx_statutory_filing_kind_status").on(table.kind, table.status),
+    index("idx_statutory_filing_due_date").on(table.dueDate),
   ]
 );
 
@@ -3644,6 +4232,7 @@ export const leaveEncashmentsRelations = relations(
 
 export const payrollPeriodsRelations = relations(payrollPeriods, ({ many }) => ({
   runs: many(payrollRuns),
+  readinessChecks: many(employeePayrollReadinessChecks),
   attendanceImportBatches: many(attendanceImportBatches),
   attendancePeriodOverrides: many(employeeAttendancePeriodOverrides),
   attendanceDayStatusOverrides: many(employeeAttendanceDayStatusOverrides),
@@ -3659,8 +4248,16 @@ export const payrollRunsRelations = relations(payrollRuns, ({ one, many }) => ({
     fields: [payrollRuns.payrollPeriodId],
     references: [payrollPeriods.id],
   }),
+  policyVersion: one(payrollPolicyVersions, {
+    fields: [payrollRuns.policyVersionId],
+    references: [payrollPolicyVersions.id],
+  }),
   employees: many(payrollRunEmployees),
   events: many(payrollRunEvents),
+  artifacts: many(payrollArtifacts),
+  disbursementBatches: many(payrollDisbursementBatches),
+  journalBatches: many(payrollJournalBatches),
+  statutoryFilingPackages: many(statutoryFilingPackages),
 }));
 
 export const payrollRunEmployeesRelations = relations(
@@ -3680,6 +4277,8 @@ export const payrollRunEmployeesRelations = relations(
     }),
     lines: many(payrollRunLines),
     loanPayments: many(loanPayments),
+    artifacts: many(payrollArtifacts),
+    payslipPublications: many(payslipPublications),
   })
 );
 
@@ -3689,6 +4288,128 @@ export const payrollRunLinesRelations = relations(payrollRunLines, ({ one }) => 
     references: [payrollRunEmployees.id],
   }),
 }));
+
+export const employeePayrollReadinessChecksRelations = relations(
+  employeePayrollReadinessChecks,
+  ({ one }) => ({
+    payrollPeriod: one(payrollPeriods, {
+      fields: [employeePayrollReadinessChecks.payrollPeriodId],
+      references: [payrollPeriods.id],
+    }),
+    employee: one(employees, {
+      fields: [employeePayrollReadinessChecks.employeeId],
+      references: [employees.id],
+    }),
+  })
+);
+
+export const payrollArtifactsRelations = relations(
+  payrollArtifacts,
+  ({ one }) => ({
+    payrollRun: one(payrollRuns, {
+      fields: [payrollArtifacts.payrollRunId],
+      references: [payrollRuns.id],
+    }),
+    payrollRunEmployee: one(payrollRunEmployees, {
+      fields: [payrollArtifacts.payrollRunEmployeeId],
+      references: [payrollRunEmployees.id],
+    }),
+  })
+);
+
+export const payslipPublicationsRelations = relations(
+  payslipPublications,
+  ({ one }) => ({
+    payrollRunEmployee: one(payrollRunEmployees, {
+      fields: [payslipPublications.payrollRunEmployeeId],
+      references: [payrollRunEmployees.id],
+    }),
+    artifact: one(payrollArtifacts, {
+      fields: [payslipPublications.artifactId],
+      references: [payrollArtifacts.id],
+    }),
+  })
+);
+
+export const payrollDisbursementBatchesRelations = relations(
+  payrollDisbursementBatches,
+  ({ one, many }) => ({
+    payrollRun: one(payrollRuns, {
+      fields: [payrollDisbursementBatches.payrollRunId],
+      references: [payrollRuns.id],
+    }),
+    artifact: one(payrollArtifacts, {
+      fields: [payrollDisbursementBatches.artifactId],
+      references: [payrollArtifacts.id],
+    }),
+    bankFiles: many(payrollBankFiles),
+  })
+);
+
+export const payrollBankFilesRelations = relations(
+  payrollBankFiles,
+  ({ one }) => ({
+    disbursementBatch: one(payrollDisbursementBatches, {
+      fields: [payrollBankFiles.disbursementBatchId],
+      references: [payrollDisbursementBatches.id],
+    }),
+    artifact: one(payrollArtifacts, {
+      fields: [payrollBankFiles.artifactId],
+      references: [payrollArtifacts.id],
+    }),
+  })
+);
+
+export const payrollJournalBatchesRelations = relations(
+  payrollJournalBatches,
+  ({ one, many }) => ({
+    payrollRun: one(payrollRuns, {
+      fields: [payrollJournalBatches.payrollRunId],
+      references: [payrollRuns.id],
+    }),
+    artifact: one(payrollArtifacts, {
+      fields: [payrollJournalBatches.artifactId],
+      references: [payrollArtifacts.id],
+    }),
+    lines: many(payrollJournalLines),
+  })
+);
+
+export const payrollJournalLinesRelations = relations(
+  payrollJournalLines,
+  ({ one }) => ({
+    journalBatch: one(payrollJournalBatches, {
+      fields: [payrollJournalLines.journalBatchId],
+      references: [payrollJournalBatches.id],
+    }),
+    department: one(department, {
+      fields: [payrollJournalLines.departmentId],
+      references: [department.id],
+    }),
+  })
+);
+
+export const statutoryFilingPackagesRelations = relations(
+  statutoryFilingPackages,
+  ({ one }) => ({
+    payrollRun: one(payrollRuns, {
+      fields: [statutoryFilingPackages.payrollRunId],
+      references: [payrollRuns.id],
+    }),
+    employerProfile: one(employerPayrollProfiles, {
+      fields: [statutoryFilingPackages.employerProfileId],
+      references: [employerPayrollProfiles.id],
+    }),
+    artifact: one(payrollArtifacts, {
+      fields: [statutoryFilingPackages.artifactId],
+      references: [payrollArtifacts.id],
+    }),
+    receiptArtifact: one(payrollArtifacts, {
+      fields: [statutoryFilingPackages.receiptArtifactId],
+      references: [payrollArtifacts.id],
+    }),
+  })
+);
 
 export const manualPayrollEntriesRelations = relations(
   manualPayrollEntries,
@@ -3751,6 +4472,25 @@ export const payrollRunEventsRelations = relations(payrollRunEvents, ({ one }) =
     references: [payrollRuns.id],
   }),
 }));
+
+export const employerPayrollProfilesRelations = relations(
+  employerPayrollProfiles,
+  ({ many }) => ({
+    payrollPolicyVersions: many(payrollPolicyVersions),
+    statutoryFilingPackages: many(statutoryFilingPackages),
+  })
+);
+
+export const payrollPolicyVersionsRelations = relations(
+  payrollPolicyVersions,
+  ({ one, many }) => ({
+    employerProfile: one(employerPayrollProfiles, {
+      fields: [payrollPolicyVersions.employerProfileId],
+      references: [employerPayrollProfiles.id],
+    }),
+    payrollRuns: many(payrollRuns),
+  })
+);
 
 export const statutoryRuleVersionsRelations = relations(
   statutoryRuleVersions,

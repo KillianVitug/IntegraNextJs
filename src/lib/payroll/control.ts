@@ -1,0 +1,816 @@
+import { db } from "@/db";
+import {
+  employeePayrollReadinessChecks,
+  employees,
+  payrollArtifacts,
+  payrollBankFiles,
+  payrollDisbursementBatches,
+  payrollJournalBatches,
+  payrollJournalLines,
+  payrollPeriods,
+  payrollRunEmployees,
+  payrollRunLines,
+  payrollRuns,
+  payslipPublications,
+  statutoryFilingPackages,
+  type payrollArtifactKindEnum,
+} from "@/db/schema";
+import { recordPayrollRunEvent } from "@/lib/admin";
+import { isPayrollEligibleEmploymentStatus } from "@/lib/employmentStatus";
+import { getActiveStatutoryRuleBundle } from "@/lib/payroll/statutory";
+import { and, eq, inArray, sql } from "drizzle-orm";
+
+type PayrollArtifactKind = (typeof payrollArtifactKindEnum.enumValues)[number];
+
+export type EmployeePayrollReadiness = {
+  employeeId: string;
+  employeeNo: string;
+  employeeName: string;
+  blockers: string[];
+  warnings: string[];
+};
+
+export type PayrollPreflightResult = {
+  payrollPeriodId: string;
+  periodCode: string;
+  canCompute: boolean;
+  statutoryBlockers: string[];
+  employeeReadiness: EmployeePayrollReadiness[];
+};
+
+export type PayrollPreflightOptions = {
+  persist?: boolean;
+  bypassTemporaryReadinessCategories?: boolean;
+};
+
+const TEMPORARY_BYPASSED_READINESS_CATEGORIES = new Set([
+  "Missing BIR tax status.",
+  "Missing Pag-IBIG number.",
+  "Missing PhilHealth number.",
+  "Missing SSS number.",
+  "Missing TIN.",
+  "Missing employee tax profile; legacy general info tax status will be used.",
+  "Missing timekeeping ID.",
+]);
+
+function filterTemporaryBypassedReadinessMessages(
+  messages: string[],
+  options: PayrollPreflightOptions
+) {
+  if (!options.bypassTemporaryReadinessCategories) return messages;
+
+  return messages.filter(
+    (message) => !TEMPORARY_BYPASSED_READINESS_CATEGORIES.has(message)
+  );
+}
+
+function toAmount(value: string | number | null | undefined) {
+  if (value == null) return 0;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function money(value: number) {
+  return value.toFixed(2);
+}
+
+function employeeName(employee: Pick<typeof employees.$inferSelect, "firstName" | "middleName" | "lastName">) {
+  return [employee.lastName, employee.firstName, employee.middleName]
+    .filter(Boolean)
+    .join(", ");
+}
+
+async function assertRunCanProduceArtifacts(payrollRunId: string) {
+  const run = await db.query.payrollRuns.findFirst({
+    where: eq(payrollRuns.id, payrollRunId),
+    with: {
+      payrollPeriod: true,
+      employees: {
+        with: {
+          lines: true,
+        },
+      },
+    },
+  });
+
+  if (!run) {
+    throw new Error("Payroll run not found.");
+  }
+
+  if (!["Approved", "Posted"].includes(run.status)) {
+    throw new Error("Payroll outputs can only be generated from Approved or Posted runs.");
+  }
+
+  return run;
+}
+
+export async function assertRequiredStatutoryRulesPublished(args: {
+  asOfDate: string;
+  payrollTerms?: "Semi-Monthly";
+}) {
+  const bundle = await getActiveStatutoryRuleBundle(
+    args.asOfDate,
+    args.payrollTerms ?? "Semi-Monthly"
+  );
+  const missing = [
+    ["SSS", bundle.sssVersionId],
+    ["PHILHEALTH", bundle.philhealthVersionId],
+    ["PAGIBIG", bundle.pagibigVersionId],
+    ["TAX", bundle.taxVersionId],
+  ]
+    .filter(([, versionId]) => versionId == null)
+    .map(([ruleType]) => `${ruleType} published statutory rule`);
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Payroll cannot continue because required statutory rules are missing: ${missing.join(", ")}.`
+    );
+  }
+
+  return bundle;
+}
+
+export async function preflightPayroll(
+  payrollPeriodId: string,
+  options: PayrollPreflightOptions = {}
+): Promise<PayrollPreflightResult> {
+  const period = await db.query.payrollPeriods.findFirst({
+    where: eq(payrollPeriods.id, payrollPeriodId),
+  });
+
+  if (!period) {
+    throw new Error("Payroll period not found.");
+  }
+
+  if (period.payrollTerms !== "Semi-Monthly") {
+    throw new Error("Only semi-monthly payroll periods are supported in v1.");
+  }
+
+  const statutoryBundle = await getActiveStatutoryRuleBundle(
+    period.adjustedPayDate,
+    "Semi-Monthly"
+  );
+  const statutoryBlockers = [
+    ["SSS", statutoryBundle.sssVersionId],
+    ["PhilHealth", statutoryBundle.philhealthVersionId],
+    ["Pag-IBIG", statutoryBundle.pagibigVersionId],
+    ["BIR withholding tax", statutoryBundle.taxVersionId],
+  ]
+    .filter(([, versionId]) => versionId == null)
+    .map(([label]) => `${label} published rule is missing for ${period.adjustedPayDate}.`);
+
+  const employeesForPayroll = await db.query.employees.findMany({
+    where: sql`${employees.employeeType} = 'EMP' and ${employees.deletedAt} is null`,
+    with: {
+      generalInfo: true,
+      salary: true,
+      otherReferences: true,
+      timekeeping: true,
+      taxProfile: true,
+      openingYearToDateBalances: true,
+    },
+  });
+
+  const readiness = employeesForPayroll
+    .filter((employee) =>
+      isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus)
+    )
+    .map((employee) => {
+      const blockers: string[] = [];
+      const warnings: string[] = [];
+      const generalInfo = employee.generalInfo;
+      const salary = employee.salary;
+      const references = employee.otherReferences;
+      const taxProfile = employee.taxProfile;
+      const hasSalaryRate =
+        toAmount(salary?.monthlyRate) > 0 || toAmount(salary?.dailyRate) > 0;
+
+      if (!generalInfo?.dateHired) blockers.push("Missing hire date.");
+      if (generalInfo?.payrollTerms !== "Semi-Monthly") {
+        blockers.push("Payroll terms must be Semi-Monthly for v1.");
+      }
+      if (!hasSalaryRate) blockers.push("Missing monthly or daily salary rate.");
+      if (!generalInfo?.taxIdNumber) blockers.push("Missing TIN.");
+      if (!generalInfo?.sssNumber) blockers.push("Missing SSS number.");
+      if (!generalInfo?.philhealthNumber) blockers.push("Missing PhilHealth number.");
+      if (!generalInfo?.pagIbigNumber) blockers.push("Missing Pag-IBIG number.");
+      if (!generalInfo?.taxStatus && !taxProfile?.taxStatus) {
+        blockers.push("Missing BIR tax status.");
+      }
+      if (generalInfo?.payrollMode === "Bank" && !references?.bankAccountNo) {
+        blockers.push("Bank-paid employee is missing bank account number.");
+      }
+      if (!employee.timekeeping?.timekeepingId) {
+        warnings.push("Missing timekeeping ID.");
+      }
+      if (!taxProfile) {
+        warnings.push("Missing employee tax profile; legacy general info tax status will be used.");
+      }
+
+      return {
+        employeeId: employee.id,
+        employeeNo: employee.employeeNo,
+        employeeName: employeeName(employee),
+        blockers: filterTemporaryBypassedReadinessMessages(blockers, options),
+        warnings: filterTemporaryBypassedReadinessMessages(warnings, options),
+      } satisfies EmployeePayrollReadiness;
+    });
+
+  if (options.persist ?? true) {
+    await db.transaction(async (tx) => {
+      await tx
+        .delete(employeePayrollReadinessChecks)
+        .where(eq(employeePayrollReadinessChecks.payrollPeriodId, payrollPeriodId));
+
+      const rows = readiness.flatMap((row) => [
+        ...row.blockers.map((message, index) => ({
+          payrollPeriodId,
+          employeeId: row.employeeId,
+          checkKey: `blocker_${index}_${message.slice(0, 40)}`,
+          severity: "Blocker" as const,
+          message,
+        })),
+        ...row.warnings.map((message, index) => ({
+          payrollPeriodId,
+          employeeId: row.employeeId,
+          checkKey: `warning_${index}_${message.slice(0, 40)}`,
+          severity: "Warning" as const,
+          message,
+        })),
+      ]);
+
+      if (rows.length > 0) {
+        await tx.insert(employeePayrollReadinessChecks).values(rows);
+      }
+    });
+  }
+
+  return {
+    payrollPeriodId,
+    periodCode: period.code,
+    canCompute:
+      statutoryBlockers.length === 0 &&
+      readiness.every((employee) => employee.blockers.length === 0),
+    statutoryBlockers,
+    employeeReadiness: readiness,
+  };
+}
+
+export async function transitionPayrollRun(args: {
+  payrollRunId: string;
+  nextStatus: "Reviewed" | "Approved" | "Posted" | "Void";
+  actorUserId: string;
+  transition: (
+    payrollRunId: string,
+    nextStatus: "Reviewed" | "Approved" | "Posted" | "Void",
+    actorUserId: string,
+    notes?: string | null
+  ) => Promise<unknown>;
+  notes?: string | null;
+}) {
+  const run = await db.query.payrollRuns.findFirst({
+    where: eq(payrollRuns.id, args.payrollRunId),
+  });
+
+  if (!run) throw new Error("Payroll run not found.");
+
+  if (args.nextStatus === "Approved" && run.reviewedByUserId === args.actorUserId) {
+    throw new Error("Maker-checker violation: reviewer cannot approve the same payroll run.");
+  }
+  if (args.nextStatus === "Posted" && run.approvedByUserId === args.actorUserId) {
+    throw new Error("Maker-checker violation: approver cannot post the same payroll run.");
+  }
+
+  return args.transition(
+    args.payrollRunId,
+    args.nextStatus,
+    args.actorUserId,
+    args.notes ?? null
+  );
+}
+
+export async function reversePayrollRun(args: {
+  payrollRunId: string;
+  actorUserId: string;
+  reason: string;
+}) {
+  const original = await db.query.payrollRuns.findFirst({
+    where: eq(payrollRuns.id, args.payrollRunId),
+    with: {
+      employees: {
+        with: {
+          lines: true,
+        },
+      },
+    },
+  });
+
+  if (!original) throw new Error("Payroll run not found.");
+  if (original.status !== "Posted") {
+    throw new Error("Only posted payroll runs can be reversed.");
+  }
+  if (original.reversalRunId) {
+    throw new Error("Payroll run already has a reversal run.");
+  }
+
+  return db.transaction(async (tx) => {
+    const [latestRunForPeriod] = await tx
+      .select()
+      .from(payrollRuns)
+      .where(eq(payrollRuns.payrollPeriodId, original.payrollPeriodId))
+      .orderBy(sql`${payrollRuns.runNumber} desc`)
+      .limit(1);
+    const [reversal] = await tx
+      .insert(payrollRuns)
+      .values({
+        payrollPeriodId: original.payrollPeriodId,
+        runType: "Reversal",
+        status: "Draft",
+        runNumber: (latestRunForPeriod?.runNumber ?? original.runNumber) + 1,
+        computedAt: new Date(),
+        computedByUserId: args.actorUserId,
+        notes: args.reason,
+        inputSnapshot: {
+          reversedPayrollRunId: original.id,
+          reversedRunNumber: original.runNumber,
+        },
+      })
+      .returning();
+
+    const insertedEmployees =
+      original.employees.length === 0
+        ? []
+        : await tx
+            .insert(payrollRunEmployees)
+            .values(
+              original.employees.map((employee) => ({
+                payrollRunId: reversal.id,
+                employeeId: employee.employeeId,
+                employeeNoSnapshot: employee.employeeNoSnapshot,
+                employeeNameSnapshot: employee.employeeNameSnapshot,
+                salaryAdjustmentId: employee.salaryAdjustmentId,
+                salaryAdjustmentMode: employee.salaryAdjustmentMode,
+                regularPay: money(-toAmount(employee.regularPay)),
+                grossPay: money(-toAmount(employee.grossPay)),
+                taxablePay: money(-toAmount(employee.taxablePay)),
+                nonTaxablePay: money(-toAmount(employee.nonTaxablePay)),
+                totalDeductions: money(-toAmount(employee.totalDeductions)),
+                employeeContributions: money(-toAmount(employee.employeeContributions)),
+                employerContributions: money(-toAmount(employee.employerContributions)),
+                netPay: money(-toAmount(employee.netPay)),
+                breakdownNotes: `Reversal of payroll run ${original.id}. ${args.reason}`,
+              }))
+            )
+            .returning({
+              id: payrollRunEmployees.id,
+              employeeId: payrollRunEmployees.employeeId,
+            });
+
+    const employeeRunIdByEmployeeId = new Map(
+      insertedEmployees.map((employee) => [employee.employeeId, employee.id])
+    );
+    const lineRows = original.employees.flatMap((employee) => {
+      const payrollRunEmployeeId = employeeRunIdByEmployeeId.get(employee.employeeId);
+      if (!payrollRunEmployeeId) return [];
+
+      return employee.lines.map((line) => ({
+        payrollRunEmployeeId,
+        lineType: line.lineType,
+        code: line.code,
+        description: `Reversal - ${line.description}`,
+        amount: money(-toAmount(line.amount)),
+        quantity: line.quantity,
+        rate: line.rate,
+        taxable: line.taxable,
+        month13thEligible: line.month13thEligible,
+        birTaxCategory: line.birTaxCategory,
+        birDeMinimisType: line.birDeMinimisType,
+        sourceTable: line.sourceTable,
+        sourceId: line.sourceId,
+      }));
+    });
+
+    if (lineRows.length > 0) {
+      await tx.insert(payrollRunLines).values(lineRows);
+    }
+
+    await tx
+      .update(payrollRuns)
+      .set({ reversalRunId: reversal.id, updatedAt: new Date() })
+      .where(eq(payrollRuns.id, original.id));
+
+    await recordPayrollRunEvent({
+      payrollRunId: original.id,
+      actorUserId: args.actorUserId,
+      eventType: "Reversed",
+      fromStatus: "Posted",
+      toStatus: "Posted",
+      notes: args.reason,
+      database: tx,
+    });
+
+    await recordPayrollRunEvent({
+      payrollRunId: reversal.id,
+      actorUserId: args.actorUserId,
+      eventType: "Computed",
+      fromStatus: null,
+      toStatus: "Draft",
+      notes: `Reversal of payroll run ${original.id}`,
+      database: tx,
+    });
+
+    return tx.query.payrollRuns.findFirst({
+      where: eq(payrollRuns.id, reversal.id),
+      with: {
+        payrollPeriod: true,
+        employees: {
+          with: {
+            lines: true,
+          },
+        },
+      },
+    });
+  });
+}
+
+export async function publishPayslips(args: {
+  payrollRunId: string;
+  actorUserId: string;
+}) {
+  const run = await assertRunCanProduceArtifacts(args.payrollRunId);
+
+  return db.transaction(async (tx) => {
+    let publishedCount = 0;
+    for (const employeeRun of run.employees) {
+      const [artifact] = await tx
+        .insert(payrollArtifacts)
+        .values({
+          payrollRunId: run.id,
+          payrollRunEmployeeId: employeeRun.id,
+          kind: "Payslip",
+          status: "Published",
+          format: "PDF",
+          fileName: `${employeeRun.employeeNoSnapshot}-${run.payrollPeriod?.code ?? "payroll"}-payslip.pdf`,
+          metadata: {
+            employeeId: employeeRun.employeeId,
+            runNumber: run.runNumber,
+            generatedFrom: "payroll-run-snapshot",
+          },
+          generatedByUserId: args.actorUserId,
+          generatedAt: new Date(),
+          publishedByUserId: args.actorUserId,
+          publishedAt: new Date(),
+        })
+        .returning();
+
+      await tx
+        .insert(payslipPublications)
+        .values({
+          payrollRunEmployeeId: employeeRun.id,
+          artifactId: artifact.id,
+          status: "Published",
+          publishedByUserId: args.actorUserId,
+          publishedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: payslipPublications.payrollRunEmployeeId,
+          set: {
+            artifactId: artifact.id,
+            status: "Published",
+            publishedByUserId: args.actorUserId,
+            publishedAt: new Date(),
+            revokedByUserId: null,
+            revokedAt: null,
+            revokeReason: null,
+            updatedAt: new Date(),
+          },
+        });
+      publishedCount += 1;
+    }
+
+    await recordPayrollRunEvent({
+      payrollRunId: run.id,
+      actorUserId: args.actorUserId,
+      eventType: "PayslipsPublished",
+      fromStatus: run.status,
+      toStatus: run.status,
+      notes: `Published ${publishedCount} payslip(s).`,
+      database: tx,
+    });
+
+    return { publishedCount };
+  });
+}
+
+export async function generateBankBatch(args: {
+  payrollRunId: string;
+  actorUserId: string;
+  batchType?: "Bank" | "Cash";
+  bankAdapter?: string;
+}) {
+  const run = await assertRunCanProduceArtifacts(args.payrollRunId);
+  const totalNetPay = run.employees.reduce(
+    (total, employee) => total + toAmount(employee.netPay),
+    0
+  );
+  const batchType = args.batchType ?? "Bank";
+
+  return db.transaction(async (tx) => {
+    const [artifact] = await tx
+      .insert(payrollArtifacts)
+      .values({
+        payrollRunId: run.id,
+        kind: batchType === "Bank" ? "BankFile" : "CashPayrollList",
+        status: "Generated",
+        format: "CSV",
+        fileName: `${run.payrollPeriod?.code ?? "payroll"}-${batchType.toLowerCase()}-disbursement.csv`,
+        metadata: {
+          employeeCount: run.employees.length,
+          totalNetPay: money(totalNetPay),
+          bankAdapter: args.bankAdapter ?? null,
+        },
+        generatedByUserId: args.actorUserId,
+        generatedAt: new Date(),
+      })
+      .returning();
+
+    const [batch] = await tx
+      .insert(payrollDisbursementBatches)
+      .values({
+        payrollRunId: run.id,
+        batchType,
+        status: "Generated",
+        bankAdapter: args.bankAdapter ?? null,
+        employeeCount: run.employees.length,
+        totalNetPay: money(totalNetPay),
+        artifactId: artifact.id,
+        createdByUserId: args.actorUserId,
+      })
+      .returning();
+
+    if (batchType === "Bank") {
+      await tx.insert(payrollBankFiles).values({
+        disbursementBatchId: batch.id,
+        artifactId: artifact.id,
+        bankAdapter: args.bankAdapter ?? "PNB",
+        fileName: artifact.fileName ?? "payroll-bank-file.csv",
+        employeeCount: run.employees.length,
+        totalAmount: money(totalNetPay),
+        generatedByUserId: args.actorUserId,
+      });
+    }
+
+    await recordPayrollRunEvent({
+      payrollRunId: run.id,
+      actorUserId: args.actorUserId,
+      eventType: "Exported",
+      fromStatus: run.status,
+      toStatus: run.status,
+      notes: `Generated ${batchType} disbursement batch.`,
+      database: tx,
+    });
+
+    return batch;
+  });
+}
+
+export async function generateGlJournal(args: {
+  payrollRunId: string;
+  actorUserId: string;
+}) {
+  const run = await assertRunCanProduceArtifacts(args.payrollRunId);
+  const grossPay = run.employees.reduce(
+    (total, employee) => total + toAmount(employee.grossPay),
+    0
+  );
+  const deductions = run.employees.reduce(
+    (total, employee) => total + toAmount(employee.totalDeductions),
+    0
+  );
+  const employerContributions = run.employees.reduce(
+    (total, employee) => total + toAmount(employee.employerContributions),
+    0
+  );
+  const netPay = run.employees.reduce(
+    (total, employee) => total + toAmount(employee.netPay),
+    0
+  );
+  const totalDebits = grossPay + employerContributions;
+  const totalCredits = netPay + deductions + employerContributions;
+
+  if (Math.abs(totalDebits - totalCredits) > 0.01) {
+    throw new Error("Payroll journal is not balanced. Review payroll totals before export.");
+  }
+
+  return db.transaction(async (tx) => {
+    const [artifact] = await tx
+      .insert(payrollArtifacts)
+      .values({
+        payrollRunId: run.id,
+        kind: "GlJournal",
+        status: "Generated",
+        format: "CSV",
+        fileName: `${run.payrollPeriod?.code ?? "payroll"}-gl-journal.csv`,
+        metadata: {
+          totalDebits: money(totalDebits),
+          totalCredits: money(totalCredits),
+        },
+        generatedByUserId: args.actorUserId,
+        generatedAt: new Date(),
+      })
+      .returning();
+    const [journal] = await tx
+      .insert(payrollJournalBatches)
+      .values({
+        payrollRunId: run.id,
+        status: "Balanced",
+        totalDebits: money(totalDebits),
+        totalCredits: money(totalCredits),
+        artifactId: artifact.id,
+        createdByUserId: args.actorUserId,
+      })
+      .returning();
+
+    await tx.insert(payrollJournalLines).values([
+      {
+        journalBatchId: journal.id,
+        accountCode: "PAYROLL_EXPENSE",
+        accountName: "Payroll Expense",
+        debit: money(grossPay),
+        credit: "0.00",
+        memo: `Payroll gross pay for run ${run.id}`,
+        sourceLineType: "Earning",
+      },
+      {
+        journalBatchId: journal.id,
+        accountCode: "EMPLOYER_CONTRIBUTION_EXPENSE",
+        accountName: "Employer Contribution Expense",
+        debit: money(employerContributions),
+        credit: "0.00",
+        memo: `Employer contributions for run ${run.id}`,
+        sourceLineType: "Employer Contribution",
+      },
+      {
+        journalBatchId: journal.id,
+        accountCode: "PAYROLL_CLEARING",
+        accountName: "Payroll Net Pay Clearing",
+        debit: "0.00",
+        credit: money(netPay),
+        memo: `Net pay payable for run ${run.id}`,
+        sourceLineType: "Deduction",
+      },
+      {
+        journalBatchId: journal.id,
+        accountCode: "PAYROLL_STATUTORY_AND_DEDUCTION_LIABILITY",
+        accountName: "Payroll Statutory and Deduction Liability",
+        debit: "0.00",
+        credit: money(deductions + employerContributions),
+        memo: `Deductions and employer liabilities for run ${run.id}`,
+        sourceLineType: "Deduction",
+      },
+    ]);
+
+    await recordPayrollRunEvent({
+      payrollRunId: run.id,
+      actorUserId: args.actorUserId,
+      eventType: "Exported",
+      fromStatus: run.status,
+      toStatus: run.status,
+      notes: "Generated balanced GL journal.",
+      database: tx,
+    });
+
+    return journal;
+  });
+}
+
+export async function generateStatutoryPackage(args: {
+  payrollRunId: string;
+  actorUserId: string;
+  kind: Extract<
+    PayrollArtifactKind,
+    | "SssContribution"
+    | "SssLoan"
+    | "PhilhealthEprs"
+    | "PagibigMcrf"
+    | "Bir1601C"
+    | "Bir1604C"
+    | "Bir2316"
+    | "Dole13thMonth"
+  >;
+}) {
+  const run = await assertRunCanProduceArtifacts(args.payrollRunId);
+  if (!run.payrollPeriod) throw new Error("Payroll period not found.");
+
+  const lineCodesByKind: Record<typeof args.kind, string[]> = {
+    SssContribution: ["SSS", "SSS-ER", "SSS-EC"],
+    SssLoan: [],
+    PhilhealthEprs: ["PHILHEALTH", "PHILHEALTH-ER"],
+    PagibigMcrf: ["PAGIBIG", "PAGIBIG-ER"],
+    Bir1601C: ["TAX"],
+    Bir1604C: ["TAX"],
+    Bir2316: ["TAX"],
+    Dole13thMonth: [],
+  };
+  const amountDue = run.employees.reduce(
+    (total, employee) =>
+      total +
+      employee.lines
+        .filter((line) => lineCodesByKind[args.kind].includes(line.code))
+        .reduce((lineTotal, line) => lineTotal + toAmount(line.amount), 0),
+    0
+  );
+
+  return db.transaction(async (tx) => {
+    const [artifact] = await tx
+      .insert(payrollArtifacts)
+      .values({
+        payrollRunId: run.id,
+        kind: args.kind,
+        status: "Generated",
+        format: "CSV",
+        fileName: `${run.payrollPeriod?.code ?? "payroll"}-${args.kind}.csv`,
+        metadata: {
+          amountDue: money(amountDue),
+          periodStart: run.payrollPeriod?.startDate,
+          periodEnd: run.payrollPeriod?.endDate,
+        },
+        generatedByUserId: args.actorUserId,
+        generatedAt: new Date(),
+      })
+      .returning();
+
+    const [filingPackage] = await tx
+      .insert(statutoryFilingPackages)
+      .values({
+        payrollRunId: run.id,
+        kind: args.kind,
+        status: "Generated",
+        periodStart: run.payrollPeriod.startDate,
+        periodEnd: run.payrollPeriod.endDate,
+        amountDue: money(amountDue),
+        artifactId: artifact.id,
+        preparedByUserId: args.actorUserId,
+      })
+      .returning();
+
+    await recordPayrollRunEvent({
+      payrollRunId: run.id,
+      actorUserId: args.actorUserId,
+      eventType: "Exported",
+      fromStatus: run.status,
+      toStatus: run.status,
+      notes: `Generated ${args.kind} statutory package.`,
+      database: tx,
+    });
+
+    return filingPackage;
+  });
+}
+
+export async function getPublishedEmployeePayslips(employeeId: string) {
+  const rows = await db
+    .select({
+      publication: payslipPublications,
+      runEmployee: payrollRunEmployees,
+      run: payrollRuns,
+      period: payrollPeriods,
+      artifact: payrollArtifacts,
+    })
+    .from(payslipPublications)
+    .innerJoin(
+      payrollRunEmployees,
+      eq(payslipPublications.payrollRunEmployeeId, payrollRunEmployees.id)
+    )
+    .innerJoin(payrollRuns, eq(payrollRunEmployees.payrollRunId, payrollRuns.id))
+    .innerJoin(payrollPeriods, eq(payrollRuns.payrollPeriodId, payrollPeriods.id))
+    .leftJoin(payrollArtifacts, eq(payslipPublications.artifactId, payrollArtifacts.id))
+    .where(
+      and(
+        eq(payrollRunEmployees.employeeId, employeeId),
+        eq(payslipPublications.status, "Published"),
+        inArray(payrollRuns.status, ["Approved", "Posted"])
+      )
+    );
+
+  const runEmployeeIds = rows.map((row) => row.runEmployee.id);
+  const lines =
+    runEmployeeIds.length === 0
+      ? []
+      : await db
+          .select()
+          .from(payrollRunLines)
+          .where(inArray(payrollRunLines.payrollRunEmployeeId, runEmployeeIds));
+  const linesByEmployeeRunId = new Map<string, typeof lines>();
+
+  for (const line of lines) {
+    const current = linesByEmployeeRunId.get(line.payrollRunEmployeeId) ?? [];
+    current.push(line);
+    linesByEmployeeRunId.set(line.payrollRunEmployeeId, current);
+  }
+
+  return rows.map((row) => ({
+    ...row,
+    lines: linesByEmployeeRunId.get(row.runEmployee.id) ?? [],
+  }));
+}

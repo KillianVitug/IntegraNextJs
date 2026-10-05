@@ -1,8 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  recomputeManagerDtrPayrollAction,
-  refreshManagerAttendancePeriodSummariesAction,
-} from "@/app/actions/attendanceImportAction";
+import { refreshManagerAttendancePeriodSummariesAction } from "@/app/actions/attendanceImportAction";
 import { buildRequestHostUrl } from "@/lib/http/redirect";
 
 function readText(formData: FormData, name: string) {
@@ -23,10 +20,6 @@ function buildRedirectUrl(
   }
 
   return url;
-}
-
-function getErrorMessage(error: unknown) {
-  return error instanceof Error ? error.message : "Payroll recompute failed.";
 }
 
 export async function POST(request: NextRequest) {
@@ -52,18 +45,6 @@ export async function POST(request: NextRequest) {
 
   try {
     const result = await refreshManagerAttendancePeriodSummariesAction(periodId);
-    let payrollRecomputeStatus = "computed";
-    let payrollRunNumber: number | null = null;
-    let payrollRecomputeMessage: string | null = null;
-
-    try {
-      const payrollResult = await recomputeManagerDtrPayrollAction(periodId);
-      payrollRunNumber = payrollResult.payrollRunNumber;
-    } catch (error) {
-      console.error("Manager DTR payroll recompute failed:", error);
-      payrollRecomputeStatus = "failed";
-      payrollRecomputeMessage = getErrorMessage(error);
-    }
 
     return NextResponse.redirect(
       buildRedirectUrl(request, {
@@ -73,20 +54,24 @@ export async function POST(request: NextRequest) {
         holdRefreshed: result.refreshedHoldApprovalCount,
         holdDeleted: result.deletedHoldApprovalCount,
         holdOverridesCleared: result.clearedManualHoldOverrideCount,
-        payrollRecomputeStatus,
-        payrollRunNumber,
-        payrollRecomputeMessage,
+        payrollRecomputeStatus: result.payrollRecompute.status,
+        payrollRunNumber: result.payrollRecompute.payrollRunNumber,
+        payrollRecomputeMessage: result.payrollRecompute.message,
       }),
       303,
     );
   } catch (error) {
     console.error("Manager DTR summary refresh failed:", error);
+    const errorMessage =
+      error instanceof Error ? error.message : "Payroll recompute failed.";
     return NextResponse.redirect(
       buildRedirectUrl(request, {
         ...baseParams,
         refreshStatus: "failed",
-        payrollRecomputeStatus: "failed",
-        payrollRecomputeMessage: getErrorMessage(error),
+        payrollRecomputeStatus: errorMessage.includes("blocked")
+          ? "blocked"
+          : "failed",
+        payrollRecomputeMessage: errorMessage,
       }),
       303,
     );

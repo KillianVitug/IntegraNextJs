@@ -86,6 +86,7 @@ export async function getActiveStatutoryVersion(
       and(
         eq(statutoryRuleVersions.ruleType, ruleType),
         eq(statutoryRuleVersions.payrollTerms, payrollTerms),
+        eq(statutoryRuleVersions.status, "Published"),
         lte(statutoryRuleVersions.effectiveFrom, asOfDate),
         or(
           isNull(statutoryRuleVersions.effectiveTo),

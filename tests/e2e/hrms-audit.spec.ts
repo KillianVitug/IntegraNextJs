@@ -143,6 +143,9 @@ const ADMIN_MODULE_ROUTES = [
   "/leaves/form",
   "/salaryAdjustment",
   "/payroll",
+  "/payroll/report",
+  "/payroll/outputs",
+  "/payroll/special-run",
   "/loans",
   "/loans/form",
   "/employeeFiles",
@@ -253,11 +256,23 @@ function possiblePageFilesForRoute(route: string) {
     return [path.join(ROOT_DIR, "src", "app", "page.tsx")];
   }
 
-  return routeGroups.map((group) =>
+  const pageFiles = routeGroups.map((group) =>
     group
       ? path.join(ROOT_DIR, "src", "app", group, ...segments, "page.tsx")
       : path.join(ROOT_DIR, "src", "app", ...segments, "page.tsx")
   );
+
+  if (segments.length === 2 && segments[0] === "payroll") {
+    pageFiles.push(
+      ...routeGroups.map((group) =>
+        group
+          ? path.join(ROOT_DIR, "src", "app", group, "payroll", "[section]", "page.tsx")
+          : path.join(ROOT_DIR, "src", "app", "payroll", "[section]", "page.tsx")
+      )
+    );
+  }
+
+  return pageFiles;
 }
 
 function routeHasPage(route: string) {
@@ -1149,7 +1164,6 @@ async function runPayrollDraftSimulation(page: Page, report: AuditReport) {
   }
 
   await openPayrollTab(page, "Manual Payroll", report);
-  await openPayrollTab(page, "Reports", report);
   await openPayrollTab(page, "Attendance Imports", report);
   await openPayrollTab(page, "Payroll Account Code", report);
   await openPayrollTab(page, "Payroll Run", report);
