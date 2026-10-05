@@ -7,7 +7,7 @@ export type Destination = typeof destination;
 export type Mode = "preflight" | "compare" | "sync";
 export type TestConfig = {
   databaseUrl: string; sourceToken: string; periodId: string; periodStart: string; periodEnd: string; actorUserId: string;
-  mappings: { sourceEmployeeId: string; employeeId: string; reason: string }[];
+  mappings: { sourceEmployeeId: string; employeeId: string; reason: string; nameDifferencesAcknowledged?: boolean }[];
   comparisons: { sourceEmployeeId: string; attendanceDate: string; checkInTime: string; checkOutTime: string; breakMinutes: number; expectedWorkedMinutes: number }[];
 };
 export class TestStop extends Error {
@@ -67,6 +67,7 @@ export function validateScope(c: TestConfig, args: ReturnType<typeof parseArgs>)
   const sources = new Set<string>(), employees = new Set<string>(), cases = new Set<string>();
   for (const m of c.mappings) {
     need(m && sourceId.test(m.sourceEmployeeId) && uuid.test(m.employeeId) && typeof m.reason === "string" && m.reason.trim().length >= 3 && m.reason.length <= 500 && !sources.has(m.sourceEmployeeId) && !employees.has(m.employeeId), "ambiguous_employee_mapping");
+    need(m.nameDifferencesAcknowledged === undefined || typeof m.nameDifferencesAcknowledged === "boolean", "invalid_name_acknowledgment");
     sources.add(m.sourceEmployeeId); employees.add(m.employeeId);
   }
   for (const row of c.comparisons) {

@@ -16,11 +16,11 @@ export async function syncAttendanceSourceAction(periodId: string) {
     return `Sync complete: ${result.received} received, ${result.projected} punches updated, ${result.unmatched} unmatched, ${result.withheld} withheld, ${result.boundaryReview} boundary reviews, ${result.clearedEmployees} cleared employee-periods, ${result.lateChanges} late changes. Counts can overlap. Resolve issues, then refresh DTR summaries.`;
   });
 }
-export async function saveAttendanceSourceMappingAction(sourceId: string, employeeId: string, reason: string, version?: string) {
+export async function saveAttendanceSourceMappingAction(sourceId: string, employeeId: string, reason: string, version?: string, nameDifferencesAcknowledged = false) {
   const actor = await requireAdminActor(); requireAttendanceSource();
   return payrollActionResult(async () => {
     if (!version) throw new PayrollValidationError("Refresh Attendance connection and review the current identity before saving.");
-    const result = await db.transaction(tx => mutateAttendanceMatching(tx, actor.userId, { kind: "Match", items: [{ sourceId, employeeId, version, reviewed: true }], method: "other", note: reason, confirmed: true }));
+    const result = await db.transaction(tx => mutateAttendanceMatching(tx, actor.userId, { kind: "Match", items: [{ sourceId, employeeId, version, reviewed: true }], method: "other", note: reason, confirmed: true, nameDifferencesAcknowledged }));
     revalidatePath("/payroll/attendance-source"); revalidatePath("/payroll");
     return result.message;
   });
