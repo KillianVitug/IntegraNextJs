@@ -190,7 +190,76 @@ export function ManagerCalendarClient({ data, initialSelectedDate }: Props) {
         </CardHeader>
 
         <CardContent>
-          <div className="overflow-x-auto">
+          <div className="md:hidden">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              {data.days.map((day) => {
+                const isSelected = selectedDate === day.date;
+                const isToday = todayKey === day.date;
+
+                return (
+                  <Link
+                    key={`mobile-${day.date}`}
+                    aria-pressed={isSelected}
+                    href={buildCalendarHref({
+                      year: data.year,
+                      month: data.month,
+                      day: day.date,
+                    })}
+                    className={cn(
+                      "rounded-md border bg-background p-3 text-left transition hover:border-primary hover:bg-accent/40",
+                      isSelected &&
+                        "border-primary bg-primary text-primary-foreground hover:bg-primary",
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="text-lg font-semibold">
+                          {day.dayOfMonth}
+                        </div>
+                        <div
+                          className={cn(
+                            "text-xs",
+                            isSelected
+                              ? "text-primary-foreground/80"
+                              : "text-muted-foreground",
+                          )}
+                        >
+                          {day.date}
+                        </div>
+                      </div>
+                      {isToday ? (
+                        <span
+                          className={cn(
+                            "rounded-full px-2 py-0.5 text-[11px] font-medium",
+                            isSelected
+                              ? "bg-primary-foreground text-primary"
+                              : "bg-emerald-100 text-emerald-800",
+                          )}
+                        >
+                          Today
+                        </span>
+                      ) : null}
+                    </div>
+                    <div
+                      className={cn(
+                        "mt-3 grid grid-cols-2 gap-x-2 gap-y-1 text-xs",
+                        isSelected
+                          ? "text-primary-foreground/90"
+                          : "text-muted-foreground",
+                      )}
+                    >
+                      <span>{day.employeeCount} covered</span>
+                      <span>{day.workingCount} working</span>
+                      <span>{day.overrideCount} overrides</span>
+                      <span>{day.approvedLeaveEmployeeCount} leaves</span>
+                    </div>
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="hidden overflow-x-auto md:block">
             <div className="min-w-[760px]">
               <div className="grid grid-cols-7 gap-1.5 pb-2">
                 {WEEKDAY_LABELS.map((weekday) => (
@@ -291,7 +360,7 @@ export function ManagerCalendarClient({ data, initialSelectedDate }: Props) {
               {selectedDay.employees.map((employee) => (
                 <div
                   key={employee.employeeId}
-                  className="rounded-md border p-2.5 shadow-sm"
+                  className="rounded-md border p-3 shadow-sm sm:p-2.5"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div>
@@ -305,7 +374,7 @@ export function ManagerCalendarClient({ data, initialSelectedDate }: Props) {
                       </div>
                     </div>
 
-                    <div className="flex flex-wrap justify-end gap-2">
+                    <div className="flex flex-wrap justify-start gap-2 sm:justify-end">
                       {employee.hasApprovedLeave ? (
                         <span className="rounded-full border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-900">
                           Approved Leave

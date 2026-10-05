@@ -1274,6 +1274,141 @@ async function markPayrollPeriodRunsStale(args: {
   return staleRunIds.length;
 }
 
+export type ManagerDtrPayrollSyncResult = {
+  status: "computed" | "skipped" | "failed" | "blocked";
+  payrollPeriodCode: string | null;
+  payrollRunId?: string | null;
+  payrollRunNumber?: number | null;
+  message: string;
+};
+
+function getPayrollRunBlockedMessage(payrollPeriodCode: string, status: string) {
+  return `Manager DTR updates are blocked because payroll period ${payrollPeriodCode} already has a ${status} run. Ask HR/Admin to void or reverse the run before changing DTR data.`;
+}
+
+async function getPayrollPeriodForManagerDtrSync(payrollPeriodId: string) {
+  const payrollPeriod = await db.query.payrollPeriods.findFirst({
+    where: eq(payrollPeriods.id, payrollPeriodId),
+  });
+
+  if (!payrollPeriod) {
+    throw new Error("Payroll period not found.");
+  }
+
+  return payrollPeriod;
+}
+
+async function assertManagerDtrPayrollPeriodCanChange(payrollPeriodId: string) {
+  const payrollPeriod = await getPayrollPeriodForManagerDtrSync(payrollPeriodId);
+  const [blockingRun] = await db
+    .select({
+      status: payrollRuns.status,
+      runNumber: payrollRuns.runNumber,
+    })
+    .from(payrollRuns)
+    .where(
+      and(
+        eq(payrollRuns.payrollPeriodId, payrollPeriodId),
+        inArray(payrollRuns.status, ["Approved", "Posted"])
+      )
+    )
+    .orderBy(desc(payrollRuns.createdAt))
+    .limit(1);
+
+  if (blockingRun) {
+    throw new Error(
+      `${getPayrollRunBlockedMessage(
+        payrollPeriod.code,
+        blockingRun.status
+      )} Blocking run: #${blockingRun.runNumber}.`
+    );
+  }
+
+  return payrollPeriod;
+}
+
+async function syncManagerDtrPayrollPeriod(args: {
+  actorUserId: string;
+  payrollPeriodId: string;
+  markStale?: boolean;
+  staleNotes?: string;
+}): Promise<ManagerDtrPayrollSyncResult> {
+  const payrollPeriod = await getPayrollPeriodForManagerDtrSync(
+    args.payrollPeriodId
+  );
+
+  try {
+    await assertManagerDtrPayrollPeriodCanChange(args.payrollPeriodId);
+
+    if (args.markStale ?? true) {
+      await db.transaction(async (tx) => {
+        await markPayrollPeriodRunsStale({
+          tx,
+          payrollPeriodId: payrollPeriod.id,
+          payrollPeriodCode: payrollPeriod.code,
+          actorUserId: args.actorUserId,
+          notes:
+            args.staleNotes ??
+            "Marked stale because manager DTR updates changed attendance totals.",
+        });
+      });
+    }
+
+    const run = await createOrRecomputePayrollRun(
+      payrollPeriod.id,
+      args.actorUserId,
+      { bypassTemporaryReadinessCategories: true }
+    );
+
+    revalidatePath("/payroll");
+    revalidatePath("/managerDtrFiles");
+
+    return {
+      status: "computed",
+      payrollPeriodCode: payrollPeriod.code,
+      payrollRunId: run?.id ?? null,
+      payrollRunNumber: run?.runNumber ?? null,
+      message: run?.runNumber
+        ? `Payroll recomputed. Admin Payroll now shows Run #${run.runNumber} with the latest manager DTR totals.`
+        : "Payroll recomputed with the latest manager DTR totals.",
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Payroll recompute failed.";
+    const blocked = /already has a (Approved|Posted) run/i.test(message);
+
+    return {
+      status: blocked ? "blocked" : "failed",
+      payrollPeriodCode: payrollPeriod.code,
+      payrollRunId: null,
+      payrollRunNumber: null,
+      message,
+    };
+  }
+}
+
+export async function syncManagerDtrPayrollPeriodAction(
+  payrollPeriodId: string,
+  options: { markStale?: boolean; staleNotes?: string } = {}
+) {
+  const auth = await requireManager();
+  const scope = await getManagerAttendanceScope(auth.accountId);
+
+  if (!payrollPeriodId) {
+    throw new Error("Select a payroll period before recomputing payroll.");
+  }
+  if (scope.employeeIds.length === 0) {
+    throw new Error("Manager account is not assigned to a department.");
+  }
+
+  return syncManagerDtrPayrollPeriod({
+    actorUserId: auth.accountId,
+    payrollPeriodId,
+    markStale: options.markStale,
+    staleNotes: options.staleNotes,
+  });
+}
+
 async function syncAttendanceCorrectionSuggestions(args: {
   tx: AttendanceTransaction;
   payrollPeriod: Pick<
@@ -2534,6 +2669,7 @@ export async function importManagerDtrLogsAction(params: AttendanceImportParams)
   if (scope.employeeIds.length === 0) {
     throw new Error("Manager account is not assigned to a department.");
   }
+  await assertManagerDtrPayrollPeriodCanChange(params.payrollPeriodId);
 
   const batch = await importAttendanceLogsForScope(
     {
@@ -2577,7 +2713,9 @@ export async function refreshManagerAttendancePeriodSummariesAction(
     throw new Error("Manager account is not assigned to a department.");
   }
 
-  return refreshAttendancePeriodSummariesForScope({
+  await assertManagerDtrPayrollPeriodCanChange(payrollPeriodId);
+
+  const refreshResult = await refreshAttendancePeriodSummariesForScope({
     actorUserId: auth.accountId,
     payrollPeriodId,
     employeeIds: scope.employeeIds,
@@ -2588,14 +2726,24 @@ export async function refreshManagerAttendancePeriodSummariesAction(
       departmentIds: scope.departmentIds,
     },
   });
+  const payrollRecompute = await syncManagerDtrPayrollPeriod({
+    actorUserId: auth.accountId,
+    payrollPeriodId,
+    markStale: false,
+  });
+
+  return {
+    ...refreshResult,
+    payrollRecompute,
+  };
 }
 
-export async function recomputeManagerDtrPayrollAction(payrollPeriodId: string) {
+export async function markManagerDtrPayrollStaleAction(payrollPeriodId: string) {
   const auth = await requireManager();
   const scope = await getManagerAttendanceScope(auth.accountId);
 
   if (!payrollPeriodId) {
-    throw new Error("Select a payroll period before recomputing payroll.");
+    throw new Error("Select a payroll period before updating DTR summaries.");
   }
   if (scope.employeeIds.length === 0) {
     throw new Error("Manager account is not assigned to a department.");
@@ -2614,17 +2762,14 @@ export async function recomputeManagerDtrPayrollAction(payrollPeriodId: string) 
       payrollPeriodId,
       payrollPeriodCode: payrollPeriod.code,
       actorUserId: auth.accountId,
-      notes: "Marked stale because manager DTR updates triggered payroll recompute.",
+      notes: "Marked stale because manager DTR updates changed attendance totals.",
     });
   });
 
-  const run = await createOrRecomputePayrollRun(payrollPeriodId, auth.accountId);
   revalidatePath("/payroll");
   revalidatePath("/managerDtrFiles");
 
   return {
-    payrollRunId: run?.id ?? null,
-    payrollRunNumber: run?.runNumber ?? null,
     payrollPeriodCode: payrollPeriod.code,
   };
 }
@@ -2716,6 +2861,8 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
   if (!scope.employeeIds.includes(parsed.employeeId)) {
     throw new Error("Employee is not assigned to one of this manager's departments.");
   }
+  await assertManagerDtrPayrollPeriodCanChange(parsed.sourcePayrollPeriodId);
+  await assertManagerDtrPayrollPeriodCanChange(targetPayrollPeriodId);
 
   const heldRows = await loadAttendanceDtrHeldRows(
     parsed.sourcePayrollPeriodId,
@@ -2930,10 +3077,29 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
     });
   }
 
+  const recomputePeriodIds = [
+    ...new Set([
+      targetPayrollPeriodId,
+      ...result.affectedTargetPeriods.map((affected) => affected.payrollPeriodId),
+    ]),
+  ];
+  const payrollRecompute = await Promise.all(
+    recomputePeriodIds.map((payrollPeriodId) =>
+      syncManagerDtrPayrollPeriod({
+        actorUserId: auth.accountId,
+        payrollPeriodId,
+        markStale: false,
+      })
+    )
+  );
+
   revalidatePath("/managerDtrFiles");
   revalidatePath("/payroll");
 
-  return result;
+  return {
+    ...result,
+    payrollRecompute,
+  };
 }
 
 export async function saveManagerAttendanceDtrDayMetricOverrideAction(
@@ -2953,6 +3119,7 @@ export async function saveManagerAttendanceDtrDayMetricOverrideAction(
   if (!payrollPeriod) {
     throw new Error("Payroll period not found.");
   }
+  await assertManagerDtrPayrollPeriodCanChange(payrollPeriod.id);
 
   if (
     parsed.attendanceDate < payrollPeriod.startDate ||
@@ -3072,6 +3239,12 @@ export async function saveManagerAttendanceDtrDayMetricOverrideAction(
   revalidatePath("/managerDtrFiles");
   revalidatePath("/payroll");
 
+  const payrollRecompute = await syncManagerDtrPayrollPeriod({
+    actorUserId: auth.accountId,
+    payrollPeriodId: parsed.payrollPeriodId,
+    markStale: false,
+  });
+
   return {
     payrollPeriodCode: payrollPeriod.code,
     attendanceDate: parsed.attendanceDate,
@@ -3079,6 +3252,7 @@ export async function saveManagerAttendanceDtrDayMetricOverrideAction(
     manualPayrollRefresh,
     generatedAccountCodeRowCount: result.generatedAccountCodeRowCount,
     staleRunCount: result.staleRunCount,
+    payrollRecompute,
   };
 }
 
@@ -3446,6 +3620,16 @@ export async function revertManagerDtrImportBatchAction(batchId: string) {
 
   if (scope.employeeIds.length === 0) {
     throw new Error("Manager account is not assigned to a department.");
+  }
+
+  const batch = await db.query.attendanceImportBatches.findFirst({
+    where: eq(attendanceImportBatches.id, batchId),
+  });
+  if (!batch) {
+    throw new Error("Attendance import batch not found.");
+  }
+  if (batch.payrollPeriodId) {
+    await assertManagerDtrPayrollPeriodCanChange(batch.payrollPeriodId);
   }
 
   const allowedEmployeeIds = new Set(scope.employeeIds);

@@ -16,7 +16,7 @@ import { Label } from "@/components/ui/label";
 type AuthView = "login" | "claim";
 
 const authInputClassName =
-  "border-slate-300 bg-white text-slate-950 placeholder:text-slate-400 focus:ring-slate-900 focus-visible:ring-slate-900";
+  "h-11 border-slate-300 bg-white text-base text-slate-950 placeholder:text-slate-400 focus:ring-slate-900 focus-visible:ring-slate-900 md:h-10 md:text-sm";
 
 function SubmitButton({
   idleLabel,
@@ -28,7 +28,7 @@ function SubmitButton({
   const { pending } = useFormStatus();
 
   return (
-    <Button type="submit" className="w-full" disabled={pending}>
+    <Button type="submit" className="min-h-11 w-full" disabled={pending}>
       {pending ? pendingLabel : idleLabel}
     </Button>
   );
@@ -47,8 +47,10 @@ function Message({
 
   return (
     <p
-      className={`text-sm ${
-        status === "error" ? "text-destructive" : "text-emerald-700"
+      className={`rounded-md border px-3 py-2 text-sm ${
+        status === "error"
+          ? "border-destructive/30 bg-destructive/10 text-destructive"
+          : "border-emerald-200 bg-emerald-50 text-emerald-800"
       }`}
     >
       {message}
@@ -98,28 +100,28 @@ export function AuthPanel({
   }, [registerEmployeeState.status]);
 
   return (
-    <section className="auth-panel rounded-[2rem] border border-white/60 bg-white/95 p-6 text-slate-950 shadow-2xl backdrop-blur md:p-8">
-      <div className="space-y-5">
-        <div className="space-y-2">
-          <p className="text-sm font-medium uppercase tracking-[0.28em] text-slate-500">
+    <section className="auth-panel rounded-lg border border-white/60 bg-white/95 p-4 text-slate-950 shadow-2xl backdrop-blur sm:p-6 md:p-8">
+      <div className="space-y-4 sm:space-y-5">
+        <div className="space-y-1.5 sm:space-y-2">
+          <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-500 sm:text-sm sm:tracking-[0.28em]">
             Secure Access
           </p>
-          <h2 className="text-3xl font-semibold tracking-tight text-slate-950">
+          <h2 className="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">
             Login and registration
           </h2>
-          <p className="text-sm text-slate-600">
+          <p className="text-sm leading-6 text-slate-600">
             Employees can claim existing Rank and File records. Admin access is
             created only by System Admins.
           </p>
         </div>
 
-        <div className="grid grid-cols-2 rounded-full bg-slate-100 p-1">
+        <div className="grid grid-cols-2 rounded-md bg-slate-100 p-1">
           <button
             type="button"
             onClick={() => {
               setView("login");
             }}
-            className={`rounded-full px-4 py-2 text-sm font-medium transition ${
+            className={`min-h-11 rounded-md px-3 py-2 text-sm font-medium transition ${
               view === "login"
                 ? "bg-slate-950 text-white"
                 : "text-slate-600 hover:text-slate-950"
@@ -133,7 +135,7 @@ export function AuthPanel({
               setView("claim");
               setPasswordSetup(null);
             }}
-            className={`rounded-full px-4 py-2 text-sm font-medium transition ${
+            className={`min-h-11 rounded-md px-3 py-2 text-sm font-medium transition ${
               view === "claim"
                 ? "bg-slate-950 text-white"
                 : "text-slate-600 hover:text-slate-950"
@@ -242,7 +244,10 @@ export function AuthPanel({
               <SubmitButton idleLabel="Login" pendingLabel="Signing in..." />
             </form>
 
-            <form action={forgotPasswordFormAction} className="space-y-3 border-t pt-4">
+            <form
+              action={forgotPasswordFormAction}
+              className="space-y-3 border-t pt-4"
+            >
               <div className="space-y-2">
                 <Label htmlFor="forgot-email">Forgot password</Label>
                 <Input
@@ -258,7 +263,10 @@ export function AuthPanel({
                 status={forgotPasswordState.status}
                 message={forgotPasswordState.message}
               />
-              <SubmitButton idleLabel="Request reset" pendingLabel="Requesting..." />
+              <SubmitButton
+                idleLabel="Request reset"
+                pendingLabel="Requesting..."
+              />
             </form>
 
             {/* TEMP_DISABLED_NO_DOMAIN:

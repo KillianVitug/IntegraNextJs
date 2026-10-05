@@ -23,11 +23,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatEmployeeNoDisplay } from "@/utils/employeeDisplay";
-import { PayrollPeriodScheduleGrid } from "./PayrollPeriodScheduleGrid";
-import {
-  WeeklyBaseScheduleGrid,
-  type WeeklyBaseScheduleGridRow,
-} from "./WeeklyBaseScheduleGrid";
+import { PayrollPeriodScheduleForm } from "./PayrollPeriodScheduleForm";
+import { WeeklyBaseScheduleForm } from "./WeeklyBaseScheduleForm";
+import type { WeeklyBaseScheduleGridRow } from "./WeeklyBaseScheduleGrid";
 import type { WeeklyScheduleShiftOption } from "./WeeklyScheduleGridSelect";
 import {
   WEEKLY_BASE_SCHEDULE_WEEKDAYS,
@@ -175,11 +173,12 @@ export default async function ManagerSchedulesPage({
         description="Manage fixed weekly schedules directly and submit sudden schedule changes for Admin approval."
       />
 
-      <div className="flex flex-wrap gap-2 border-b pb-2">
+      <div className="grid gap-2 border-b pb-2 sm:flex sm:flex-wrap">
         <Button
           asChild
           variant={activeTab === "schedules" ? "default" : "ghost"}
           size="sm"
+          className="min-h-11 justify-center sm:min-h-8"
         >
           <a
             href={
@@ -195,6 +194,7 @@ export default async function ManagerSchedulesPage({
           asChild
           variant={activeTab === "weeklySchedule" ? "default" : "ghost"}
           size="sm"
+          className="min-h-11 justify-center sm:min-h-8"
         >
           <a href="/managerSchedules?tab=weeklySchedule">Weekly Base Schedule</a>
         </Button>
@@ -209,13 +209,14 @@ export default async function ManagerSchedulesPage({
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="flex flex-wrap gap-2">
+          <div className="grid gap-2 sm:flex sm:flex-wrap">
             {employees.map((employee) => (
               <Button
                 key={employee.id}
                 asChild
                 variant={selectedEmployee?.id === employee.id ? "default" : "outline"}
                 size="sm"
+                className="min-h-10 justify-center"
               >
                 <a href={`/managerSchedules?employeeId=${employee.id}`}>
                   {employee.lastName}, {employee.firstName}
@@ -254,30 +255,10 @@ export default async function ManagerSchedulesPage({
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <form
-              action="/managerSchedules/weekly-schedule/bulk"
-              className="space-y-4"
-              method="post"
-            >
-              <WeeklyBaseScheduleGrid
-                rows={weeklyBaseScheduleRows}
-                shiftTables={weeklyScheduleShiftOptions}
-              />
-
-              {shiftTables.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  Create shift tables first from Settings before saving a weekly
-                  schedule.
-                </p>
-              ) : null}
-
-              <Button
-                type="submit"
-                disabled={shiftTables.length === 0 || weeklyScheduleRows.length === 0}
-              >
-                Save Weekly Base Schedule
-              </Button>
-            </form>
+            <WeeklyBaseScheduleForm
+              rows={weeklyBaseScheduleRows}
+              shiftTables={weeklyScheduleShiftOptions}
+            />
           </CardContent>
         </Card>
 
@@ -292,7 +273,7 @@ export default async function ManagerSchedulesPage({
           <CardContent className="space-y-4">
             <form action="/managerSchedules" method="get" className="flex flex-wrap items-end gap-3">
               <input type="hidden" name="tab" value="weeklySchedule" />
-              <div className="min-w-72">
+              <div className="min-w-0 sm:min-w-72">
                 <label
                   className="mb-1.5 block text-sm font-medium"
                   htmlFor="weekly-period"
@@ -303,7 +284,7 @@ export default async function ManagerSchedulesPage({
                   id="weekly-period"
                   name="periodId"
                   defaultValue={periodScheduleGrid?.selectedPeriodId ?? ""}
-                  className="flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm"
+                  className="flex h-11 w-full rounded-md border bg-background px-3 py-2 text-base md:h-9 md:py-1 md:text-sm"
                 >
                   {periodScheduleGrid?.periods.length ? (
                     periodScheduleGrid.periods.map((period) => (
@@ -316,49 +297,23 @@ export default async function ManagerSchedulesPage({
                   )}
                 </select>
               </div>
-              <Button
+                <Button
                 type="submit"
                 disabled={!periodScheduleGrid?.periods.length}
+                className="min-h-11 md:min-h-9"
               >
                 Apply
               </Button>
             </form>
 
             {periodScheduleGrid?.selectedPeriod ? (
-              <form
-                action="/managerSchedules/period-schedule"
-                className="space-y-4"
-                method="post"
-              >
-                <input
-                  type="hidden"
-                  name="periodId"
-                  value={periodScheduleGrid.selectedPeriod.id}
-                />
-
-                <div className="text-sm text-muted-foreground">
-                  {periodScheduleGrid.selectedPeriod.code} |{" "}
-                  {periodScheduleGrid.selectedPeriod.startDate} to{" "}
-                  {periodScheduleGrid.selectedPeriod.endDate}
-                </div>
-
-                <PayrollPeriodScheduleGrid
-                  dates={periodGridDates}
-                  rows={periodGridRows}
-                  shiftTables={weeklyScheduleShiftOptions}
-                />
-
-                <Button
-                  type="submit"
-                  disabled={
-                    shiftTables.length === 0 ||
-                    periodScheduleGrid.rows.length === 0 ||
-                    periodScheduleGrid.dates.length === 0
-                  }
-                >
-                  Save Payroll Period Schedule
-                </Button>
-              </form>
+              <PayrollPeriodScheduleForm
+                periodId={periodScheduleGrid.selectedPeriod.id}
+                periodLabel={`${periodScheduleGrid.selectedPeriod.code} | ${periodScheduleGrid.selectedPeriod.startDate} to ${periodScheduleGrid.selectedPeriod.endDate}`}
+                dates={periodGridDates}
+                rows={periodGridRows}
+                shiftTables={weeklyScheduleShiftOptions}
+              />
             ) : (
               <div className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
                 No payroll periods are available for {periodScheduleGrid?.year ?? new Date().getFullYear()}.
@@ -399,16 +354,16 @@ export default async function ManagerSchedulesPage({
                 {selectedPattern ? (
                   <input type="hidden" name="id" value={selectedPattern.id} />
                 ) : null}
-                <div className="space-y-3 rounded-md border p-4">
+                <div className="space-y-3 rounded-md border p-3 sm:p-4">
                   {WEEKDAY_ORDER.map((weekday) => (
                     <div
                       key={weekday}
-                      className="grid gap-3 border-b pb-3 last:border-b-0 last:pb-0 md:grid-cols-[140px_minmax(0,1fr)_minmax(0,1.2fr)]"
+                    className="grid gap-2 border-b pb-3 last:border-b-0 last:pb-0 md:grid-cols-[140px_minmax(0,1fr)_minmax(0,1.2fr)] md:gap-3"
                     >
                       <div className="font-medium">{weekday}</div>
                       <div>
                         <select
-                          className="flex h-10 w-full rounded-md border bg-background px-3 py-2 text-sm"
+                          className="flex h-11 w-full rounded-md border bg-background px-3 py-2 text-base md:h-10 md:text-sm"
                           name={`day-${weekday}`}
                           defaultValue={patternDayMap.get(weekday) ?? "0"}
                         >
@@ -429,12 +384,12 @@ export default async function ManagerSchedulesPage({
                   ))}
                 </div>
 
-                <div className="flex flex-wrap gap-2">
-                  <Button type="submit" disabled={shiftTables.length === 0}>
+                <div className="grid gap-2 sm:flex sm:flex-wrap">
+                  <Button type="submit" disabled={shiftTables.length === 0} className="min-h-11">
                     {selectedPattern ? "Update Weekly Schedule" : "Save Weekly Schedule"}
                   </Button>
                   {isEditingPattern ? (
-                    <Button asChild variant="outline">
+                    <Button asChild variant="outline" className="min-h-11">
                       <a href={`/managerSchedules?employeeId=${selectedEmployee.id}`}>
                         Cancel Edit
                       </a>
@@ -453,7 +408,68 @@ export default async function ManagerSchedulesPage({
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              <div className="overflow-x-auto">
+              <div className="grid gap-2 p-4 md:hidden">
+                {patterns.map((pattern) => {
+                  const dayMap = new Map(
+                    pattern.days.map((day) => [day.weekday, day]),
+                  );
+
+                  return (
+                    <div key={`mobile-${pattern.id}`} className="rounded-md border p-3 text-sm">
+                      <div className="font-medium">
+                        {pattern.effectiveFrom} to {pattern.effectiveTo || "open"}
+                      </div>
+                      <div className="mt-3 grid gap-2">
+                        {WEEKDAY_ORDER.map((weekday) => (
+                          <div
+                            key={`${pattern.id}-mobile-${weekday}`}
+                            className="flex items-start justify-between gap-3 border-b pb-2 last:border-b-0 last:pb-0"
+                          >
+                            <span className="font-medium">{weekday}</span>
+                            <span className="text-right text-muted-foreground">
+                              {formatDaySummary(dayMap.get(weekday))}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="mt-3 grid grid-cols-2 gap-2">
+                        <Button asChild variant="outline" size="sm" className="min-h-10">
+                          <a
+                            href={`/managerSchedules?employeeId=${selectedEmployee.id}&editPatternId=${pattern.id}`}
+                          >
+                            Edit
+                          </a>
+                        </Button>
+                        <form
+                          action="/managerSchedules/weekly-schedule/delete"
+                          method="post"
+                        >
+                          <input
+                            type="hidden"
+                            name="employeeId"
+                            value={selectedEmployee.id}
+                          />
+                          <input type="hidden" name="id" value={pattern.id} />
+                          <Button
+                            type="submit"
+                            variant="destructive"
+                            size="sm"
+                            className="min-h-10 w-full"
+                          >
+                            Delete
+                          </Button>
+                        </form>
+                      </div>
+                    </div>
+                  );
+                })}
+                {patterns.length === 0 ? (
+                  <div className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
+                    No weekly schedules recorded for this employee.
+                  </div>
+                ) : null}
+              </div>
+              <div className="hidden overflow-x-auto md:block">
                 <Table>
                   <TableHeader>
                     <TableRow>

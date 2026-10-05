@@ -42,12 +42,12 @@ export default async function ManagerDtrFilesPage({
     holdRefreshed?: string;
     holdDeleted?: string;
     holdOverridesCleared?: string;
-    payrollRecomputeStatus?: string;
-    payrollRunNumber?: string;
-    payrollRecomputeMessage?: string;
     holdEditEmployeeId?: string;
     holdStatus?: string;
     holdMessage?: string;
+    payrollRecomputeStatus?: string;
+    payrollRunNumber?: string;
+    payrollRecomputeMessage?: string;
   }>;
 }) {
   const params = await searchParams;
@@ -96,12 +96,12 @@ export default async function ManagerDtrFilesPage({
         holdRefreshed={readCount(params.holdRefreshed)}
         holdDeleted={readCount(params.holdDeleted)}
         holdOverridesCleared={readCount(params.holdOverridesCleared)}
-        payrollRecomputeStatus={params.payrollRecomputeStatus}
-        payrollRunNumber={readCount(params.payrollRunNumber)}
-        payrollRecomputeMessage={params.payrollRecomputeMessage}
         holdEditEmployeeId={params.holdEditEmployeeId?.trim() || ""}
         holdStatus={params.holdStatus}
         holdMessage={params.holdMessage}
+        payrollRecomputeStatus={params.payrollRecomputeStatus}
+        payrollRunNumber={readCount(params.payrollRunNumber)}
+        payrollRecomputeMessage={params.payrollRecomputeMessage}
       />
     </div>
   );

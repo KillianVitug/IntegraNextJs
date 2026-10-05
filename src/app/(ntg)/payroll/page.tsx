@@ -1,12 +1,4 @@
-import Link from "next/link";
-import { PayrollWorkspace } from "./PayrollWorkspace";
-import { requireAdminActor } from "@/lib/admin";
-import { attendancePeriodUrl } from "@/lib/payroll/attendanceSourcePeriods";
-import {
-  isValidPayrollYear,
-  loadPayrollAccountCodeEmployees,
-  loadPayrollWorkspaceSnapshot,
-} from "@/lib/payroll/workspaceSnapshot";
+import { renderPayrollWorkspacePage } from "./page-loader";
 
 export const metadata = {
   title: "Payroll Workspace",
@@ -17,31 +9,8 @@ export default async function PayrollPage({
 }: {
   searchParams: Promise<{ [key: string]: string | undefined }>;
 }) {
-  await requireAdminActor();
-  const params = await searchParams;
-  const selectedYear = isValidPayrollYear(params.year)
-    ? Number(params.year)
-    : new Date().getFullYear();
-
-  const [snapshot, payrollAccountCodeEmployees] = await Promise.all([
-    loadPayrollWorkspaceSnapshot({
-      year: selectedYear,
-      periodId: params.periodId,
-    }),
-    loadPayrollAccountCodeEmployees(),
-  ]);
-
-  return (
-    <>
-    {process.env.ATTENDANCE_SOURCE_ENABLED === "true" && <div className="px-6 pt-4"><Link href={attendancePeriodUrl("/payroll/attendance-source", selectedYear, snapshot.selectedPeriodId ?? "")}>Attendance connection / Sync attendance now</Link></div>}
-    <PayrollWorkspace
-      initialYear={selectedYear}
-      periods={snapshot.periods}
-      selectedPeriodId={snapshot.selectedPeriodId}
-      selectedRun={snapshot.selectedRun}
-      payrollAccountCodeEmployees={payrollAccountCodeEmployees}
-      attendanceBatches={snapshot.attendanceBatches}
-    />
-    </>
-  );
+  return renderPayrollWorkspacePage({
+    activeSection: "run",
+    searchParams,
+  });
 }

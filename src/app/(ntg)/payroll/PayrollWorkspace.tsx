@@ -10,6 +10,7 @@ import {
   useTransition,
 } from "react";
 import type { ChangeEvent, ReactNode } from "react";
+import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Building2,
@@ -44,11 +45,12 @@ import {
   getPayrollAccountCodeImportBatchesAction,
   getPayrollAccountCodeImportSkippedRowsAction,
   getPayrollRunEmployeeDetailAction,
-  getPayrollReportBundleAction,
   getPayrollWorkspaceSnapshotAction,
   importPayrollAccountCodeRowsAction,
   postPayrollRun,
+  preflightPayrollAction,
   reviewPayrollRun,
+  reversePostedPayrollRunAction,
   revertPayrollAccountCodeImportsForPeriodAction,
   saveManualPayrollEntryAction,
   saveEmployeePayrollExceptionRowsAction,
@@ -86,6 +88,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Switch } from "@/components/ui/switch";
 import {
   OVERTIME_CATEGORY_LABELS,
   overtimeCategoryValues,
@@ -124,24 +127,15 @@ import type {
   ManualPayrollEntryLineView,
   ManualPayrollEntryWorkspaceView,
   ManualPayrollLineSummaryBucket,
-  PayrollAccountCodeReportOptionView,
   PayrollAccountCodeEmployeeView,
   PayrollAgencySummaryView,
-  PayrollContributionReportRowView,
-  PayrollDepartmentReportRowView,
   PayrollExceptionAccountCodeOptionView,
   PayrollExceptionRowView,
-  PayrollLineReportRowView,
-  PayrollLoanDeductionView,
   PayrollManualLeaveAccountCodeRowView,
-  PayrollNetPayReportRowView,
   PayrollPeriodSummary,
   PayrollRecurringEntryRowView,
-  PayrollReportType,
   PayrollRunEmployeeDetailView,
-  PayrollRunEmployeeView,
   PayrollRunLineView,
-  PayrollRegisterReportView,
   PayrollRunView,
   PayrollScheduledLoanDeductionView,
   PayrollWorkspaceSnapshotView,
@@ -152,8 +146,13 @@ import {
   getEmployeeTypeDisplay,
   sortEmployeesByLastName,
 } from "@/utils/employeeDisplay";
+import {
+  PAYROLL_SECTION_PATHS,
+  type PayrollSection,
+} from "./sections";
 
 type Props = {
+  activeSection: PayrollSection;
   initialYear: number;
   periods: PayrollPeriodSummary[];
   selectedPeriodId: string | null;
@@ -161,8 +160,6 @@ type Props = {
   payrollAccountCodeEmployees: PayrollAccountCodeEmployeeView[];
   attendanceBatches: AttendanceImportBatchView[];
 };
-
-type WorkspaceTab = "run" | "reports" | "attendance" | "attendanceHold" | "accountCodes" | "manual";
 
 type PayrollAccountCodeLineTab = "income" | "deduction";
 
@@ -319,12 +316,26 @@ type DepartmentFilterEmployee = {
   departmentCode: string | null;
 };
 
-type ReportState = {
+type PayrollReadinessEmployeeView = {
+  employeeId: string;
+  employeeNo: string;
+  employeeName: string;
+  blockers: string[];
+  warnings: string[];
+};
+
+type PayrollReadinessView = {
+  payrollPeriodId: string;
+  periodCode: string;
+  canCompute: boolean;
+  statutoryBlockers: string[];
+  employeeReadiness: PayrollReadinessEmployeeView[];
+};
+
+type PayrollReadinessState = {
   status: LoadStatus;
-  runId: string | null;
-  register: PayrollRegisterReportView | null;
-  agencySummary: PayrollAgencySummaryView | null;
-  loanDeductions: PayrollLoanDeductionView[];
+  periodId: string | null;
+  data: PayrollReadinessView | null;
   error: string | null;
 };
 
@@ -465,105 +476,27 @@ const dayNameFormatter = new Intl.DateTimeFormat("en-PH", {
   weekday: "short",
 });
 
+const WORKFLOW_STEPS = [
+  "Period Setup",
+  "DTR Ready",
+  "Preflight Passed",
+  "Computed",
+  "Reviewed",
+  "Approved",
+  "Posted",
+  "Outputs Published",
+] as const;
+
 const EMPTY_AGENCY_SUMMARY: PayrollAgencySummaryView = {
   sssEmployee: "0",
   philhealthEmployee: "0",
   pagibigEmployee: "0",
   withholdingTax: "0",
   sssEmployer: "0",
+  sssEc: "0",
   philhealthEmployer: "0",
   pagibigEmployer: "0",
-  sssEc: "0",
 };
-
-const PAYROLL_REPORT_OPTIONS: Array<{
-  value: PayrollReportType;
-  label: string;
-  description: string;
-}> = [
-  {
-    value: "department",
-    label: "Department Payroll",
-    description: "Payroll totals grouped by employee department.",
-  },
-  {
-    value: "netPay",
-    label: "Net Pay Report",
-    description: "Employee gross pay, deductions, contributions, and net pay.",
-  },
-  {
-    value: "allowance",
-    label: "Allowance Report",
-    description: "Allowance and COLA earning lines from this run.",
-  },
-  {
-    value: "deduction",
-    label: "Deduction Report",
-    description: "Deduction lines excluding contribution and tax rows.",
-  },
-  {
-    value: "contribution",
-    label: "Contribution Report",
-    description: "Employee and employer contribution and tax rows.",
-  },
-  {
-    value: "accountCode",
-    label: "Account Code Report",
-    description: "Employees and values for the selected payroll line code.",
-  },
-];
-
-const ALLOWANCE_REPORT_CODES = new Set(["M-ALLOW", "D-ALLOW", "COLA"]);
-
-const CONTRIBUTION_REPORT_CODES = new Set([
-  "SSS",
-  "SSS-ER",
-  "SSS-EC",
-  "PHILHEALTH",
-  "PHILHEALTH-ER",
-  "PAGIBIG",
-  "PAGIBIG-ER",
-  "PERAA",
-  "PERAA-ER",
-  "TAX",
-]);
-
-const CONTRIBUTION_REPORT_COLUMN_DEFINITIONS = [
-  { code: "PAGIBIG", key: "pagibig", label: "PAGIBIG" },
-  { code: "PAGIBIG-ER", key: "pagibigEmployer", label: "PAGIBIG-ER" },
-  { code: "PHILHEALTH", key: "philhealth", label: "PHILHEALTH" },
-  {
-    code: "PHILHEALTH-ER",
-    key: "philhealthEmployer",
-    label: "PHILHEALTH-ER",
-  },
-  { code: "SSS", key: "sss", label: "SSS" },
-  { code: "SSS-ER", key: "sssEmployer", label: "SSS-ER" },
-  { code: "SSS-EC", key: "sssEc", label: "SSS-EC" },
-  { code: "PERAA", key: "peraa", label: "PERAA" },
-  { code: "PERAA-ER", key: "peraaEmployer", label: "PERAA-ER" },
-  { code: "TAX", key: "tax", label: "TAX" },
-] as const satisfies readonly {
-  code: string;
-  key: keyof Pick<
-    PayrollContributionReportRowView,
-    | "pagibig"
-    | "pagibigEmployer"
-    | "philhealth"
-    | "philhealthEmployer"
-    | "sss"
-    | "sssEmployer"
-    | "sssEc"
-    | "peraa"
-    | "peraaEmployer"
-    | "tax"
-  >;
-  label: string;
-}[];
-
-const CONTRIBUTION_REPORT_VISIBLE_CODES = new Set<string>(
-  CONTRIBUTION_REPORT_COLUMN_DEFINITIONS.map((column) => column.code)
-);
 
 const EMPTY_PAYROLL_EXCEPTION_ACCOUNT_CODE_OPTIONS: PayrollExceptionAccountCodeOptionView[] =
   [];
@@ -572,6 +505,8 @@ const EMPTY_PAYROLL_MANUAL_LEAVE_ROWS: PayrollManualLeaveAccountCodeRowView[] = 
 
 const EMPTY_MANUAL_PAYROLL_ACCOUNT_CODE_OPTIONS: ManualPayrollAccountCodeOptionView[] =
   [];
+const TEMPORARY_READINESS_BYPASS_COPY =
+  "Bypass missing tax IDs, statutory numbers, tax profile, and timekeeping ID checks.";
 
 const MANUAL_PAYROLL_SUMMARY_BUCKETS: Array<{
   key: ManualPayrollLineSummaryBucket;
@@ -1994,192 +1929,6 @@ function renderStatutoryAuditCards(employee: {
   );
 }
 
-function PayrollLineReportTable({
-  rows,
-  emptyMessage,
-  selectedEmployeeId,
-  onEmployeeSelect,
-}: {
-  rows: PayrollLineReportRowView[];
-  emptyMessage: string;
-  selectedEmployeeId: string | null;
-  onEmployeeSelect: (employeeId: string) => void;
-}) {
-  return (
-    <div className="overflow-x-auto">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Employee No</TableHead>
-            <TableHead>Type</TableHead>
-            <TableHead>Employee</TableHead>
-            <TableHead>Department</TableHead>
-            <TableHead>Line Type</TableHead>
-            <TableHead>Code</TableHead>
-            <TableHead>Description</TableHead>
-            <TableHead>Qty</TableHead>
-            <TableHead>Rate</TableHead>
-            <TableHead>Amount</TableHead>
-            <TableHead>Source</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row) => (
-            <TableRow
-              key={`${row.id}:${row.employeeId}`}
-              className={cn(
-                "cursor-pointer",
-                row.employeeId === selectedEmployeeId && "bg-muted/60"
-              )}
-              onClick={() => onEmployeeSelect(row.employeeId)}
-            >
-              <TableCell>{formatEmployeeNoDisplay(row.employeeNo)}</TableCell>
-              <TableCell>{row.employeeType ?? "-"}</TableCell>
-              <TableCell className="font-medium">{row.employeeName}</TableCell>
-              <TableCell>
-                {row.departmentName ?? "Unassigned"}
-                {row.departmentCode ? ` (${row.departmentCode})` : ""}
-              </TableCell>
-              <TableCell>{row.lineType}</TableCell>
-              <TableCell className="font-medium">{row.code}</TableCell>
-              <TableCell>
-                <div>{row.description}</div>
-                <div className="text-xs text-muted-foreground">
-                  {row.taxable ? "Taxable" : "Non-taxable"}
-                  {row.month13thEligible ? " | 13th-month eligible" : ""}
-                </div>
-              </TableCell>
-              <TableCell>{formatPayrollLineQuantity(row)}</TableCell>
-              <TableCell>{row.rate ?? "-"}</TableCell>
-              <TableCell className="font-semibold">
-                {formatMoney(row.amount)}
-              </TableCell>
-              <TableCell className="text-xs text-muted-foreground">
-                {row.sourceTable ?? "-"}
-                {row.sourceId ? ` / ${row.sourceId}` : ""}
-              </TableCell>
-            </TableRow>
-          ))}
-          {rows.length === 0 && (
-            <TableRow>
-              <TableCell
-                colSpan={11}
-                className="py-10 text-center text-muted-foreground"
-              >
-                {emptyMessage}
-              </TableCell>
-            </TableRow>
-          )}
-        </TableBody>
-      </Table>
-    </div>
-  );
-}
-
-function getContributionReportDepartmentKey(
-  row: Pick<PayrollContributionReportRowView, "departmentId" | "departmentName">
-) {
-  return row.departmentId != null
-    ? `department:${row.departmentId}`
-    : `department:${row.departmentName}`;
-}
-
-function formatContributionReportDepartmentName(
-  row: Pick<
-    PayrollContributionReportRowView,
-    "departmentName" | "departmentCode"
-  >
-) {
-  return `${row.departmentName}${row.departmentCode ? ` (${row.departmentCode})` : ""}`;
-}
-
-function PayrollContributionReportTable({
-  rows,
-  emptyMessage,
-  selectedEmployeeId,
-  onEmployeeSelect,
-}: {
-  rows: PayrollContributionReportRowView[];
-  emptyMessage: string;
-  selectedEmployeeId: string | null;
-  onEmployeeSelect: (employeeId: string) => void;
-}) {
-  let previousDepartmentKey: string | null = null;
-  const columnCount = CONTRIBUTION_REPORT_COLUMN_DEFINITIONS.length + 3;
-
-  return (
-    <div className="overflow-x-auto">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Employee No</TableHead>
-            <TableHead>Employee</TableHead>
-            {CONTRIBUTION_REPORT_COLUMN_DEFINITIONS.map((column) => (
-              <TableHead key={column.code} className="text-right">
-                {column.label}
-              </TableHead>
-            ))}
-            <TableHead className="text-right">Total</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row) => {
-            const departmentKey = getContributionReportDepartmentKey(row);
-            const showDepartmentHeader = departmentKey !== previousDepartmentKey;
-            previousDepartmentKey = departmentKey;
-
-            return (
-              <Fragment key={row.employeeId}>
-                {showDepartmentHeader && (
-                  <TableRow className="bg-muted/50 hover:bg-muted/50">
-                    <TableCell
-                      colSpan={columnCount}
-                      className="py-2 text-sm font-semibold text-foreground"
-                    >
-                      {formatContributionReportDepartmentName(row)}
-                    </TableCell>
-                  </TableRow>
-                )}
-                <TableRow
-                  className={cn(
-                    "cursor-pointer",
-                    row.employeeId === selectedEmployeeId && "bg-muted/60"
-                  )}
-                  onClick={() => onEmployeeSelect(row.employeeId)}
-                >
-                  <TableCell>{formatEmployeeNoDisplay(row.employeeNo)}</TableCell>
-                  <TableCell className="font-medium">{row.employeeName}</TableCell>
-                  {CONTRIBUTION_REPORT_COLUMN_DEFINITIONS.map((column) => (
-                    <TableCell
-                      key={column.code}
-                      className="whitespace-nowrap text-right"
-                    >
-                      {formatMoney(row[column.key])}
-                    </TableCell>
-                  ))}
-                  <TableCell className="whitespace-nowrap text-right font-semibold">
-                    {formatMoney(row.total)}
-                  </TableCell>
-                </TableRow>
-              </Fragment>
-            );
-          })}
-          {rows.length === 0 && (
-            <TableRow>
-              <TableCell
-                colSpan={columnCount}
-                className="py-10 text-center text-muted-foreground"
-              >
-                {emptyMessage}
-              </TableCell>
-            </TableRow>
-          )}
-        </TableBody>
-      </Table>
-    </div>
-  );
-}
-
 const PAYROLL_ACCOUNT_CODE_DEDUCTION_TYPES = new Set<PayrollExceptionAccountType>([
   "Unpaid Leaves/Absences",
   "Loan",
@@ -3003,6 +2752,86 @@ function getToneClass(status: string | null | undefined) {
   return "bg-muted text-muted-foreground";
 }
 
+function getWorkflowStepStatus(args: {
+  step: (typeof WORKFLOW_STEPS)[number];
+  selectedPeriod: PayrollPeriodSummary | null;
+  selectedRun: PayrollRunView | null;
+  readiness: PayrollReadinessView | null;
+  attendanceHoldUnapprovedRowCount: number;
+}): "done" | "pending" | "blocked" {
+  const { step, selectedPeriod, selectedRun, readiness } = args;
+
+  if (step === "Period Setup") return selectedPeriod ? "done" : "pending";
+  if (step === "DTR Ready") {
+    return selectedPeriod &&
+      selectedPeriod.attendanceBatchCount > 0 &&
+      args.attendanceHoldUnapprovedRowCount === 0
+      ? "done"
+      : "pending";
+  }
+  if (step === "Preflight Passed") {
+    if (readiness?.canCompute) return "done";
+    if (readiness && !readiness.canCompute) return "blocked";
+    return "pending";
+  }
+  if (step === "Computed") return selectedRun ? "done" : "pending";
+  if (step === "Reviewed") {
+    return selectedRun &&
+      ["Reviewed", "Approved", "Posted"].includes(selectedRun.status)
+      ? "done"
+      : "pending";
+  }
+  if (step === "Approved") {
+    return selectedRun && ["Approved", "Posted"].includes(selectedRun.status)
+      ? "done"
+      : "pending";
+  }
+  if (step === "Posted") {
+    return selectedRun?.status === "Posted" ? "done" : "pending";
+  }
+  return "pending";
+}
+
+function getWorkflowStepTone(status: "done" | "pending" | "blocked") {
+  if (status === "done") {
+    return "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200";
+  }
+  if (status === "blocked") {
+    return "border-rose-300 bg-rose-50 text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-200";
+  }
+  return "border-border bg-muted/30 text-muted-foreground";
+}
+
+function getReadinessCounts(readiness: PayrollReadinessView | null) {
+  const employeeBlockers =
+    readiness?.employeeReadiness.reduce(
+      (total, employee) => total + employee.blockers.length,
+      0
+    ) ?? 0;
+  const employeeWarnings =
+    readiness?.employeeReadiness.reduce(
+      (total, employee) => total + employee.warnings.length,
+      0
+    ) ?? 0;
+
+  return {
+    blockers: employeeBlockers + (readiness?.statutoryBlockers.length ?? 0),
+    warnings: employeeWarnings,
+    employeesWithIssues:
+      readiness?.employeeReadiness.filter(
+        (employee) =>
+          employee.blockers.length > 0 || employee.warnings.length > 0
+      ).length ?? 0,
+  };
+}
+
+function getReadinessCacheKey(
+  periodId: string,
+  bypassTemporaryReadinessCategories: boolean
+) {
+  return `readiness:${periodId}:temporary-bypass-${bypassTemporaryReadinessCategories ? "on" : "off"}`;
+}
+
 function getPayComputationModeToneClass(mode: string | null | undefined) {
   if (mode === "Daily Rate") {
     return "bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300";
@@ -3082,280 +2911,6 @@ function buildRunSummary(run: PayrollRunView | null) {
   );
 }
 
-function buildRunSummaryFromEmployees(employees: PayrollRunEmployeeView[]) {
-  return employees.reduce(
-    (totals, employee) => {
-      totals.grossPay += toNumber(employee.grossPay);
-      totals.totalDeductions += toNumber(employee.totalDeductions);
-      totals.netPay += toNumber(employee.netPay);
-      totals.employeeContributions += toNumber(employee.employeeContributions);
-      totals.employerContributions += toNumber(employee.employerContributions);
-      return totals;
-    },
-    {
-      grossPay: 0,
-      totalDeductions: 0,
-      netPay: 0,
-      employeeContributions: 0,
-      employerContributions: 0,
-    }
-  );
-}
-
-function buildDepartmentReportRows(
-  employees: PayrollRunEmployeeView[]
-): PayrollDepartmentReportRowView[] {
-  const rowsByDepartment = new Map<string, PayrollDepartmentReportRowView>();
-
-  for (const employee of employees) {
-    const key =
-      employee.departmentId != null
-        ? `department:${employee.departmentId}`
-        : "department:unassigned";
-    const row =
-      rowsByDepartment.get(key) ??
-      ({
-        key,
-        departmentId: employee.departmentId,
-        departmentName: employee.departmentName ?? "Unassigned Department",
-        departmentCode: employee.departmentCode,
-        employeeCount: 0,
-        grossPay: 0,
-        totalDeductions: 0,
-        employeeContributions: 0,
-        employerContributions: 0,
-        netPay: 0,
-      } satisfies PayrollDepartmentReportRowView);
-
-    row.employeeCount += 1;
-    row.grossPay += toNumber(employee.grossPay);
-    row.totalDeductions += toNumber(employee.totalDeductions);
-    row.employeeContributions += toNumber(employee.employeeContributions);
-    row.employerContributions += toNumber(employee.employerContributions);
-    row.netPay += toNumber(employee.netPay);
-    rowsByDepartment.set(key, row);
-  }
-
-  return [...rowsByDepartment.values()].sort((left, right) =>
-    left.departmentName.localeCompare(right.departmentName)
-  );
-}
-
-function buildNetPayReportRows(
-  employees: PayrollRunEmployeeView[]
-): PayrollNetPayReportRowView[] {
-  return employees.map((employee) => ({
-    employeeId: employee.employeeId,
-    employeeNo: employee.employeeNoSnapshot,
-    employeeType:
-      getEmployeeTypeDisplay({ employeeNo: employee.employeeNoSnapshot }) || null,
-    employeeName: employee.employeeNameSnapshot,
-    departmentName: employee.departmentName,
-    departmentCode: employee.departmentCode,
-    grossPay: employee.grossPay,
-    totalDeductions: employee.totalDeductions,
-    employeeContributions: employee.employeeContributions,
-    employerContributions: employee.employerContributions,
-    netPay: employee.netPay,
-  }));
-}
-
-function isContributionReportLine(line: PayrollRunLineView) {
-  return (
-    line.lineType === "Employer Contribution" ||
-    CONTRIBUTION_REPORT_CODES.has(line.code.toUpperCase())
-  );
-}
-
-function isAllowanceReportLine(line: PayrollRunLineView) {
-  const normalizedCode = line.code.toUpperCase();
-  const normalizedDescription = line.description.toLowerCase();
-
-  return (
-    line.lineType === "Earning" &&
-    (ALLOWANCE_REPORT_CODES.has(normalizedCode) ||
-      normalizedDescription.includes("allowance"))
-  );
-}
-
-function isDeductionReportLine(line: PayrollRunLineView) {
-  return line.lineType === "Deduction" && !isContributionReportLine(line);
-}
-
-function buildContributionReportRows(
-  employees: PayrollRunEmployeeView[]
-): PayrollContributionReportRowView[] {
-  return employees
-    .flatMap((employee) => {
-      const row: PayrollContributionReportRowView = {
-        employeeId: employee.employeeId,
-        employeeNo: employee.employeeNoSnapshot,
-        employeeName: employee.employeeNameSnapshot,
-        departmentId: employee.departmentId,
-        departmentName: employee.departmentName ?? "Unassigned Department",
-        departmentCode: employee.departmentCode,
-        pagibig: 0,
-        pagibigEmployer: 0,
-        philhealth: 0,
-        philhealthEmployer: 0,
-        sss: 0,
-        sssEmployer: 0,
-        sssEc: 0,
-        peraa: 0,
-        peraaEmployer: 0,
-        tax: 0,
-        total: 0,
-      };
-      let hasVisibleContribution = false;
-
-      for (const line of employee.lines) {
-        const normalizedCode = line.code.toUpperCase();
-        if (!CONTRIBUTION_REPORT_VISIBLE_CODES.has(normalizedCode)) continue;
-
-        const column = CONTRIBUTION_REPORT_COLUMN_DEFINITIONS.find(
-          (definition) => definition.code === normalizedCode
-        );
-
-        if (!column) continue;
-
-        const amount = toNumber(line.amount);
-        row[column.key] += amount;
-        row.total += amount;
-        hasVisibleContribution = true;
-      }
-
-      return hasVisibleContribution ? [row] : [];
-    })
-    .sort((left, right) => {
-      const byDepartment = left.departmentName.localeCompare(right.departmentName);
-      if (byDepartment !== 0) return byDepartment;
-      const byDepartmentCode = (left.departmentCode ?? "").localeCompare(
-        right.departmentCode ?? ""
-      );
-      if (byDepartmentCode !== 0) return byDepartmentCode;
-      const byDepartmentKey = getContributionReportDepartmentKey(left).localeCompare(
-        getContributionReportDepartmentKey(right)
-      );
-      if (byDepartmentKey !== 0) return byDepartmentKey;
-      const byName = left.employeeName.localeCompare(right.employeeName);
-      if (byName !== 0) return byName;
-      return left.employeeNo.localeCompare(right.employeeNo);
-    });
-}
-
-function buildLineReportRows(
-  employees: PayrollRunEmployeeView[],
-  predicate: (line: PayrollRunLineView) => boolean
-): PayrollLineReportRowView[] {
-  return employees
-    .flatMap((employee) =>
-      employee.lines.filter(predicate).map((line) => ({
-        id: line.id,
-        employeeId: employee.employeeId,
-        employeeNo: employee.employeeNoSnapshot,
-        employeeType:
-          getEmployeeTypeDisplay({ employeeNo: employee.employeeNoSnapshot }) ||
-          null,
-        employeeName: employee.employeeNameSnapshot,
-        departmentName: employee.departmentName,
-        departmentCode: employee.departmentCode,
-        lineType: line.lineType,
-        code: line.code,
-        description: line.description,
-        quantity: line.quantity,
-        rate: line.rate,
-        amount: line.amount,
-        taxable: line.taxable,
-        month13thEligible: line.month13thEligible,
-        sourceTable: line.sourceTable,
-        sourceId: line.sourceId,
-      }))
-    )
-    .sort((left, right) => {
-      const byCode = left.code.localeCompare(right.code);
-      if (byCode !== 0) return byCode;
-      const byName = left.employeeName.localeCompare(right.employeeName);
-      if (byName !== 0) return byName;
-      return left.employeeNo.localeCompare(right.employeeNo);
-    });
-}
-
-function buildAccountCodeReportOptions(
-  lineRows: PayrollLineReportRowView[]
-): PayrollAccountCodeReportOptionView[] {
-  const rowsByCode = new Map<
-    string,
-    PayrollAccountCodeReportOptionView & { employeeIds: Set<string> }
-  >();
-
-  for (const row of lineRows) {
-    const existing =
-      rowsByCode.get(row.code) ??
-      ({
-        code: row.code,
-        description: row.description,
-        lineType: row.lineType,
-        employeeCount: 0,
-        lineCount: 0,
-        totalAmount: 0,
-        employeeIds: new Set<string>(),
-      } satisfies PayrollAccountCodeReportOptionView & {
-        employeeIds: Set<string>;
-      });
-
-    existing.lineCount += 1;
-    existing.totalAmount += toNumber(row.amount);
-    existing.employeeIds.add(row.employeeId);
-    existing.employeeCount = existing.employeeIds.size;
-
-    if (!existing.description && row.description) {
-      existing.description = row.description;
-    }
-
-    rowsByCode.set(row.code, existing);
-  }
-
-  return [...rowsByCode.values()]
-    .map((option) => ({
-      code: option.code,
-      description: option.description,
-      lineType: option.lineType,
-      employeeCount: option.employeeCount,
-      lineCount: option.lineCount,
-      totalAmount: option.totalAmount,
-    }))
-    .sort((left, right) => left.code.localeCompare(right.code));
-}
-
-function formatAccountCodeReportOptionName(
-  option: Pick<PayrollAccountCodeReportOptionView, "code" | "description">
-) {
-  const code = option.code.trim();
-  const description = option.description.trim();
-
-  if (description && description.toLowerCase() !== code.toLowerCase()) {
-    return `${code} - ${description}`;
-  }
-
-  return code;
-}
-
-function formatAccountCodeReportOptionLabel(
-  option: PayrollAccountCodeReportOptionView
-) {
-  return `${formatAccountCodeReportOptionName(option)} - ${formatMoney(
-    option.totalAmount
-  )}`;
-}
-
-function sumLineReportAmount(rows: PayrollLineReportRowView[]) {
-  return rows.reduce((total, row) => total + toNumber(row.amount), 0);
-}
-
-function sumContributionReportAmount(rows: PayrollContributionReportRowView[]) {
-  return rows.reduce((total, row) => total + row.total, 0);
-}
-
 function deleteCacheKeys<T>(
   cacheRef: { current: Record<string, T> },
   prefixes: string[]
@@ -3416,6 +2971,7 @@ function getAdjacentEmployeeIds<T extends { employeeId: string }>(
 }
 
 export function PayrollWorkspace({
+  activeSection,
   initialYear,
   periods: initialPeriods,
   selectedPeriodId: initialSelectedPeriodId,
@@ -3436,7 +2992,7 @@ export function PayrollWorkspace({
     }));
   const [yearInput, setYearInput] = useState(String(initialYear));
   const [periodSearch, setPeriodSearch] = useState("");
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>("run");
+  const activeTab = activeSection;
   const [employeeSnapshotSearch, setEmployeeSnapshotSearch] = useState("");
   const [employeeSnapshotDepartmentFilter, setEmployeeSnapshotDepartmentFilter] =
     useState<DepartmentFilterValue>(ALL_DEPARTMENTS_VALUE);
@@ -3451,17 +3007,17 @@ export function PayrollWorkspace({
   const [fileInputKey, setFileInputKey] = useState(0);
   const [payrollAccountCodeImportInputKey, setPayrollAccountCodeImportInputKey] =
     useState(0);
-  const [reportState, setReportState] = useState<ReportState>({
-    status: "idle",
-    runId: null,
-    register: null,
-    agencySummary: null,
-    loanDeductions: [],
-    error: null,
-  });
-  const [selectedReportType, setSelectedReportType] =
-    useState<PayrollReportType>("department");
-  const [selectedReportAccountCode, setSelectedReportAccountCode] = useState("");
+  const [payrollReadinessState, setPayrollReadinessState] =
+    useState<PayrollReadinessState>({
+      status: "idle",
+      periodId: null,
+      data: null,
+      error: null,
+    });
+  const [
+    bypassTemporaryReadinessCategories,
+    setBypassTemporaryReadinessCategories,
+  ] = useState(true);
   const [attendanceDtrState, setAttendanceDtrState] = useState<AttendanceDtrState>({
     status: "idle",
     periodId: null,
@@ -3604,7 +3160,9 @@ export function PayrollWorkspace({
     Record<string, PayrollRunEmployeeDetailView>
   >({});
   const employeeDetailRequestsRef = useRef<Set<string>>(new Set());
-  const reportCacheRef = useRef<Record<string, ReportState>>({});
+  const payrollReadinessCacheRef = useRef<Record<string, PayrollReadinessState>>(
+    {}
+  );
   const attendanceDtrCacheRef = useRef<Record<string, AttendanceDtrState>>({});
   const attendanceDtrRowsCacheRef = useRef<Record<string, AttendanceDtrRowsState>>(
     {}
@@ -3827,65 +3385,34 @@ export function PayrollWorkspace({
       (employeeDetailsByKey[selectedEmployeeDetailKey] ? "ready" : "idle"))
     : "idle";
   const runSummary = useMemo(() => buildRunSummary(selectedRun), [selectedRun]);
-  const agencySummary = selectedRun?.agencySummary ?? EMPTY_AGENCY_SUMMARY;
-  const reportAgencySummary = reportState.agencySummary ?? EMPTY_AGENCY_SUMMARY;
-  const reportRegisterEmployees = useMemo(
-    () => sortEmployeesByLastName(reportState.register?.employees ?? []),
-    [reportState.register?.employees]
+  const currentReadiness =
+    payrollReadinessState.periodId === selectedPeriod?.id
+      ? payrollReadinessState.data
+      : null;
+  const currentReadinessCounts = useMemo(
+    () => getReadinessCounts(currentReadiness),
+    [currentReadiness]
   );
-  const reportRunSummary = useMemo(
-    () => buildRunSummaryFromEmployees(reportRegisterEmployees),
-    [reportRegisterEmployees]
-  );
-  const departmentReportRows = useMemo(
-    () => buildDepartmentReportRows(reportRegisterEmployees),
-    [reportRegisterEmployees]
-  );
-  const netPayReportRows = useMemo(
-    () => buildNetPayReportRows(reportRegisterEmployees),
-    [reportRegisterEmployees]
-  );
-  const allowanceReportRows = useMemo(
-    () => buildLineReportRows(reportRegisterEmployees, isAllowanceReportLine),
-    [reportRegisterEmployees]
-  );
-  const deductionReportRows = useMemo(
-    () => buildLineReportRows(reportRegisterEmployees, isDeductionReportLine),
-    [reportRegisterEmployees]
-  );
-  const contributionReportRows = useMemo(
-    () => buildContributionReportRows(reportRegisterEmployees),
-    [reportRegisterEmployees]
-  );
-  const accountCodeReportRows = useMemo(
-    () => buildLineReportRows(reportRegisterEmployees, () => true),
-    [reportRegisterEmployees]
-  );
-  const accountCodeReportOptions = useMemo(
-    () => buildAccountCodeReportOptions(accountCodeReportRows),
-    [accountCodeReportRows]
-  );
-  const selectedAccountCodeReportRows = useMemo(
+  const workflowSteps = useMemo(
     () =>
-      accountCodeReportRows.filter(
-        (row) => row.code === selectedReportAccountCode
-      ),
-    [accountCodeReportRows, selectedReportAccountCode]
+      WORKFLOW_STEPS.map((step) => ({
+        label: step,
+        status: getWorkflowStepStatus({
+          step,
+          selectedPeriod,
+          selectedRun,
+          readiness: currentReadiness,
+          attendanceHoldUnapprovedRowCount,
+        }),
+      })),
+    [
+      attendanceHoldUnapprovedRowCount,
+      currentReadiness,
+      selectedPeriod,
+      selectedRun,
+    ]
   );
-  const selectedReportOption =
-    PAYROLL_REPORT_OPTIONS.find((option) => option.value === selectedReportType) ??
-    PAYROLL_REPORT_OPTIONS[0];
-  const selectedAccountCodeReportOption =
-    accountCodeReportOptions.find(
-      (option) => option.code === selectedReportAccountCode
-    ) ?? null;
-  const allowanceReportTotal = sumLineReportAmount(allowanceReportRows);
-  const deductionReportTotal = sumLineReportAmount(deductionReportRows);
-  const contributionReportTotal =
-    sumContributionReportAmount(contributionReportRows);
-  const selectedAccountCodeReportTotal = sumLineReportAmount(
-    selectedAccountCodeReportRows
-  );
+  const agencySummary = selectedRun?.agencySummary ?? EMPTY_AGENCY_SUMMARY;
   const attendanceDtrEmployees = useMemo(
     () => sortEmployeesByLastName(attendanceDtrState.data?.employees ?? []),
     [attendanceDtrState.data?.employees]
@@ -4656,114 +4183,56 @@ export function PayrollWorkspace({
   }, [payrollLoanRows]);
 
   useEffect(() => {
-    if (selectedReportType !== "accountCode") return;
-
-    if (accountCodeReportOptions.length === 0) {
-      if (selectedReportAccountCode) {
-        setSelectedReportAccountCode("");
-      }
-      return;
-    }
-
-    if (
-      !selectedReportAccountCode ||
-      !accountCodeReportOptions.some(
-        (option) => option.code === selectedReportAccountCode
-      )
-    ) {
-      setSelectedReportAccountCode(accountCodeReportOptions[0].code);
-    }
-  }, [
-    accountCodeReportOptions,
-    selectedReportAccountCode,
-    selectedReportType,
-  ]);
-
-  useEffect(() => {
-    if (activeTab !== "reports") return;
-
-    if (!selectedRunId) {
-      setReportState({
+    if (!selectedPeriodKey) {
+      setPayrollReadinessState({
         status: "idle",
-        runId: null,
-        register: null,
-        agencySummary: null,
-        loanDeductions: [],
+        periodId: null,
+        data: null,
         error: null,
       });
       return;
     }
 
-    const cacheKey = `reports:${selectedRunId}`;
-    const cachedState = reportCacheRef.current[cacheKey];
+    const cacheKey = getReadinessCacheKey(
+      selectedPeriodKey,
+      bypassTemporaryReadinessCategories
+    );
+    const cachedState = payrollReadinessCacheRef.current[cacheKey];
     if (cachedState) {
-      setReportState(cachedState);
+      setPayrollReadinessState(cachedState);
       return;
     }
 
     let cancelled = false;
-
-    setReportState({
+    setPayrollReadinessState({
       status: "loading",
-      runId: selectedRunId,
-      register: null,
-      agencySummary: null,
-      loanDeductions: [],
+      periodId: selectedPeriodKey,
+      data: null,
       error: null,
     });
 
     void (async () => {
       try {
-        const { register, agencySummary, loanDeductions } =
-          await getPayrollReportBundleAction(selectedRunId);
-
+        const readiness = await preflightPayrollAction(selectedPeriodKey, {
+          bypassTemporaryReadinessCategories,
+        });
         if (cancelled) return;
 
-        const nextState: ReportState = {
+        const nextState: PayrollReadinessState = {
           status: "ready",
-          runId: selectedRunId,
-          register,
-          agencySummary: agencySummary ?? EMPTY_AGENCY_SUMMARY,
-          loanDeductions: loanDeductions ?? [],
+          periodId: selectedPeriodKey,
+          data: readiness,
           error: null,
         };
-        reportCacheRef.current[cacheKey] = nextState;
-        setReportState(nextState);
-        setEmployeeDetailsByKey((current) => {
-          const seededDetails = Object.fromEntries(
-            (register?.employees ?? [])
-              .filter((employee) => employee.lines.length > 0)
-              .map((employee) => [`${selectedRunId}:${employee.employeeId}`, employee])
-          );
-
-          const next = {
-            ...current,
-            ...seededDetails,
-          };
-          employeeDetailsByKeyRef.current = next;
-          return next;
-        });
-        setEmployeeDetailStatusByKey((current) => ({
-          ...current,
-          ...Object.fromEntries(
-            (register?.employees ?? [])
-              .filter((employee) => employee.lines.length > 0)
-              .map((employee) => [
-                `${selectedRunId}:${employee.employeeId}`,
-                "ready" as LoadStatus,
-              ])
-          ),
-        }));
+        payrollReadinessCacheRef.current[cacheKey] = nextState;
+        setPayrollReadinessState(nextState);
       } catch (error) {
         if (cancelled) return;
-
-        setReportState({
+        setPayrollReadinessState({
           status: "error",
-          runId: selectedRunId,
-          register: null,
-          agencySummary: null,
-          loanDeductions: [],
-          error: getErrorMessage(error, "Unable to load payroll reports."),
+          periodId: selectedPeriodKey,
+          data: null,
+          error: getErrorMessage(error, "Unable to load payroll readiness."),
         });
       }
     })();
@@ -4771,7 +4240,12 @@ export function PayrollWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [activeTab, selectedRunId]);
+  }, [
+    selectedPeriodKey,
+    attendanceBatchKey,
+    attendanceDtrReloadKey,
+    bypassTemporaryReadinessCategories,
+  ]);
 
   useEffect(() => {
     if (activeTab !== "attendance") return;
@@ -5586,8 +5060,14 @@ export function PayrollWorkspace({
     });
   }
 
+  function getSectionHref(section: PayrollSection) {
+    const queryString = searchParams.toString();
+    const path = PAYROLL_SECTION_PATHS[section];
+    return queryString ? `${path}?${queryString}` : path;
+  }
+
   function invalidatePayrollResourceCache(prefixes: string[]) {
-    deleteCacheKeys(reportCacheRef, prefixes);
+    deleteCacheKeys(payrollReadinessCacheRef, prefixes);
     deleteCacheKeys(attendanceDtrCacheRef, prefixes);
     deleteCacheKeys(attendanceDtrRowsCacheRef, prefixes);
     deleteCacheKeys(attendanceHoldCacheRef, prefixes);
@@ -6977,6 +6457,68 @@ export function PayrollWorkspace({
     }
   }
 
+  async function handleComputePayrollRun() {
+    if (!selectedPeriod) return;
+
+    await runAction(
+      "compute-run",
+      async () => {
+        const readiness = await preflightPayrollAction(selectedPeriod.id, {
+          bypassTemporaryReadinessCategories,
+        });
+        const nextState: PayrollReadinessState = {
+          status: "ready",
+          periodId: selectedPeriod.id,
+          data: readiness,
+          error: null,
+        };
+        payrollReadinessCacheRef.current[
+          getReadinessCacheKey(
+            selectedPeriod.id,
+            bypassTemporaryReadinessCategories
+          )
+        ] = nextState;
+        setPayrollReadinessState(nextState);
+
+        if (!readiness.canCompute) {
+          const counts = getReadinessCounts(readiness);
+          throw new Error(
+            `Payroll readiness has ${counts.blockers} blocker(s). Resolve them before computing.`
+          );
+        }
+
+        await computePayrollRun(selectedPeriod.id, {
+          bypassTemporaryReadinessCategories,
+        });
+        invalidatePayrollResourceCache([
+          `readiness:${selectedPeriod.id}`,
+          "control:",
+        ]);
+      },
+      selectedRun ? "Payroll run refreshed." : "Payroll run computed."
+    );
+  }
+
+  async function handleReversePostedRun() {
+    if (!selectedRun) return;
+
+    const reason = window.prompt("Enter the reversal reason.");
+    if (!reason?.trim()) return;
+
+    await runAction(
+      "reverse-run",
+      async () => {
+        await reversePostedPayrollRunAction(selectedRun.id, reason.trim());
+        invalidatePayrollResourceCache([
+          `control:${selectedRun.id}`,
+          "reports:",
+          "payslip:",
+        ]);
+      },
+      "Posted payroll run reversed."
+    );
+  }
+
   async function loadAttendanceBatchDiagnostics(batchId: string) {
     setAttendanceBatchDiagnosticsById((current) => ({
       ...current,
@@ -8324,19 +7866,20 @@ export function PayrollWorkspace({
             recalculating everything only in forms.
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-5">
-          {[
-            "1. Seed or refresh the semi-monthly payroll periods for the year.",
-            "2. Import every branch CSV or TXT attendance file for the payroll period using numeric UID matching.",
-            "3. Compute the payroll run so earnings, deductions, loans, and taxes are snapshotted.",
-            "4. Review employee totals and detailed payroll lines before approval.",
-            "5. Approve and post the run to finalize loan payments and reporting totals.",
-          ].map((step) => (
+        <CardContent className="grid gap-3 md:grid-cols-4 xl:grid-cols-8">
+          {workflowSteps.map((step, index) => (
             <div
-              key={step}
-              className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground"
+              key={step.label}
+              className={cn(
+                "rounded-lg border p-3 text-sm",
+                getWorkflowStepTone(step.status)
+              )}
             >
-              {step}
+              <div className="text-xs font-medium uppercase">
+                Step {index + 1}
+              </div>
+              <div className="mt-1 font-semibold">{step.label}</div>
+              <div className="mt-1 text-xs capitalize">{step.status}</div>
             </div>
           ))}
         </CardContent>
@@ -8511,18 +8054,109 @@ export function PayrollWorkspace({
                   </div>
                 </div>
 
+                <div className="rounded-lg border bg-muted/20 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">
+                        Payroll Readiness
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        {payrollReadinessState.status === "loading"
+                          ? "Checking employee setup, statutory rules, and period blockers..."
+                          : payrollReadinessState.status === "error"
+                            ? (payrollReadinessState.error ??
+                              "Unable to load readiness checks.")
+                            : currentReadiness?.canCompute
+                              ? "Ready to compute. No blocking setup issues were found."
+                              : currentReadiness
+                                ? "Resolve blockers before computing payroll."
+                                : "Readiness checks will run before payroll compute."}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3 text-sm">
+                      <div className="flex items-center gap-2 rounded-md border bg-background px-2 py-1">
+                        <Switch
+                          checked={bypassTemporaryReadinessCategories}
+                          onCheckedChange={setBypassTemporaryReadinessCategories}
+                          aria-label="Temporary readiness bypass"
+                        />
+                        <div>
+                          <div className="font-medium">Temporary bypass</div>
+                          <div className="text-xs text-muted-foreground">
+                            {TEMPORARY_READINESS_BYPASS_COPY}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <span
+                          className={cn(
+                            "rounded-full px-2 py-1 font-medium",
+                            currentReadinessCounts.blockers > 0
+                              ? getToneClass("Void")
+                              : getToneClass("Approved")
+                          )}
+                        >
+                          {currentReadinessCounts.blockers} blocker(s)
+                        </span>
+                        <span className={cn("rounded-full px-2 py-1 font-medium", getToneClass("Pending"))}>
+                          {currentReadinessCounts.warnings} warning(s)
+                        </span>
+                        <span className="rounded-full bg-muted px-2 py-1 font-medium text-muted-foreground">
+                          {attendanceHoldUnapprovedRowCount} hold row(s)
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {currentReadiness &&
+                    (currentReadiness.statutoryBlockers.length > 0 ||
+                      currentReadiness.employeeReadiness.some(
+                        (employee) =>
+                          employee.blockers.length > 0 ||
+                          employee.warnings.length > 0
+                      )) && (
+                      <div className="mt-3 max-h-48 overflow-auto rounded-md border bg-background">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Area</TableHead>
+                              <TableHead>Issue</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {currentReadiness.statutoryBlockers.map((issue) => (
+                              <TableRow key={`statutory:${issue}`}>
+                                <TableCell className="font-medium">
+                                  Statutory Rules
+                                </TableCell>
+                                <TableCell>{issue}</TableCell>
+                              </TableRow>
+                            ))}
+                            {currentReadiness.employeeReadiness.flatMap((employee) =>
+                              [...employee.blockers, ...employee.warnings].map(
+                                (issue) => (
+                                  <TableRow
+                                    key={`${employee.employeeId}:${issue}`}
+                                  >
+                                    <TableCell className="font-medium">
+                                      {formatEmployeeNoDisplay(employee.employeeNo)}{" "}
+                                      {employee.employeeName}
+                                    </TableCell>
+                                    <TableCell>{issue}</TableCell>
+                                  </TableRow>
+                                )
+                              )
+                            )}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    )}
+                </div>
+
                 <div className="flex flex-wrap gap-2">
                   <Button
                     type="button"
-                    onClick={() =>
-                      runAction(
-                        "compute-run",
-                        () => computePayrollRun(selectedPeriod.id),
-                        selectedRun
-                          ? "Payroll run refreshed."
-                          : "Payroll run computed."
-                      )
-                    }
+                    onClick={() => void handleComputePayrollRun()}
                     disabled={actionState !== null || isNavigating}
                   >
                     {actionState === "compute-run"
@@ -8589,8 +8223,7 @@ export function PayrollWorkspace({
                       void runAction(
                         "void-run",
                         async () => {
-                          const outcome = await voidPayrollRun(selectedRun.id, reason);
-                          if (!outcome.ok) throw new Error(outcome.error);
+                          await voidPayrollRun(selectedRun.id, reason);
                           invalidatePayrollResourceCache([
                             `account-code:${selectedPeriod.id}:`,
                             `manual:${selectedPeriod.id}:`,
@@ -8614,6 +8247,18 @@ export function PayrollWorkspace({
                   >
                     {actionState === "void-run" ? "Voiding..." : "Void"}
                   </Button>
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    onClick={() => void handleReversePostedRun()}
+                    disabled={
+                      selectedRun?.status !== "Posted" ||
+                      actionState !== null ||
+                      isNavigating
+                    }
+                  >
+                    {actionState === "reverse-run" ? "Reversing..." : "Reverse Posted"}
+                  </Button>
                 </div>
 
                 <div className="rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
@@ -8634,23 +8279,33 @@ export function PayrollWorkspace({
 
       <Tabs
         value={activeTab}
-        onValueChange={(value) => setActiveTab(value as WorkspaceTab)}
         className="space-y-4"
       >
         <TabsList>
-          <TabsTrigger value="run">Payroll Run</TabsTrigger>
-          <TabsTrigger value="manual">Manual Payroll</TabsTrigger>
-          <TabsTrigger value="reports">Reports</TabsTrigger>
-          <TabsTrigger value="attendance">Attendance Imports</TabsTrigger>
-          <TabsTrigger value="attendanceHold" className="gap-1.5">
-            Attendance Hold
-            {attendanceHoldUnapprovedRowCount > 0 ? (
-              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold text-white">
-                {attendanceHoldUnapprovedRowCount}
-              </span>
-            ) : null}
+          <TabsTrigger value="run" asChild>
+            <Link href={getSectionHref("run")}>Payroll Run</Link>
           </TabsTrigger>
-          <TabsTrigger value="accountCodes">Payroll Account Code</TabsTrigger>
+          <TabsTrigger value="manual" asChild>
+            <Link href={getSectionHref("manual")}>Manual Payroll</Link>
+          </TabsTrigger>
+          <TabsTrigger value="attendance" asChild>
+            <Link href={getSectionHref("attendance")}>Attendance Imports</Link>
+          </TabsTrigger>
+          <TabsTrigger value="attendanceHold" className="gap-1.5" asChild>
+            <Link href={getSectionHref("attendanceHold")}>
+              Attendance Hold
+              {attendanceHoldUnapprovedRowCount > 0 ? (
+                <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold text-white">
+                  {attendanceHoldUnapprovedRowCount}
+                </span>
+              ) : null}
+            </Link>
+          </TabsTrigger>
+          <TabsTrigger value="accountCodes" asChild>
+            <Link href={getSectionHref("accountCodes")}>
+              Payroll Account Code
+            </Link>
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="run" className="space-y-6">
@@ -9348,625 +9003,6 @@ export function PayrollWorkspace({
               )}
             </CardContent>
           </Card>
-        </TabsContent>
-
-        <TabsContent value="reports" className="space-y-6">
-          {!selectedRun ? (
-            <Card>
-              <CardContent className="py-10">
-                <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-                  Compute a payroll run for the selected period to load selected-run
-                  department, net pay, allowance, deduction, contribution, account
-                  code, agency, and payslip reports.
-                </div>
-              </CardContent>
-            </Card>
-          ) : (
-            <>
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle>Selected Run Reports</CardTitle>
-                  <CardDescription>
-                    These sections are loaded from the payroll report actions for
-                    the currently selected run.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-7">
-                    <div className="rounded-lg border p-3">
-                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                        Run
-                      </div>
-                      <div className="mt-1 text-lg font-semibold">
-                        #{selectedRun.runNumber}
-                      </div>
-                      <div className="text-sm text-muted-foreground">
-                        {selectedRun.payrollPeriod?.code ?? selectedPeriod?.code ?? "-"}
-                      </div>
-                    </div>
-                    <div className="rounded-lg border p-3">
-                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                        Status
-                      </div>
-                      <div className="mt-2">
-                        <span
-                          className={cn(
-                            "inline-flex rounded-full px-2 py-1 text-xs font-medium",
-                            getToneClass(selectedRun.status)
-                          )}
-                        >
-                          {selectedRun.status}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="rounded-lg border p-3">
-                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                        Employees
-                      </div>
-                      <div className="mt-1 text-lg font-semibold">
-                        {reportState.status === "ready"
-                          ? reportRegisterEmployees.length
-                          : runEmployees.length}
-                      </div>
-                      <div className="text-sm text-muted-foreground">
-                        Selected run rows
-                      </div>
-                    </div>
-                    <div className="rounded-lg border p-3">
-                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                        Gross Pay
-                      </div>
-                      <div className="mt-1 text-lg font-semibold">
-                        {formatMoney(
-                          reportState.status === "ready"
-                            ? reportRunSummary.grossPay
-                            : runSummary.grossPay
-                        )}
-                      </div>
-                    </div>
-                    <div className="rounded-lg border p-3">
-                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                        Deductions
-                      </div>
-                      <div className="mt-1 text-lg font-semibold">
-                        {formatMoney(
-                          reportState.status === "ready"
-                            ? reportRunSummary.totalDeductions
-                            : runSummary.totalDeductions
-                        )}
-                      </div>
-                    </div>
-                    <div className="rounded-lg border p-3">
-                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                        Net Pay
-                      </div>
-                      <div className="mt-1 text-lg font-semibold">
-                        {formatMoney(
-                          reportState.status === "ready"
-                            ? reportRunSummary.netPay
-                            : runSummary.netPay
-                        )}
-                      </div>
-                    </div>
-                    <div className="rounded-lg border p-3">
-                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                        Employer Share
-                      </div>
-                      <div className="mt-1 text-lg font-semibold">
-                        {formatMoney(
-                          reportState.status === "ready"
-                            ? reportRunSummary.employerContributions
-                            : runSummary.employerContributions
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="rounded-lg border p-3">
-                      <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                        Adjusted Pay Date
-                      </div>
-                      <div className="mt-1 font-semibold">
-                        {selectedRun.payrollPeriod?.adjustedPayDate ?? "-"}
-                      </div>
-                      <div className="text-sm text-muted-foreground">
-                        Created {formatDateTime(selectedRun.createdAt)}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
-                    Opening this tab loads selected-run report snapshots without
-                    changing the payroll workflow. The report selector below reads
-                    from stored payroll_run_employees and payroll_run_lines.
-                  </div>
-                </CardContent>
-              </Card>
-
-              {reportState.status === "loading" && (
-                <Card>
-                  <CardContent className="py-10 text-center text-sm text-muted-foreground">
-                    Loading selected-run payroll report data...
-                  </CardContent>
-                </Card>
-              )}
-
-              {reportState.status === "error" && (
-                <Card>
-                  <CardContent className="py-10">
-                    <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
-                      {reportState.error ?? "Unable to load payroll reports."}
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
-
-              {reportState.status === "ready" && reportState.register && (
-                <Card>
-                  <CardHeader className="pb-3">
-                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                      <div>
-                        <CardTitle>{selectedReportOption.label}</CardTitle>
-                        <CardDescription>
-                          {selectedReportOption.description}
-                        </CardDescription>
-                      </div>
-                      <div className="grid gap-2 sm:grid-cols-2 lg:w-[560px]">
-                        <Select
-                          value={selectedReportType}
-                          onValueChange={(value) =>
-                            setSelectedReportType(value as PayrollReportType)
-                          }
-                        >
-                          <SelectTrigger aria-label="Select payroll report">
-                            <SelectValue placeholder="Select report" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {PAYROLL_REPORT_OPTIONS.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-
-                        {selectedReportType === "accountCode" ? (
-                          accountCodeReportOptions.length > 0 ? (
-                            <Select
-                              value={selectedReportAccountCode}
-                              onValueChange={setSelectedReportAccountCode}
-                            >
-                              <SelectTrigger aria-label="Select account code report code">
-                                <SelectValue placeholder="Select account code" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {accountCodeReportOptions.map((option) => (
-                                  <SelectItem key={option.code} value={option.code}>
-                                    {formatAccountCodeReportOptionLabel(option)}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          ) : (
-                            <div className="rounded-md border border-dashed px-3 py-2 text-sm text-muted-foreground">
-                              No payroll line codes in this run.
-                            </div>
-                          )
-                        ) : null}
-                      </div>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="space-y-4 p-0">
-                    {selectedReportType === "department" && (
-                      <>
-                        <div className="grid gap-3 px-6 md:grid-cols-4">
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Departments
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {departmentReportRows.length}
-                            </div>
-                          </div>
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Employees
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {reportRegisterEmployees.length}
-                            </div>
-                          </div>
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Gross Pay
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {formatMoney(reportRunSummary.grossPay)}
-                            </div>
-                          </div>
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Net Pay
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {formatMoney(reportRunSummary.netPay)}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="overflow-x-auto">
-                          <Table>
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead>Department</TableHead>
-                                <TableHead>Code</TableHead>
-                                <TableHead>Employees</TableHead>
-                                <TableHead>Gross</TableHead>
-                                <TableHead>Deductions</TableHead>
-                                <TableHead>Employee Share</TableHead>
-                                <TableHead>Employer Share</TableHead>
-                                <TableHead>Net</TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {departmentReportRows.map((row) => (
-                                <TableRow key={row.key}>
-                                  <TableCell className="font-medium">
-                                    {row.departmentName}
-                                  </TableCell>
-                                  <TableCell>{row.departmentCode ?? "-"}</TableCell>
-                                  <TableCell>{row.employeeCount}</TableCell>
-                                  <TableCell>{formatMoney(row.grossPay)}</TableCell>
-                                  <TableCell>
-                                    {formatMoney(row.totalDeductions)}
-                                  </TableCell>
-                                  <TableCell>
-                                    {formatMoney(row.employeeContributions)}
-                                  </TableCell>
-                                  <TableCell>
-                                    {formatMoney(row.employerContributions)}
-                                  </TableCell>
-                                  <TableCell className="font-semibold">
-                                    {formatMoney(row.netPay)}
-                                  </TableCell>
-                                </TableRow>
-                              ))}
-                              {departmentReportRows.length === 0 && (
-                                <TableRow>
-                                  <TableCell
-                                    colSpan={8}
-                                    className="py-10 text-center text-muted-foreground"
-                                  >
-                                    This payroll run does not contain department rows.
-                                  </TableCell>
-                                </TableRow>
-                              )}
-                            </TableBody>
-                          </Table>
-                        </div>
-                      </>
-                    )}
-
-                    {selectedReportType === "netPay" && (
-                      <div className="overflow-x-auto">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Employee No</TableHead>
-                              <TableHead>Type</TableHead>
-                              <TableHead>Employee</TableHead>
-                              <TableHead>Department</TableHead>
-                              <TableHead>Gross</TableHead>
-                              <TableHead>Deductions</TableHead>
-                              <TableHead>Employee Share</TableHead>
-                              <TableHead>Employer Share</TableHead>
-                              <TableHead>Net</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {netPayReportRows.map((row) => (
-                              <TableRow
-                                key={row.employeeId}
-                                className={cn(
-                                  "cursor-pointer",
-                                  row.employeeId === selectedEmployee?.employeeId &&
-                                    "bg-muted/60"
-                                )}
-                                onClick={() => setSelectedEmployeeId(row.employeeId)}
-                              >
-                                <TableCell>
-                                  {formatEmployeeNoDisplay(row.employeeNo)}
-                                </TableCell>
-                                <TableCell>{row.employeeType ?? "-"}</TableCell>
-                                <TableCell className="font-medium">
-                                  {row.employeeName}
-                                </TableCell>
-                                <TableCell>
-                                  {row.departmentName ?? "Unassigned"}
-                                  {row.departmentCode ? ` (${row.departmentCode})` : ""}
-                                </TableCell>
-                                <TableCell>{formatMoney(row.grossPay)}</TableCell>
-                                <TableCell>
-                                  {formatMoney(row.totalDeductions)}
-                                </TableCell>
-                                <TableCell>
-                                  {formatMoney(row.employeeContributions)}
-                                </TableCell>
-                                <TableCell>
-                                  {formatMoney(row.employerContributions)}
-                                </TableCell>
-                                <TableCell className="font-semibold">
-                                  {formatMoney(row.netPay)}
-                                </TableCell>
-                              </TableRow>
-                            ))}
-                            {netPayReportRows.length === 0 && (
-                              <TableRow>
-                                <TableCell
-                                  colSpan={9}
-                                  className="py-10 text-center text-muted-foreground"
-                                >
-                                  This payroll run does not contain employee net pay
-                                  rows.
-                                </TableCell>
-                              </TableRow>
-                            )}
-                          </TableBody>
-                        </Table>
-                      </div>
-                    )}
-
-                    {selectedReportType === "allowance" && (
-                      <>
-                        <div className="grid gap-3 px-6 md:grid-cols-3">
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Line Count
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {allowanceReportRows.length}
-                            </div>
-                          </div>
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Employees
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {new Set(allowanceReportRows.map((row) => row.employeeId)).size}
-                            </div>
-                          </div>
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Total
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {formatMoney(allowanceReportTotal)}
-                            </div>
-                          </div>
-                        </div>
-                        <PayrollLineReportTable
-                          rows={allowanceReportRows}
-                          emptyMessage="No allowance or COLA lines were posted for this payroll run."
-                          onEmployeeSelect={setSelectedEmployeeId}
-                          selectedEmployeeId={selectedEmployee?.employeeId ?? null}
-                        />
-                      </>
-                    )}
-
-                    {selectedReportType === "deduction" && (
-                      <>
-                        <div className="grid gap-3 px-6 md:grid-cols-3">
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Line Count
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {deductionReportRows.length}
-                            </div>
-                          </div>
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Employees
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {new Set(deductionReportRows.map((row) => row.employeeId)).size}
-                            </div>
-                          </div>
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Total
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {formatMoney(deductionReportTotal)}
-                            </div>
-                          </div>
-                        </div>
-                        <PayrollLineReportTable
-                          rows={deductionReportRows}
-                          emptyMessage="No non-contribution deduction lines were posted for this payroll run."
-                          onEmployeeSelect={setSelectedEmployeeId}
-                          selectedEmployeeId={selectedEmployee?.employeeId ?? null}
-                        />
-                      </>
-                    )}
-
-                    {selectedReportType === "contribution" && (
-                      <>
-                        <div className="grid gap-3 px-6 md:grid-cols-3">
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Employee Rows
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {contributionReportRows.length}
-                            </div>
-                          </div>
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Employees
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {new Set(contributionReportRows.map((row) => row.employeeId)).size}
-                            </div>
-                          </div>
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Total
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {formatMoney(contributionReportTotal)}
-                            </div>
-                          </div>
-                        </div>
-                        <PayrollContributionReportTable
-                          rows={contributionReportRows}
-                          emptyMessage="No contribution or tax lines were posted for this payroll run."
-                          onEmployeeSelect={setSelectedEmployeeId}
-                          selectedEmployeeId={selectedEmployee?.employeeId ?? null}
-                        />
-                      </>
-                    )}
-
-                    {selectedReportType === "accountCode" && (
-                      <>
-                        <div className="grid gap-3 px-6 md:grid-cols-4">
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Selected Code
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {selectedAccountCodeReportOption
-                                ? formatAccountCodeReportOptionName(
-                                    selectedAccountCodeReportOption
-                                  )
-                                : selectedReportAccountCode || "-"}
-                            </div>
-                          </div>
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Employees
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {selectedAccountCodeReportOption?.employeeCount ?? 0}
-                            </div>
-                          </div>
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Lines
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {selectedAccountCodeReportRows.length}
-                            </div>
-                          </div>
-                          <div className="rounded-lg border p-3">
-                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                              Total
-                            </div>
-                            <div className="mt-1 font-semibold">
-                              {formatMoney(selectedAccountCodeReportTotal)}
-                            </div>
-                          </div>
-                        </div>
-                        <PayrollLineReportTable
-                          rows={selectedAccountCodeReportRows}
-                          emptyMessage="Select an account code to show employees and values from this payroll run."
-                          onEmployeeSelect={setSelectedEmployeeId}
-                          selectedEmployeeId={selectedEmployee?.employeeId ?? null}
-                        />
-                      </>
-                    )}
-
-                    <div className="px-6 pb-6 text-xs text-muted-foreground">
-                      Run #{reportState.register.runNumber} created{" "}
-                      {formatDateTime(reportState.register.createdAt)}
-                      {reportState.register.computedAt
-                        ? ` and last computed ${formatDateTime(
-                            reportState.register.computedAt
-                          )}.`
-                        : "."}
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
-
-              {reportState.status === "ready" && !reportState.register && (
-                <Card>
-                  <CardContent className="py-10 text-center text-sm text-muted-foreground">
-                    The selected payroll run did not return a payroll register.
-                  </CardContent>
-                </Card>
-              )}
-
-              {reportState.status === "ready" && (
-                <Card>
-                  <CardHeader className="pb-3">
-                    <CardTitle>Agency Summary</CardTitle>
-                    <CardDescription>
-                      Government contribution and withholding totals loaded from
-                      the selected payroll run.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-3 text-sm">
-                    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                      <div className="rounded-lg border p-3">
-                        <div className="text-muted-foreground">SSS Employee</div>
-                        <div className="mt-1 font-semibold">
-                          {formatMoney(reportAgencySummary.sssEmployee)}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border p-3">
-                        <div className="text-muted-foreground">SSS Employer</div>
-                        <div className="mt-1 font-semibold">
-                          {formatMoney(reportAgencySummary.sssEmployer)}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border p-3">
-                        <div className="text-muted-foreground">SSS EC</div>
-                        <div className="mt-1 font-semibold">
-                          {formatMoney(reportAgencySummary.sssEc)}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border p-3">
-                        <div className="text-muted-foreground">
-                          PhilHealth Employee
-                        </div>
-                        <div className="mt-1 font-semibold">
-                          {formatMoney(reportAgencySummary.philhealthEmployee)}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border p-3">
-                        <div className="text-muted-foreground">
-                          PhilHealth Employer
-                        </div>
-                        <div className="mt-1 font-semibold">
-                          {formatMoney(reportAgencySummary.philhealthEmployer)}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border p-3">
-                        <div className="text-muted-foreground">Pag-IBIG Employee</div>
-                        <div className="mt-1 font-semibold">
-                          {formatMoney(reportAgencySummary.pagibigEmployee)}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border p-3">
-                        <div className="text-muted-foreground">Pag-IBIG Employer</div>
-                        <div className="mt-1 font-semibold">
-                          {formatMoney(reportAgencySummary.pagibigEmployer)}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border p-3">
-                        <div className="text-muted-foreground">Withholding Tax</div>
-                        <div className="mt-1 font-semibold">
-                          {formatMoney(reportAgencySummary.withholdingTax)}
-                        </div>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
-
-            </>
-          )}
         </TabsContent>
 
         <TabsContent value="attendanceHold" className="space-y-6">

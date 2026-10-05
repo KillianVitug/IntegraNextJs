@@ -46,7 +46,7 @@ export function EmployeeHeader() {
                         label="Loan Menu"
                         aria-label='Loan Menu'
                         choices={[
-                            { title: "Employee Loan Table", href: "/employeeLoans" },
+                            { title: "Employee Loan Table", href: "/loans" },
                         ]}
                     />
                     <NavButtonMenu
@@ -79,8 +79,8 @@ export function EmployeeHeader() {
                         label="File Menu"
                         aria-label='File Menu'
                         choices={[
-                            { title: "Employee File Table", href: "/employeeProfileFiles" },
-                            { title: "Upload Employee File", href: "/employeeProfileFiles/form" }
+                            { title: "Employee File Table", href: "/employeeFiles" },
+                            { title: "Upload Employee File", href: "/employeeFiles/form" }
                         ]}
                     />
                     <ModeToggle />

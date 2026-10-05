@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { revertManagerDtrImportBatchAction } from "@/app/actions/attendanceImportAction";
+import {
+  revertManagerDtrImportBatchAction,
+  syncManagerDtrPayrollPeriodAction,
+} from "@/app/actions/attendanceImportAction";
 import { buildRequestHostUrl } from "@/lib/http/redirect";
 
 function readText(formData: FormData, name: string) {
@@ -29,6 +32,10 @@ function redirectToDtr(
   return NextResponse.redirect(buildRedirectUrl(request, params), 303);
 }
 
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Payroll recompute failed.";
+}
+
 export async function POST(request: NextRequest) {
   const formData = await request.formData();
   const year = readText(formData, "year");
@@ -50,18 +57,39 @@ export async function POST(request: NextRequest) {
 
   try {
     const result = await revertManagerDtrImportBatchAction(batchId);
+    let payrollRecomputeStatus: string | null = null;
+    let payrollRunNumber: number | null = null;
+    let payrollRecomputeMessage: string | null = null;
+
+    if (periodId) {
+      const payrollRecompute = await syncManagerDtrPayrollPeriodAction(
+        periodId,
+        { markStale: false }
+      );
+      payrollRecomputeStatus = payrollRecompute.status;
+      payrollRunNumber = payrollRecompute.payrollRunNumber ?? null;
+      payrollRecomputeMessage = payrollRecompute.message;
+    }
 
     return redirectToDtr(request, {
       ...baseParams,
       removeStatus: "success",
       removedLogs: result.rawLogCount,
       removedSummaries: result.summaryCount,
+      payrollRecomputeStatus,
+      payrollRunNumber,
+      payrollRecomputeMessage,
     });
   } catch (error) {
     console.error("Manager DTR import removal failed:", error);
+    const errorMessage = getErrorMessage(error);
     return redirectToDtr(request, {
       ...baseParams,
       removeStatus: "failed",
+      payrollRecomputeStatus: errorMessage.includes("blocked")
+        ? "blocked"
+        : "failed",
+      payrollRecomputeMessage: errorMessage,
     });
   }
 }

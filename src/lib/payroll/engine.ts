@@ -83,6 +83,11 @@ import {
   type ScheduleFlagsLike,
 } from "./statutory";
 import {
+  assertRequiredStatutoryRulesPublished,
+  preflightPayroll,
+  type PayrollPreflightOptions,
+} from "./control";
+import {
   getEffectiveRateDivisor,
   resolvePhilhealthMonthlyCompensationBase,
 } from "./philhealthAnnualization";
@@ -2943,7 +2948,8 @@ export async function getPayrollPeriod(periodId: string) {
 
 export async function createOrRecomputePayrollRun(
   payrollPeriodId: string,
-  actorUserId: string
+  actorUserId: string,
+  options: Pick<PayrollPreflightOptions, "bypassTemporaryReadinessCategories"> = {}
 ) {
   const attendanceSourceInput = await assertAttendanceSourceReady(payrollPeriodId);
   await ensurePayrollFoundationData();
@@ -2956,6 +2962,24 @@ export async function createOrRecomputePayrollRun(
   if (period.payrollTerms !== "Semi-Monthly") {
     throw new Error("Only semi-monthly payroll periods are supported in v1.");
   }
+
+  const preflight = await preflightPayroll(payrollPeriodId, options);
+  if (!preflight.canCompute) {
+    const blockerCount =
+      preflight.statutoryBlockers.length +
+      preflight.employeeReadiness.reduce(
+        (total, employee) => total + employee.blockers.length,
+        0
+      );
+    throw new Error(
+      `Payroll preflight failed with ${blockerCount} blocker(s). Resolve payroll readiness checks before computing ${period.code}.`
+    );
+  }
+
+  await assertRequiredStatutoryRulesPublished({
+    asOfDate: period.adjustedPayDate,
+    payrollTerms: "Semi-Monthly",
+  });
 
   const holidays = await fetchConfirmedHolidayRowsForRange(
     period.startDate,
@@ -3515,19 +3539,22 @@ export async function transitionPayrollRunStatus(
 
     if (nextStatus === "Posted") {
       const lockedRun = run;
-      const loanLines = lockedRun.employees.flatMap((employeeRun) =>
-        employeeRun.lines
-          .filter(
-            (line) =>
-              line.sourceTable === "loan_installments" &&
-              line.sourceId
-          )
-          .map((line) => ({
-            employeeRunId: employeeRun.id,
-            installmentId: line.sourceId!,
-            amount: line.amount,
-          }))
-      );
+      const loanLines =
+        lockedRun.runType === "Reversal"
+          ? []
+          : lockedRun.employees.flatMap((employeeRun) =>
+              employeeRun.lines
+                .filter(
+                  (line) =>
+                    line.sourceTable === "loan_installments" &&
+                    line.sourceId
+                )
+                .map((line) => ({
+                  employeeRunId: employeeRun.id,
+                  installmentId: line.sourceId!,
+                  amount: line.amount,
+                }))
+            );
       const installmentIds = [
         ...new Set(loanLines.map((line) => line.installmentId)),
       ];
@@ -3655,6 +3682,13 @@ export async function transitionPayrollRunStatus(
           updatedAt: new Date(),
         })
         .where(eq(payrollRuns.id, payrollRunId));
+
+      if (lockedRun.runType === "Regular") {
+        await tx
+          .update(payrollPeriods)
+          .set({ status: "Processed", updatedAt: new Date() })
+          .where(eq(payrollPeriods.id, lockedRun.payrollPeriodId));
+      }
 
       await recordPayrollRunEvent({
         payrollRunId,
