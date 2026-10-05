@@ -50,6 +50,7 @@ async function main() {
     }
     await test("preflight reports missing migration without applying it", async () => { const report = await readOnly(database, inspectSchema); assert.equal(report.compatible, false); assert.ok(report.differences.some(r => r.table === "attendance_source_events" && r.issue === "missing_table")); assert.equal((await pg.query("SELECT to_regclass('attendance_source_events') AS t")).rows[0] && ((await pg.query<{t: string | null}>("SELECT to_regclass('attendance_source_events') AS t")).rows[0].t), null); });
     await pg.exec(await readFile("src/db/migrations/0119_attendance_source.sql", "utf8")); // In-memory fixture ONLY.
+    await pg.exec(await readFile("src/db/migrations/0120_attendance_matching_workflow.sql", "utf8"));
     await test("schema preflight accepts required fixture schema", async () => { const report = await readOnly(database, inspectSchema); assert.deepEqual(report.differences, []); });
     await test("schema type drift is reported without repair", async () => { await pg.exec("ALTER TABLE attendance_source_events ALTER COLUMN revision TYPE bigint"); const report = await readOnly(database, inspectSchema); assert.ok(report.differences.some(r => r.column === "revision" && r.issue === "different_type")); await pg.exec("ALTER TABLE attendance_source_events ALTER COLUMN revision TYPE integer"); });
     const person = c.mappings[0].employeeId;

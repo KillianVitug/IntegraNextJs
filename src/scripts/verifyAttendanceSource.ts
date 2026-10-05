@@ -46,6 +46,7 @@ async function main() {
     await pg.exec(`CREATE TABLE "${config.name}" (${columns.join(",")})`);
   }
   await pg.exec(await readFile("src/db/migrations/0119_attendance_source.sql", "utf8"));
+  await pg.exec(await readFile("src/db/migrations/0120_attendance_matching_workflow.sql", "utf8"));
   const person = randomUUID(), person2 = randomUUID(), periodId = randomUUID(), actor = randomUUID();
   await database.insert(schema.employees).values([{ id: person, employeeNo: "0001", firstName: "Test", lastName: "One" }, { id: person2, employeeNo: "0002", firstName: "Test", lastName: "Two" }]);
   await database.insert(schema.payrollPeriods).values({ id: periodId, code: "TEST-202609-A", payrollTerms: "Semi-Monthly", cycle: "A", year: 2026, month: 9, startDate: options.from, endDate: options.through, nominalPayDate: options.through, adjustedPayDate: options.through });
