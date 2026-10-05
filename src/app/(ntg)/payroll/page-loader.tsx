@@ -58,11 +58,12 @@ export async function renderPayrollWorkspacePage({
               snapshot.selectedPeriodId ?? ""
             )}
           >
-            Attendance connection / Sync attendance now
+            Attendance review & sync
           </Link>
         </div>
       )}
       <PayrollWorkspace
+        attendanceEnabled={process.env.ATTENDANCE_SOURCE_ENABLED === "true"}
         activeSection={activeSection}
         initialYear={selectedYear}
         periods={snapshot.periods}

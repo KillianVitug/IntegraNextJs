@@ -822,10 +822,17 @@
       "breakpoints": true
     },
     {
-      "idx": 120,
+      "idx": 121,
       "version": "7",
       "when": 1791158400000,
       "tag": "0120_attendance_matching_workflow",
+      "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1791244800000,
+      "tag": "0121_attendance_resolution",
       "breakpoints": true
     }
   ]

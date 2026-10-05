@@ -80,6 +80,7 @@ export async function Header() {
             aria-label="Payroll Menu"
             choices={[
               { title: "Payroll Workspace", href: "/payroll" },
+              ...(process.env.ATTENDANCE_SOURCE_ENABLED === "true" ? [{ title: "Attendance review & sync", href: "/payroll/attendance-source" }] : []),
               { title: "Payroll Report", href: "/payroll/report" },
               { title: "Payroll Outputs", href: "/payroll/outputs" },
               { title: "Special Run", href: "/payroll/special-run" },

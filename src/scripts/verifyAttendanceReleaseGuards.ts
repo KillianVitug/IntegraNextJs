@@ -37,6 +37,7 @@ async function main() {
     }
     await pg.exec(await readFile("src/db/migrations/0119_attendance_source.sql", "utf8"));
     await pg.exec(await readFile("src/db/migrations/0120_attendance_matching_workflow.sql", "utf8"));
+  await pg.exec(await readFile("src/db/migrations/0121_attendance_resolution.sql", "utf8"));
     const actor = randomUUID(), employee = randomUUID(), replacement = randomUUID(), periodId = randomUUID(), payrollId = randomUUID();
     process.env.ATTENDANCE_SOURCE_ENABLED = "true";
     process.env.ATTENDANCE_API_REQUIRED_PERIOD_IDS = periodId;
