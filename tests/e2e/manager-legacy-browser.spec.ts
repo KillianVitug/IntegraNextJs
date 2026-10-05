@@ -704,6 +704,94 @@ test.describe("manager weekly schedule browser enhancements", () => {
   });
 });
 
+test.describe("mobile login layout", () => {
+  test("login page is usable at phone width", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+
+    await expect(page.locator("#login-email")).toBeVisible();
+    await expect(page.locator("#login-password")).toBeVisible();
+    const loginForm = page.locator("form").filter({
+      has: page.locator("#login-email"),
+    });
+    await expect(loginForm.getByRole("button", { name: /^Login$/ })).toBeVisible();
+
+    const hasHorizontalOverflow = await page.evaluate(() => {
+      const root = document.scrollingElement ?? document.documentElement;
+      return root.scrollWidth > root.clientWidth + 1;
+    });
+
+    expect(hasHorizontalOverflow).toBe(false);
+  });
+});
+
+test.describe("mobile manager layout", () => {
+  test("manager mobile tabs and pages fit phone width", async ({ page }) => {
+    test.skip(
+      !managerEmail || !managerPassword,
+      "Set PLAYWRIGHT_MANAGER_EMAIL and PLAYWRIGHT_MANAGER_PASSWORD to run manager mobile tests.",
+    );
+
+    const hydrationMessages: string[] = [];
+    page.on("console", (message) => {
+      const text = message.text();
+      if (
+        text.includes("hydrated but some attributes") ||
+        text.includes("Hydration failed")
+      ) {
+        hydrationMessages.push(text);
+      }
+    });
+    page.on("pageerror", (error) => {
+      const text = error.message;
+      if (
+        text.includes("hydrated but some attributes") ||
+        text.includes("Hydration failed")
+      ) {
+        hydrationMessages.push(text);
+      }
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await loginAsManager(page);
+    await expect(page).toHaveURL(/\/managerHome(?:\?|$)/);
+
+    const mobileNav = page.getByRole("navigation", {
+      name: /Manager mobile navigation/i,
+    });
+    await expect(mobileNav).toBeVisible();
+    await expect(page.locator(".app-sidebar")).toBeHidden();
+    await expect(mobileNav.getByRole("link", { name: /Home/i })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+
+    for (const { route, linkName } of [
+      { route: "/managerHome", linkName: /Home/i },
+      { route: "/managerCalendar", linkName: /Calendar/i },
+      { route: "/managerLeaves", linkName: /Leaves/i },
+      { route: "/managerSchedules", linkName: /Schedules/i },
+      { route: "/managerDtrFiles", linkName: /DTR/i },
+    ]) {
+      await page.goto(route, { waitUntil: "domcontentloaded" });
+      await expect(mobileNav).toBeVisible();
+      await expect(mobileNav.getByRole("link", { name: linkName })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+
+      const hasHorizontalOverflow = await page.evaluate(() => {
+        const root = document.scrollingElement ?? document.documentElement;
+        return root.scrollWidth > root.clientWidth + 1;
+      });
+
+      expect(hasHorizontalOverflow).toBe(false);
+    }
+
+    expect(hydrationMessages).toEqual([]);
+  });
+});
+
 test.describe("manager Firefox 66 runtime compatibility", () => {
   test.skip(
     !managerEmail || !managerPassword,

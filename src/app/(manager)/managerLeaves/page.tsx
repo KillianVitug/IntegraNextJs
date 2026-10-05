@@ -153,7 +153,7 @@ export default async function ManagerLeavesPage({
             id="balance-employee"
             name="employeeId"
             defaultValue={defaultEmployeeId}
-            className="flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm"
+            className="flex h-11 w-full rounded-md border bg-background px-3 py-2 text-base md:h-9 md:py-1 md:text-sm"
           >
             {employees.map((employee) => (
               <option key={employee.id} value={employee.id}>
@@ -170,7 +170,7 @@ export default async function ManagerLeavesPage({
             id="balance-type"
             name="leaveType"
             defaultValue={defaultLeaveType}
-            className="flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm"
+            className="flex h-11 w-full rounded-md border bg-background px-3 py-2 text-base md:h-9 md:py-1 md:text-sm"
           >
             {leaveTypes.map((leaveType) => (
               <option key={leaveType.id} value={leaveType.code}>
@@ -179,7 +179,7 @@ export default async function ManagerLeavesPage({
             ))}
           </select>
         </div>
-        <Button type="submit" variant="outline" size="sm">
+        <Button type="submit" variant="outline" size="sm" className="min-h-11 md:min-h-8">
           Check Balance
         </Button>
       </form>
@@ -282,19 +282,20 @@ export default async function ManagerLeavesPage({
             />
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2 pt-2">
-          <Button type="submit" disabled={employees.length === 0}>
+        <div className="flex flex-col gap-2 pt-2 sm:flex-row sm:flex-wrap sm:items-center">
+          <Button type="submit" disabled={employees.length === 0} className="min-h-11">
             {editRecord ? "Update Request" : "Submit Request"}
           </Button>
           {editRecord ? (
             <>
-              <Button asChild type="button" variant="outline">
+              <Button asChild type="button" variant="outline" className="min-h-11">
                 <a href={`/managerLeaves?year=${year}`}>Cancel Edit</a>
               </Button>
               <Button
                 formAction="/managerLeaves/request/cancel"
                 type="submit"
                 variant="destructive"
+                className="min-h-11"
               >
                 Cancel Request
               </Button>
@@ -353,7 +354,11 @@ export default async function ManagerLeavesPage({
       <div className="rounded-md border">
         <div className="flex flex-col gap-3 border-b p-3 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-lg font-semibold">Department Leave Requests</h2>
-          <form action="/managerLeaves" className="flex items-end gap-2" method="get">
+          <form
+            action="/managerLeaves"
+            className="flex w-full items-end gap-2 sm:w-auto"
+            method="get"
+          >
             <div>
               <label className="mb-1.5 block text-sm font-medium" htmlFor="leave-year">
                 Year
@@ -365,14 +370,73 @@ export default async function ManagerLeavesPage({
                 min={1900}
                 max={2100}
                 defaultValue={year}
-                className="w-28"
+                className="w-full sm:w-28"
               />
             </div>
-            <Button type="submit" variant="outline" size="sm">
+            <Button type="submit" variant="outline" size="sm" className="min-h-11 md:min-h-8">
               Apply
             </Button>
           </form>
         </div>
+        <div className="grid gap-2 p-3 md:hidden">
+          {records.map((record) => (
+            <div key={record.id} className="rounded-md border p-3 text-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="break-words font-medium">
+                    {record.lastName}, {record.firstName}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {formatEmployeeNoDisplay(record.employeeNo)}
+                  </div>
+                </div>
+                <span className="shrink-0 rounded-full bg-muted px-2 py-1 text-xs">
+                  {record.leaveStatus}
+                </span>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                <div>
+                  <div className="text-muted-foreground">Type</div>
+                  <div className="font-medium">
+                    {record.leaveTypeName ?? record.leaveType}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">Days</div>
+                  <div className="font-medium">{record.noOfDays}</div>
+                </div>
+                <div className="col-span-2">
+                  <div className="text-muted-foreground">Dates</div>
+                  <div className="font-medium">
+                    {record.leaveStartDate}
+                    {record.leaveEndDate ? ` to ${record.leaveEndDate}` : ""}
+                  </div>
+                </div>
+                <div className="col-span-2">
+                  <div className="text-muted-foreground">Reason</div>
+                  <div className="break-words">{record.reason || "-"}</div>
+                </div>
+              </div>
+              <div className="mt-3">
+                {record.leaveStatus === "Pending" ? (
+                  <Button asChild variant="outline" size="sm" className="min-h-10 w-full">
+                    <a href={`/managerLeaves?year=${year}&editLeaveId=${record.id}`}>
+                      Edit
+                    </a>
+                  </Button>
+                ) : (
+                  <span className="text-xs text-muted-foreground">Locked</span>
+                )}
+              </div>
+            </div>
+          ))}
+          {records.length === 0 ? (
+            <div className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
+              No leave requests found for this year.
+            </div>
+          ) : null}
+        </div>
+        <div className="hidden md:block">
         <Table>
           <TableHeader>
             <TableRow>
@@ -424,6 +488,7 @@ export default async function ManagerLeavesPage({
             ) : null}
           </TableBody>
         </Table>
+        </div>
       </div>
     </div>
   );

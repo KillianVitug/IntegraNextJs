@@ -49,7 +49,16 @@ export async function recordAdminAuditEvent(args: {
 export async function recordPayrollRunEvent(args: {
   payrollRunId: string;
   actorUserId: string;
-  eventType: "Computed" | "MarkedStale" | "Reviewed" | "Approved" | "Posted" | "Voided";
+  eventType:
+    | "Computed"
+    | "MarkedStale"
+    | "Reviewed"
+    | "Approved"
+    | "Posted"
+    | "Voided"
+    | "Reversed"
+    | "PayslipsPublished"
+    | "Exported";
   fromStatus?: "Draft" | "Stale" | "Reviewed" | "Approved" | "Posted" | "Void" | null;
   toStatus?: "Draft" | "Stale" | "Reviewed" | "Approved" | "Posted" | "Void" | null;
   notes?: string | null;

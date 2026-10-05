@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { InputWithLabel } from "@/components/inputs/InputWithLabel";
 import {
   deleteBirWithholdingTaxBracketAction,
+  importLatestStatutoryRatesAction,
   saveBirWithholdingTaxBracketAction,
 } from "@/app/actions/payrollStatutoryAction";
 import {
@@ -90,6 +91,26 @@ export default function BirWithholdingTaxBracketForm({
     }
   );
 
+  const { execute: importLatestRates, isExecuting: importing } = useAction(
+    importLatestStatutoryRatesAction,
+    {
+      onSuccess: (result) => {
+        if (result?.data?.error) {
+          toast.error(result.data.error);
+          return;
+        }
+
+        toast.success(result?.data?.message ?? "Latest BIR brackets imported.");
+        form.reset(getEmptyValues(selectedVersionId));
+        onResetSelection?.();
+        onRefresh?.();
+      },
+      onError: () => {
+        toast.error("Unable to import latest BIR brackets.");
+      },
+    }
+  );
+
   useEffect(() => {
     if (!selectedRow) {
       form.reset(getEmptyValues(selectedVersionId));
@@ -124,6 +145,19 @@ export default function BirWithholdingTaxBracketForm({
   function handleReset() {
     form.reset(getEmptyValues(selectedVersionId));
     onResetSelection?.();
+  }
+
+  function handleImportLatestRates() {
+    if (!selectedVersionId) return;
+    if (
+      !window.confirm(
+        "Import latest BIR brackets into this version? Existing rows for the selected version will be replaced."
+      )
+    ) {
+      return;
+    }
+
+    importLatestRates({ versionId: selectedVersionId, ruleType: "TAX" });
   }
 
   return (
@@ -193,6 +227,15 @@ export default function BirWithholdingTaxBracketForm({
 
             <Button type="button" variant="outline" onClick={handleReset}>
               {selectedRow?.id ? "Cancel Edit" : "Reset"}
+            </Button>
+
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleImportLatestRates}
+              disabled={importing || !selectedVersionId}
+            >
+              {importing ? "Importing..." : "Import latest Rate"}
             </Button>
           </div>
         </form>

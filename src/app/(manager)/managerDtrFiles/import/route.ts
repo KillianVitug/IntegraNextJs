@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   importManagerDtrLogsAction,
-  recomputeManagerDtrPayrollAction,
+  refreshManagerAttendancePeriodSummariesAction,
 } from "@/app/actions/attendanceImportAction";
 import { buildRequestHostUrl } from "@/lib/http/redirect";
 
@@ -69,6 +69,10 @@ export async function POST(request: NextRequest) {
   let denied = 0;
   let unmatched = 0;
   let matched = 0;
+  let payrollRecomputeStatus: string | null = null;
+  let payrollRunNumber: number | null = null;
+  let payrollRecomputeMessage: string | null = null;
+  let importErrorMessage: string | null = null;
 
   for (const file of files) {
     try {
@@ -86,35 +90,38 @@ export async function POST(request: NextRequest) {
       imported += 1;
     } catch (error) {
       denied += 1;
+      importErrorMessage = getErrorMessage(error);
       console.error("Manager DTR import failed:", error);
     }
   }
 
-  let payrollRecomputeStatus = "skipped";
-  let payrollRunNumber: number | null = null;
-  let payrollRecomputeMessage: string | null =
-    imported === 0
-      ? "No DTR files were imported, so payroll was not recomputed."
-      : matched === 0
-        ? "No matched DTR rows were imported, so payroll was not recomputed."
-        : null;
-
   if (imported > 0 && matched > 0) {
     try {
-      const payrollResult = await recomputeManagerDtrPayrollAction(periodId);
-      payrollRecomputeStatus = "computed";
-      payrollRunNumber = payrollResult.payrollRunNumber;
-      payrollRecomputeMessage = null;
+      const refreshResult =
+        await refreshManagerAttendancePeriodSummariesAction(periodId);
+      payrollRecomputeStatus = refreshResult.payrollRecompute.status;
+      payrollRunNumber = refreshResult.payrollRecompute.payrollRunNumber ?? null;
+      payrollRecomputeMessage = refreshResult.payrollRecompute.message;
     } catch (error) {
       console.error("Manager DTR import payroll recompute failed:", error);
       payrollRecomputeStatus = "failed";
       payrollRecomputeMessage = getErrorMessage(error);
     }
+  } else if (imported > 0) {
+    payrollRecomputeStatus = "skipped";
+    payrollRecomputeMessage =
+      "Payroll recompute skipped because no matched DTR rows were imported.";
+  } else if (denied > 0) {
+    payrollRecomputeStatus = importErrorMessage?.includes("blocked")
+      ? "blocked"
+      : "failed";
+    payrollRecomputeMessage =
+      importErrorMessage ?? "DTR import failed before payroll recompute.";
   }
 
   return redirectToDtr(request, {
     ...baseParams,
-    importStatus: denied > 0 ? "partial" : "success",
+    importStatus: imported === 0 && denied > 0 ? "failed" : denied > 0 ? "partial" : "success",
     imported,
     denied,
     unmatched,

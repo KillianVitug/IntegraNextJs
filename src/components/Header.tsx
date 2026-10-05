@@ -78,7 +78,13 @@ export async function Header() {
             icon={File}
             label="Payroll Menu"
             aria-label="Payroll Menu"
-            choices={[{ title: "Payroll Workspace", href: "/payroll" }, ...(process.env.ATTENDANCE_SOURCE_ENABLED === "true" ? [{ title: "Attendance review & sync", href: "/payroll/attendance-source" }] : [])]}
+            choices={[
+              { title: "Payroll Workspace", href: "/payroll" },
+              ...(process.env.ATTENDANCE_SOURCE_ENABLED === "true" ? [{ title: "Attendance review & sync", href: "/payroll/attendance-source" }] : []),
+              { title: "Payroll Report", href: "/payroll/report" },
+              { title: "Payroll Outputs", href: "/payroll/outputs" },
+              { title: "Special Run", href: "/payroll/special-run" },
+            ]}
           />
 
           <NavButtonMenu
@@ -194,6 +200,19 @@ export async function Header() {
                   {
                     title: "BIR Tax Brackets",
                     href: "/constants/birWithholdingTaxBracket/form",
+                  },
+                ],
+              },
+              {
+                title: "Data Menu",
+                children: [
+                  {
+                    title: "Employee Master Data",
+                    href: "/constants/dataMenu/employeeMasterData",
+                  },
+                  {
+                    title: "Biometrics Data",
+                    href: "/constants/dataMenu/biometricsData",
                   },
                 ],
               },

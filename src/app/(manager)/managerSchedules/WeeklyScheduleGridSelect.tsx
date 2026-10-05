@@ -21,6 +21,10 @@ type Props = {
   defaultValue: string;
   shiftTables: WeeklyScheduleShiftOption[];
   label: string;
+  selectedLabelMode?: "time" | "description";
+  value?: string;
+  onValueChange?: (value: string) => void;
+  resetVersion?: number;
 };
 
 function formatAmPmTime(time: string) {
@@ -38,8 +42,15 @@ function formatAmPmTime(time: string) {
   return `${displayHour}:${String(minute).padStart(2, "0")} ${period}`;
 }
 
-function formatSelectedLabel(shiftTable: WeeklyScheduleShiftOption | undefined) {
+function formatSelectedLabel(
+  shiftTable: WeeklyScheduleShiftOption | undefined,
+  mode: "time" | "description",
+) {
   if (!shiftTable) return "Off / Rest Day";
+
+  if (mode === "description") {
+    return shiftTable.description;
+  }
 
   return `${formatAmPmTime(shiftTable.regularStartTime)} - ${formatAmPmTime(
     shiftTable.regularEndTime,
@@ -55,24 +66,42 @@ export function WeeklyScheduleGridSelect({
   defaultValue,
   shiftTables,
   label,
+  selectedLabelMode = "time",
+  value,
+  onValueChange,
+  resetVersion = 0,
 }: Props) {
   const [mounted, setMounted] = useState(false);
-  const [value, setValue] = useState(defaultValue);
+  const [internalValue, setInternalValue] = useState(defaultValue);
   const shiftTableMap = useMemo(
     () => new Map(shiftTables.map((shiftTable) => [String(shiftTable.id), shiftTable])),
     [shiftTables],
   );
-  const selectedShiftTable = shiftTableMap.get(value);
+  const selectedValue = value ?? internalValue;
+  const selectedShiftTable = shiftTableMap.get(selectedValue);
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
+  useEffect(() => {
+    if (value === undefined) {
+      setInternalValue(defaultValue);
+    }
+  }, [defaultValue, resetVersion, value]);
+
+  function handleValueChange(nextValue: string) {
+    if (value === undefined) {
+      setInternalValue(nextValue);
+    }
+    onValueChange?.(nextValue);
+  }
+
   if (!mounted) {
     return (
       <select
         aria-label={label}
-        className="flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm"
+        className="flex h-11 w-full min-w-0 rounded-md border bg-background px-3 py-2 text-base md:h-9 md:min-w-56 md:py-1 md:text-sm"
         name={name}
         defaultValue={defaultValue}
       >
@@ -88,10 +117,15 @@ export function WeeklyScheduleGridSelect({
 
   return (
     <div>
-      <input type="hidden" name={name} value={value} />
-      <Select value={value} onValueChange={setValue}>
-        <SelectTrigger aria-label={label} className="h-9 min-w-40">
-          <span className="truncate">{formatSelectedLabel(selectedShiftTable)}</span>
+      <input type="hidden" name={name} value={selectedValue} />
+      <Select value={selectedValue} onValueChange={handleValueChange}>
+        <SelectTrigger
+          aria-label={label}
+          className="h-11 min-w-0 text-base md:h-9 md:min-w-56 md:text-sm"
+        >
+          <span className="truncate">
+            {formatSelectedLabel(selectedShiftTable, selectedLabelMode)}
+          </span>
         </SelectTrigger>
         <SelectContent>
           <SelectItem value="0">Off / Rest Day</SelectItem>

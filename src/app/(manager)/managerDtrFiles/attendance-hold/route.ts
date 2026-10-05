@@ -49,6 +49,51 @@ function buildRedirectUrl(
   return url;
 }
 
+function summarizePayrollRecompute(
+  recomputeResults: Array<{
+    status: string;
+    payrollRunNumber?: number | null;
+    payrollPeriodCode: string | null;
+    message: string;
+  }> | undefined
+) {
+  const results = recomputeResults ?? [];
+  if (results.length === 0) {
+    return {
+      status: "skipped",
+      runNumber: null,
+      message: "Payroll recompute skipped because no target payroll period changed.",
+    };
+  }
+
+  const failed = results.find(
+    (result) => result.status === "failed" || result.status === "blocked"
+  );
+  if (failed) {
+    return {
+      status: failed.status,
+      runNumber: failed.payrollRunNumber ?? null,
+      message: failed.message,
+    };
+  }
+
+  const runNumbers = results
+    .map((result) => result.payrollRunNumber)
+    .filter((runNumber): runNumber is number => runNumber != null);
+
+  return {
+    status: "computed",
+    runNumber: runNumbers[0] ?? null,
+    message:
+      results.length === 1
+        ? results[0].message
+        : `Payroll recomputed for ${results.length} affected period(s): ${results
+            .map((result) => result.payrollPeriodCode)
+            .filter(Boolean)
+            .join(", ")}.`,
+  };
+}
+
 export async function POST(request: NextRequest) {
   const formData = await request.formData();
   const year = readText(formData, "year");
@@ -85,25 +130,32 @@ export async function POST(request: NextRequest) {
       ),
       overtimeMinutes: readMinutes(formData, "overtimeHours", "overtimeMinutes"),
     });
+    const recompute = summarizePayrollRecompute(result.payrollRecompute);
 
     return NextResponse.redirect(
       buildRedirectUrl(request, {
         ...baseParams,
         holdStatus: "submitted",
         holdMessage: `Attendance Hold saved and approved for ${result.targetPayrollPeriodCode}.`,
+        payrollRecomputeStatus: recompute.status,
+        payrollRunNumber: recompute.runNumber,
+        payrollRecomputeMessage: recompute.message,
       }),
       303
     );
   } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : "Unable to save Attendance Hold.";
     return NextResponse.redirect(
       buildRedirectUrl(request, {
         ...baseParams,
         holdEditEmployeeId: employeeId,
         holdStatus: "failed",
-        holdMessage:
-          error instanceof Error
-            ? error.message
-            : "Unable to save Attendance Hold.",
+        holdMessage: errorMessage,
+        payrollRecomputeStatus: errorMessage.includes("blocked")
+          ? "blocked"
+          : "failed",
+        payrollRecomputeMessage: errorMessage,
       }),
       303
     );
