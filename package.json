@@ -47,7 +47,8 @@
     "verify:attendance-test-setup": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceTestSetup.ts",
     "verify:attendance-scheduler": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceScheduler.ts",
     "verify:attendance-matching": "tsx ./src/scripts/verifyAttendanceMatching.ts",
-    "verify:attendance-batch-matching": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceBatchMatching.ts"
+    "verify:attendance-batch-matching": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceBatchMatching.ts",
+    "verify:attendance-resolution": "node --conditions=react-server --import tsx ./src/scripts/verifyAttendanceResolution.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

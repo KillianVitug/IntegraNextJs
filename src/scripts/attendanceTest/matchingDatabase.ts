@@ -23,5 +23,6 @@ export async function matchingDatabase() {
   }
   await pg.exec(await readFile("src/db/migrations/0119_attendance_source.sql", "utf8"));
   await pg.exec(await readFile("src/db/migrations/0120_attendance_matching_workflow.sql", "utf8"));
+  await pg.exec(await readFile("src/db/migrations/0121_attendance_resolution.sql", "utf8"));
   return { pg, database, client: database as unknown as DbClient };
 }

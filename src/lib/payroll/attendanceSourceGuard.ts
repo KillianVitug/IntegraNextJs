@@ -1,6 +1,6 @@
 import { and, desc, eq, gte, lte, or, sql } from "drizzle-orm";
 import { db, type DbClient } from "@/db";
-import { attendanceSourcePeriods, attendanceSourceRuns, attendanceSourceMappings, attendanceSourceEvents, attendanceSourceProjections, attendanceSourceIdentities } from "@/db/attendanceSourceSchema";
+import { attendanceSourcePeriods, attendanceSourceRuns, attendanceSourceMappings, attendanceSourceEvents, attendanceSourceProjections, attendanceSourceIdentities, attendanceResolutions } from "@/db/attendanceSourceSchema";
 import { attendanceImportBatches, attendanceRawLogs, payrollRunEvents } from "@/db/schema";
 import { sourceDayOffset } from "./attendanceSourceClient";
 import { PayrollValidationError } from "./validation";
@@ -63,6 +63,10 @@ export async function assertAttendanceSourceReady(periodId: string, database: Db
     .innerJoin(attendanceSourceProjections, eq(attendanceSourceProjections.eventId, attendanceSourceEvents.eventId))
     .where(and(eq(attendanceSourceProjections.payrollPeriodId, periodId), sql`${attendanceSourceIdentities.updatedAt} > ${run.startedAt}`)).limit(1);
   if (identityChanges.length) throw new PayrollValidationError("Employee mappings or classifications changed after this attendance pull started. Sync again and refresh DTR before continuing payroll.");
+  const resolutionChanges = await database.select({ id: attendanceResolutions.id }).from(attendanceResolutions).where(and(or(eq(attendanceResolutions.payrollPeriodId, periodId), sql`exists (select 1 from attendance_source_projections rp where rp.payroll_period_id = ${periodId}::uuid and ${attendanceResolutions.eventIds} @> jsonb_build_array(rp.event_id::text))`), or(sql`${attendanceResolutions.state} IN ('Pending','Sending','Failed')`, sql`${attendanceResolutions.updatedAt} > ${run.startedAt}`))).limit(1);
+  if (resolutionChanges.length) throw new PayrollValidationError("Attendance resolutions need approval or changed after this pull. Resolve pending cases, sync again and refresh DTR before continuing payroll.");
+  const changedEvidence = await database.select({ id: attendanceSourceEvents.eventId }).from(attendanceSourceProjections).innerJoin(attendanceSourceEvents, eq(attendanceSourceEvents.eventId, attendanceSourceProjections.eventId)).where(and(eq(attendanceSourceProjections.payrollPeriodId, periodId), sql`${attendanceSourceEvents.seenAt} > ${run.completedAt}`)).limit(1);
+  if (changedEvidence.length) throw new PayrollValidationError("Source evidence changed since this period was synced. Sync again and review the updated attendance.");
   const [state] = await database.select().from(attendanceSourcePeriods).where(eq(attendanceSourcePeriods.payrollPeriodId, periodId));
   const counts = run?.counts as Record<string, number> | null;
   if (!counts || counts.unmatched || counts.withheld || counts.lateChanges || counts.boundaryReview || counts.clearedEmployees) throw new PayrollValidationError(`Attendance source has unresolved exceptions: ${counts?.unmatched ?? 0} unmatched, ${counts?.withheld ?? 0} withheld, ${counts?.boundaryReview ?? 0} boundary reviews, ${counts?.clearedEmployees ?? 0} cleared employee-periods and ${counts?.lateChanges ?? 0} late changes. Open Attendance connection, resolve the listed issues and sync again. Counts can overlap.`);

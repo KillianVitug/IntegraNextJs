@@ -8,6 +8,36 @@ import type { MatchMutation } from "@/lib/payroll/attendanceMatching";
 import { PayrollValidationError } from "@/lib/payroll/validation";
 import { payrollActionResult } from "@/lib/payroll/validation";
 import { refreshAttendancePeriodSummariesAction } from "./attendanceImportAction";
+import { loadAttendanceReadiness, proposeAttendanceResolution, reviewAttendanceResolution, applySourceResolution } from "@/lib/payroll/attendanceResolution";
+import type { ResolutionRequest } from "@/lib/payroll/attendanceResolutionModel";
+
+export async function attendanceReadinessAction(periodId: string, historyPage = 0) {
+  await requireAdminActor(); requireAttendanceSource();
+  return payrollActionResult(() => loadAttendanceReadiness(periodId, db, historyPage));
+}
+export async function proposeAttendanceResolutionAction(request: ResolutionRequest) {
+  const actor = await requireAdminActor(); requireAttendanceSource();
+  return payrollActionResult(async () => {
+    await db.transaction(tx => proposeAttendanceResolution(tx, actor.userId, request));
+    revalidatePath("/payroll/attendance-source"); revalidatePath("/payroll");
+    return "Proposal saved. Review the original dates, verified times and evidence, then approve. Payroll input is unchanged until approval and sync.";
+  });
+}
+export async function reviewAttendanceResolutionAction(id: string, action: "Approve" | "Reject" | "Reverse", reason: string) {
+  const actor = await requireAdminActor(); requireAttendanceSource();
+  return payrollActionResult(async () => {
+    const result = await db.transaction(tx => reviewAttendanceResolution(tx, actor.userId, id, action, reason));
+    const message = result.source ? await applySourceResolution(id, actor.userId, true) : action === "Approve" ? "Approved. Sync this period, refresh DTR, then recompute and review payroll." : action === "Reverse" ? "Reversed. The case is reopened and payroll is stale. Sync and refresh DTR before recomputing." : "Proposal rejected. Review the current evidence before proposing another treatment.";
+    revalidatePath("/payroll/attendance-source"); revalidatePath("/payroll"); return message;
+  });
+}
+export async function retryAttendanceSourceCorrectionAction(id: string) {
+  const actor = await requireAdminActor(); requireAttendanceSource();
+  return payrollActionResult(async () => {
+    const message = await applySourceResolution(id, actor.userId);
+    revalidatePath("/payroll/attendance-source"); revalidatePath("/payroll"); return message;
+  });
+}
 export async function syncAttendanceSourceAction(periodId: string) {
   const actor = await requireAdminActor(); requireAttendanceSource();
   return payrollActionResult(async () => {

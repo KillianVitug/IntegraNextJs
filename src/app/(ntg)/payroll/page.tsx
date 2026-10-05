@@ -33,8 +33,9 @@ export default async function PayrollPage({
 
   return (
     <>
-    {process.env.ATTENDANCE_SOURCE_ENABLED === "true" && <div className="px-6 pt-4"><Link href={attendancePeriodUrl("/payroll/attendance-source", selectedYear, snapshot.selectedPeriodId ?? "")}>Attendance connection / Sync attendance now</Link></div>}
+    {process.env.ATTENDANCE_SOURCE_ENABLED === "true" && <div className="px-6 pt-4"><Link href={attendancePeriodUrl("/payroll/attendance-source", selectedYear, snapshot.selectedPeriodId ?? "")}>Attendance review & sync</Link></div>}
     <PayrollWorkspace
+      attendanceEnabled={process.env.ATTENDANCE_SOURCE_ENABLED === "true"}
       initialYear={selectedYear}
       periods={snapshot.periods}
       selectedPeriodId={snapshot.selectedPeriodId}

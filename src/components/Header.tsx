@@ -78,7 +78,7 @@ export async function Header() {
             icon={File}
             label="Payroll Menu"
             aria-label="Payroll Menu"
-            choices={[{ title: "Payroll Workspace", href: "/payroll" }]}
+            choices={[{ title: "Payroll Workspace", href: "/payroll" }, ...(process.env.ATTENDANCE_SOURCE_ENABLED === "true" ? [{ title: "Attendance review & sync", href: "/payroll/attendance-source" }] : [])]}
           />
 
           <NavButtonMenu

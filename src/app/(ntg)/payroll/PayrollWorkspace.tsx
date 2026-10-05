@@ -21,6 +21,9 @@ import {
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
+import { attendanceReadinessAction } from "@/app/actions/attendanceSourceAction";
+import type { AttendanceReadiness } from "@/lib/payroll/attendanceResolutionModel";
+import { AttendanceReadinessCard } from "./attendance-source/attendance-review";
 import {
   approveAttendanceDtrHoldRowsAction,
   getAttendanceDtrHeldRowsAction,
@@ -154,6 +157,7 @@ import {
 } from "@/utils/employeeDisplay";
 
 type Props = {
+  attendanceEnabled?: boolean;
   initialYear: number;
   periods: PayrollPeriodSummary[];
   selectedPeriodId: string | null;
@@ -3416,6 +3420,7 @@ function getAdjacentEmployeeIds<T extends { employeeId: string }>(
 }
 
 export function PayrollWorkspace({
+  attendanceEnabled = false,
   initialYear,
   periods: initialPeriods,
   selectedPeriodId: initialSelectedPeriodId,
@@ -3441,6 +3446,9 @@ export function PayrollWorkspace({
   const [employeeSnapshotDepartmentFilter, setEmployeeSnapshotDepartmentFilter] =
     useState<DepartmentFilterValue>(ALL_DEPARTMENTS_VALUE);
   const [actionState, setActionState] = useState<string | null>(null);
+  const [attendanceReadiness, setAttendanceReadiness] = useState<AttendanceReadiness | null>(null);
+  const [payrollActionError, setPayrollActionError] = useState<{ periodId: string; message: string } | null>(null);
+  const [attendanceCheckError, setAttendanceCheckError] = useState<string | null>(null);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string | null>(
     initialSelectedRun?.employees[0]?.employeeId ?? null
   );
@@ -6951,6 +6959,16 @@ export function PayrollWorkspace({
     }
   }
 
+  useEffect(() => {
+    let cancelled = false;
+    setAttendanceReadiness(null); setAttendanceCheckError(null);
+    if (attendanceEnabled && selectedPeriod?.id) attendanceReadinessAction(selectedPeriod.id).then(result => {
+      if (cancelled) return;
+      if (result.ok) setAttendanceReadiness(result.data); else setAttendanceCheckError(result.error);
+    }).catch(() => { if (!cancelled) setAttendanceCheckError("Attendance readiness could not be loaded. Refresh this page or open Attendance review & sync."); });
+    return () => { cancelled = true; };
+  }, [attendanceEnabled, selectedPeriod?.id, actionState]);
+
   async function runAction(
     label: string,
     callback: () => Promise<unknown>,
@@ -6958,6 +6976,7 @@ export function PayrollWorkspace({
   ) {
     try {
       setActionState(label);
+      setPayrollActionError(null);
       const result = await callback();
       if (result && typeof result === "object" && "ok" in result && result.ok === false && "error" in result) {
         throw new Error(String(result.error));
@@ -6969,6 +6988,7 @@ export function PayrollWorkspace({
         typeof successMessage === "function" ? successMessage() : successMessage
       );
     } catch (error) {
+      if (selectedPeriod) setPayrollActionError({ periodId: selectedPeriod.id, message: error instanceof Error ? error.message : "The payroll action could not be confirmed. Refresh before retrying." });
       toast.error(
         error instanceof Error ? error.message : "Something went wrong."
       );
@@ -8511,6 +8531,9 @@ export function PayrollWorkspace({
                   </div>
                 </div>
 
+                {attendanceEnabled && attendanceReadiness?.periodId === selectedPeriod.id && <AttendanceReadinessCard data={attendanceReadiness} error={payrollActionError?.periodId === selectedPeriod.id ? payrollActionError.message : null} />}
+                {attendanceCheckError && <p role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-slate-900">{attendanceCheckError}</p>}
+                {payrollActionError?.periodId === selectedPeriod.id && <div role="alert" className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-900"><strong>Payroll action needs attention.</strong><p className="mt-2">{payrollActionError.message}</p><p className="mt-2">Check the current run and attendance review before trying again. This message stays here until you retry or change periods.</p></div>}
                 <div className="flex flex-wrap gap-2">
                   <Button
                     type="button"
@@ -8523,7 +8546,7 @@ export function PayrollWorkspace({
                           : "Payroll run computed."
                       )
                     }
-                    disabled={actionState !== null || isNavigating}
+                    disabled={actionState !== null || isNavigating || attendanceEnabled && (!attendanceReadiness || attendanceReadiness.periodId !== selectedPeriod.id || !attendanceReadiness.ready)}
                   >
                     {actionState === "compute-run"
                       ? "Computing..."

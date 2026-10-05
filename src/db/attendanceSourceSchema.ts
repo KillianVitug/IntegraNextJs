@@ -1,5 +1,17 @@
 import { pgTable, text, uuid, timestamp, jsonb, integer, primaryKey, index } from "drizzle-orm/pg-core";
 import { employees, payrollPeriods, attendanceRawLogs } from "./schema";
+
+export const attendanceResolutions = pgTable("attendance_resolutions", {
+  id: uuid("id").primaryKey().defaultRandom(), payrollPeriodId: uuid("payroll_period_id").notNull().references(() => payrollPeriods.id),
+  sourceEmployeeId: text("source_employee_id").notNull(), kind: text("kind").notNull(), state: text("state").notNull(),
+  sourceVersion: text("source_version").notNull(), employeeId: uuid("employee_id").references(() => employees.id),
+  reason: text("reason").notNull(), evidence: text("evidence").notNull(), manualPunches: jsonb("manual_punches").notNull().default([]), eventIds: jsonb("event_ids").notNull().default([]), sourceRequests: jsonb("source_requests").notNull().default([]), result: text("result"),
+  actorUserId: text("actor_user_id").notNull(), reviewerUserId: text("reviewer_user_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(), updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [index("attendance_resolutions_period").on(t.payrollPeriodId, t.updatedAt, t.id)]);
+export const attendanceResolutionLogs = pgTable("attendance_resolution_logs", {
+  resolutionId: uuid("resolution_id").notNull().references(() => attendanceResolutions.id), punchIndex: integer("punch_index").notNull(), rawLogId: integer("raw_log_id").notNull().references(() => attendanceRawLogs.id, { onDelete: "restrict" }),
+}, t => [primaryKey({ columns: [t.resolutionId, t.punchIndex] })]);
 // Additive tables: a disabled connector never queries them.
 export const attendanceSourceMappings = pgTable("attendance_source_mappings", {
   sourceEmployeeId: text("source_employee_id").primaryKey(),

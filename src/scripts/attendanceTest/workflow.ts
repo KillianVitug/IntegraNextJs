@@ -22,7 +22,7 @@ export function queryWith(database: Database | Transaction): Query {
   };
 }
 
-export const requiredTables = [schema.employees, schema.employeesGeneralInfo, schema.authAccounts, schema.authPermissionGroups, schema.authAccountPermissionGroups, schema.payrollPeriods, schema.payrollRuns, schema.attendanceImportBatches, schema.attendanceRawLogs, schema.attendanceDailySummaries, schema.adminAuditEvents, schema.payrollRunEvents, schema.attendanceSourceMappings, schema.attendanceSourceRuns, schema.attendanceSourceEvents, schema.attendanceSourceRevisions, schema.attendanceSourceProjections, schema.attendanceSourcePeriods, schema.attendanceSourceIdentities, schema.attendanceMatchBatches, schema.attendanceMatchChanges];
+export const requiredTables = [schema.employees, schema.employeesGeneralInfo, schema.authAccounts, schema.authPermissionGroups, schema.authAccountPermissionGroups, schema.payrollPeriods, schema.payrollRuns, schema.attendanceImportBatches, schema.attendanceRawLogs, schema.attendanceDailySummaries, schema.adminAuditEvents, schema.payrollRunEvents, schema.attendanceSourceMappings, schema.attendanceSourceRuns, schema.attendanceSourceEvents, schema.attendanceSourceRevisions, schema.attendanceSourceProjections, schema.attendanceSourcePeriods, schema.attendanceSourceIdentities, schema.attendanceMatchBatches, schema.attendanceMatchChanges, schema.attendanceResolutions, schema.attendanceResolutionLogs];
 const normalizeType = (t: string) => t.toLowerCase().replace(/^serial$/, "integer").replace(/^bigserial$/, "bigint").replace(/^varchar/, "character varying").replace(/^decimal/, "numeric").replace(/^timestamp$/, "timestamp without time zone").replace(/^time$/, "time without time zone").replaceAll(/\s+/g, "");
 
 export async function inspectSchema(query: Query) {
@@ -40,8 +40,10 @@ export async function inspectSchema(query: Query) {
   }
   const enums = await query("SELECT enumlabel FROM pg_enum e JOIN pg_type t ON e.enumtypid=t.oid JOIN pg_namespace n ON t.typnamespace=n.oid WHERE n.nspname='public' AND t.typname='attendance_import_format'");
   if (!enums.rows.some(r => r.enumlabel === "API")) differences.push({ table: "attendance_import_format", issue: "missing_API_enum_value" });
-  const constraints = await query("SELECT c.relname AS table_name, pg_get_constraintdef(k.oid) AS definition FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND (c.relname LIKE 'attendance_source_%' OR c.relname LIKE 'attendance_match_%')");
+  const constraints = await query("SELECT c.relname AS table_name, pg_get_constraintdef(k.oid) AS definition FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND (c.relname LIKE 'attendance_source_%' OR c.relname LIKE 'attendance_match_%' OR c.relname LIKE 'attendance_resolution%')");
   const needed: Record<string, string[]> = {
+    attendance_resolutions: ["PRIMARY KEY (id)", "FOREIGN KEY (payroll_period_id) REFERENCES payroll_periods(id)", "FOREIGN KEY (employee_id) REFERENCES employees(id)"],
+    attendance_resolution_logs: ["PRIMARY KEY (resolution_id, punch_index)", "FOREIGN KEY (resolution_id) REFERENCES attendance_resolutions(id)", "FOREIGN KEY (raw_log_id) REFERENCES attendance_raw_logs(id) ON DELETE RESTRICT"],
     attendance_source_identities: ["PRIMARY KEY (source_employee_id)"],
     attendance_match_batches: ["PRIMARY KEY (id)"],
     attendance_match_changes: ["PRIMARY KEY (id)", "FOREIGN KEY (batch_id) REFERENCES attendance_match_batches(id)", "UNIQUE (batch_id, source_employee_id)"],
@@ -55,7 +57,7 @@ export async function inspectSchema(query: Query) {
   for (const [table, definitions] of Object.entries(needed)) for (const definition of definitions) {
     if (!constraints.rows.some(r => r.table_name === table && r.definition === definition)) differences.push({ table, issue: `missing_constraint:${definition}` });
   }
-  return { compatible: differences.length === 0, differences, coverage: "Required columns/types/nullability, API enum, and 0119/0120 matching primary/foreign/unique keys. Not a complete production-schema or migration-history certification." };
+  return { compatible: differences.length === 0, differences, coverage: "Required columns/types/nullability, API enum, and 0119/0120/0121 attendance primary/foreign/unique keys. Not a complete production-schema or migration-history certification." };
 }
 
 export async function readOnly<T>(database: Database, fn: (query: Query) => Promise<T>) {
