@@ -1,3 +1,4 @@
+import { duplicateBursts, DUPLICATE_SUGGEST_MS } from "./attendanceDuplicateModel";
 import {
   ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG,
   attendanceWallClockTime,
@@ -27,7 +28,7 @@ export const attendanceDtrCorrectionStatusValues = [
 export type AttendanceDtrCorrectionStatus =
   (typeof attendanceDtrCorrectionStatusValues)[number];
 
-export const ATTENDANCE_DTR_DUPLICATE_WINDOW_MINUTES = 10;
+export const ATTENDANCE_DTR_DUPLICATE_WINDOW_MINUTES = DUPLICATE_SUGGEST_MS / 60_000;
 
 export type AttendanceCorrectionPunch = {
   rawLogId: number | null;
@@ -85,7 +86,6 @@ const DUPLICATE_CORRECTION_TYPES = new Set<AttendanceDtrCorrectionType>([
   "Duplicate Punch",
   "Same-Direction Duplicate",
 ]);
-const SAME_DIRECTION_MAX_MINUTES = 120;
 
 function parseTimeToMinutes(value: string | null | undefined) {
   if (!value) return null;
@@ -308,23 +308,6 @@ export function applyApprovedAttendanceCorrections(
   ].sort((left, right) => attendanceWallClockTime(left) - attendanceWallClockTime(right));
 }
 
-function isSameDirectionDuplicateCandidate(
-  previousLog: ParsedAttendanceLog,
-  currentLog: ParsedAttendanceLog
-) {
-  const bothKnown =
-    currentLog.direction !== "UNSPECIFIED" &&
-    previousLog.direction !== "UNSPECIFIED";
-  const bothUnknown =
-    currentLog.direction === "UNSPECIFIED" &&
-    previousLog.direction === "UNSPECIFIED";
-
-  return (
-    (bothKnown && currentLog.direction === previousLog.direction) ||
-    bothUnknown
-  );
-}
-
 export function detectAttendanceCorrectionSuggestions(args: {
   attendanceDate: string;
   logs: ParsedAttendanceLog[];
@@ -333,111 +316,20 @@ export function detectAttendanceCorrectionSuggestions(args: {
   duplicateWindowMinutes?: number;
   allowSameDirectionAutoDuplicate?: boolean;
 }) {
-  const duplicateWindowMinutes =
-    args.duplicateWindowMinutes ?? ATTENDANCE_DTR_DUPLICATE_WINDOW_MINUTES;
-  const rawLogs = [...args.logs].sort(
-    (left, right) => attendanceWallClockTime(left) - attendanceWallClockTime(right)
-  );
+  const rawLogs = [...args.logs].sort((a,b) => attendanceWallClockTime(a)-attendanceWallClockTime(b));
   const suggestions: AttendanceCorrectionSuggestionSeed[] = [];
-  const duplicateRawLogIds = new Set<number>();
-
-  for (let index = 1; index < rawLogs.length; index += 1) {
-    const previousLog = rawLogs[index - 1];
-    const currentLog = rawLogs[index];
-    const currentRawLogId = currentLog.rawLogId;
-    if (currentRawLogId == null) continue;
-
-    const minutesBetween = Math.round(
-      Math.abs(attendanceWallClockTime(currentLog) - attendanceWallClockTime(previousLog)) /
-        60_000
-    );
-
-    if (
-      minutesBetween <= SAME_DIRECTION_MAX_MINUTES &&
-      isSameDirectionDuplicateCandidate(previousLog, currentLog)
-    ) {
-      continue;
-    }
-
-    if (minutesBetween <= duplicateWindowMinutes) {
-      duplicateRawLogIds.add(currentRawLogId);
-    }
-  }
-
-  // Pass 2: detect consecutive same-direction punches outside the proximity window
-  // Gaps <= 120 min are auto-applied as biometric double-punch errors.
-  const sameDirectionAutoIds = new Set<number>();
-
-  for (let index = 1; index < rawLogs.length; index += 1) {
-    const previousLog = rawLogs[index - 1];
-    const currentLog = rawLogs[index];
-    const currentRawLogId = currentLog.rawLogId;
-    if (currentRawLogId == null) continue;
-    if (duplicateRawLogIds.has(currentRawLogId)) continue;
-
-    if (!isSameDirectionDuplicateCandidate(previousLog, currentLog)) continue;
-
-    const minutesBetween = Math.round(
-      Math.abs(
-        attendanceWallClockTime(currentLog) - attendanceWallClockTime(previousLog)
-      ) / 60_000
-    );
-    if (minutesBetween <= SAME_DIRECTION_MAX_MINUTES) {
-      sameDirectionAutoIds.add(currentRawLogId);
-    }
-  }
-
-  const duplicateIds = [...duplicateRawLogIds];
-  const duplicateEffectiveLogs = rawLogs.filter(
-    (log) => log.rawLogId == null || !duplicateRawLogIds.has(log.rawLogId)
-  );
-
-  if (duplicateIds.length > 0) {
-    const duplicateSummary = summarizeEmployeeDay(
-      args.attendanceDate,
-      duplicateEffectiveLogs,
-      args.shift,
-      args.summary.paidLeaveMinutes,
-      args.summary.unpaidLeaveMinutes
-    );
-
-    suggestions.push({
-      correctionType: "Duplicate Punch",
-      confidence: 90,
-      autoApprove: true,
-      reason: `${duplicateIds.length} punch(es) are within ${duplicateWindowMinutes} minutes of the previous punch and can be ignored as accidental duplicates.`,
-      payload: buildPayload({
-        rawLogs,
-        ignoredRawLogIds: duplicateIds,
-        summary: withAnomalyFlags(duplicateSummary, [ATTENDANCE_DOUBLE_PUNCH_FLAG]),
-      }),
-    });
-  }
-
-  if (sameDirectionAutoIds.size > 0) {
-    const ids = [...sameDirectionAutoIds];
-    const effectiveLogs = rawLogs.filter(
-      (log) => log.rawLogId == null || !sameDirectionAutoIds.has(log.rawLogId)
-    );
-    const correctedSummary = summarizeEmployeeDay(
-      args.attendanceDate,
-      effectiveLogs,
-      args.shift,
-      args.summary.paidLeaveMinutes,
-      args.summary.unpaidLeaveMinutes
-    );
-    suggestions.push({
-      correctionType: "Same-Direction Duplicate",
-      confidence: 95,
-      autoApprove: true,
-      reason: `${ids.length} punch(es) repeat the same swipe direction (IN→IN or OUT→OUT) within ${SAME_DIRECTION_MAX_MINUTES} minutes and are automatically negated as biometric errors.`,
-      payload: buildPayload({
-        rawLogs,
-        ignoredRawLogIds: ids,
-        summary: withAnomalyFlags(correctedSummary, [ATTENDANCE_DOUBLE_PUNCH_FLAG]),
-      }),
-    });
-  }
+  const windowMs = Math.max(0, Math.min(DUPLICATE_SUGGEST_MS, (args.duplicateWindowMinutes ?? ATTENDANCE_DTR_DUPLICATE_WINDOW_MINUTES) * 60_000));
+  const bursts = duplicateBursts(rawLogs.map((p,i)=>({ id: String(p.rawLogId ?? `missing-${i}`), person:p.employeeId ?? p.employeeNo, type:p.direction, at:attendanceWallClockTime(p), raw:p })), windowMs);
+  const duplicateIds = bursts.flatMap(b=>b.removed.flatMap(r=>r.raw.rawLogId==null?[]:[r.raw.rawLogId]));
+  // DTR/file rows lack authoritative upload, correction and source-version evidence.
+  // Only the source-aware duplicate workflow may automatically void real captures.
+  if (duplicateIds.length) suggestions.push({
+    correctionType:"Same-Direction Duplicate", confidence:80, autoApprove:false,
+    reason:`${duplicateIds.length} same-direction punch(es) fall within an anchored ${windowMs/60_000}-minute window. Review the retained capture and original evidence before approving.`,
+    payload:buildPayload({rawLogs, ignoredRawLogIds:duplicateIds, summary:withAnomalyFlags(summarizeEmployeeDay(args.attendanceDate,rawLogs.filter(p=>p.rawLogId==null||!duplicateIds.includes(p.rawLogId)),args.shift,args.summary.paidLeaveMinutes,args.summary.unpaidLeaveMinutes),[ATTENDANCE_DOUBLE_PUNCH_FLAG])}),
+  });
+  // Pending suggestions cannot remove punches from other correction proposals.
+  const duplicateEffectiveLogs = rawLogs;
 
   if (args.summary.anomalyFlags.includes("NO_LOGS")) {
     suggestions.push({

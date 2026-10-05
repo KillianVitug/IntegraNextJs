@@ -73,10 +73,10 @@ export async function invalidateResolutionPeriod(tx: DbClient, periodId: string,
   }
 }
 async function audit(tx: DbClient, actor: string, id: string, action: string, details: unknown) { await tx.insert(adminAuditEvents).values({ actorUserId: actor, entityType: "attendance_resolution", entityId: id, action, details: JSON.stringify(details) }); }
-export type SourceCorrectionRequest = { id: string; eventId: string; action: "VOID" | "RESTORE"; reason: string; actor: string; expectedVersion: string; expectedEmployeeId: string; expectedUpdatedAt: string; confirmed?: boolean };
+export type SourceCorrectionRequest = { id: string; eventId: string; action: "VOID" | "RESTORE"; reason: string; actor: string; expectedVersion: string; expectedEmployeeId: string; expectedUpdatedAt: string; confirmed?: boolean; duplicate?: {keptEventId:string;eventIds:string[];ruleVersion:string;automatic:boolean;enabledAfter:string|null;contextToken:string;from:string;through:string} };
 
 /** The caller supplies a transaction and a server-authenticated administrator. */
-export async function proposeAttendanceResolution(tx: DbClient, actor: string, request: ResolutionRequest) {
+export async function proposeAttendanceResolution(tx: DbClient, actor: string, request: ResolutionRequest, allowAdjacentSourceRecords = false) {
   enabled(); if (!request || !uuid.test(request.periodId) || request.confirmed !== true || !["Manual", "NoAttendance", "SourceVoid", "SourceRestore"].includes(request.kind)) fail("Review and confirm the proposed treatment before saving.");
   for (const value of [request.reason, request.evidence]) if (typeof value !== "string" || value.trim().length < 3 || value.length > 500) fail("Enter the verification evidence and reason (3–500 characters each).");
   await lockAttendancePayrollInput(tx);
@@ -100,7 +100,7 @@ export async function proposeAttendanceResolution(tx: DbClient, actor: string, r
     const impacted = await tx.selectDistinct({ periodId: projections.payrollPeriodId }).from(projections).where(inArray(projections.eventId, request.eventIds));
     for (const p of impacted.sort((a, b) => a.periodId.localeCompare(b.periodId))) await openPeriod(tx, p.periodId);
     sourceRequests = request.eventIds.map(eventId => {
-      const punch = person.records.find(p => p.eventId === eventId && person.relevantIds.includes(eventId));
+      const punch = person.records.find(p => p.eventId === eventId && (person.relevantIds.includes(eventId) || allowAdjacentSourceRecords));
       if (!punch || punch.status !== (request.kind === "SourceVoid" ? "VALID" : "VOID") || punch.correctionVersion === undefined) fail("A selected source record changed or needs a fresh sync. Review it again.");
       return { id: randomUUID(), eventId, action: request.kind === "SourceVoid" ? "VOID" : "RESTORE", reason: `Integra ${id}: ${request.reason.trim()} | Evidence: ${request.evidence.trim()}`.replace(/\s+/g, " "), actor, expectedVersion: punch.correctionVersion!, expectedEmployeeId: punch.employeeId, expectedUpdatedAt: punch.updatedAt };
     });
@@ -151,15 +151,18 @@ export async function applySourceResolution(id: string, actor: string, justAppro
   await database.transaction(async tx => {
     await lockAttendancePayrollInput(tx);
     const impacted = await tx.selectDistinct({ periodId: projections.payrollPeriodId }).from(projections).where(inArray(projections.eventId, row.eventIds as string[]));
-    for (const p of impacted.sort((a, b) => a.periodId.localeCompare(b.periodId))) await openPeriod(tx, p.periodId);
+    const duplicatePeriods=(row.duplicateMetadata as {impactedPeriodIds?:string[]}|null)?.impactedPeriodIds??[];
+    for (const periodId of [...new Set([row.payrollPeriodId,...impacted.map(p=>p.periodId),...duplicatePeriods])].sort()) await openPeriod(tx, periodId);
   });
   let succeeded = 0;
+  let sourceConflict = false;
   const deliveryDeadline = Date.now() + 35000;
   for (const request of row.sourceRequests as SourceCorrectionRequest[]) {
     if (request.confirmed) { succeeded++; continue; }
     if (Date.now() > deliveryDeadline) break;
     try {
       const response = await fetcher(new URL("/v1/integra/corrections", origin), { method: "POST", redirect: "error", cache: "no-store", signal: AbortSignal.timeout(8000), headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.ATTENDANCE_CORRECTION_TOKEN ?? ""}` }, body: JSON.stringify(request) });
+      if(response.status===409 && request.duplicate) { sourceConflict=true; break; }
       if (!response.ok) throw Error("Not confirmed");
       const result = await response.json(); if (result.accepted !== true || result.id !== request.id) throw Error("Not confirmed");
       request.confirmed = true;
@@ -168,10 +171,10 @@ export async function applySourceResolution(id: string, actor: string, justAppro
     } catch { break; }
   }
   const total = (row.sourceRequests as SourceCorrectionRequest[]).length, complete = succeeded === total;
-  const message = complete ? `Source confirmed ${total} correction(s). Sync every affected period to confirm payroll input.` : `${succeeded} of ${total} source corrections confirmed in this attempt. Sync to inspect current records, then retry delivery with the same request IDs. No confirmed correction is repeated.`;
+  const message = sourceConflict ? "Source evidence changed and the duplicate request was rejected. Sync, review the current records and create a fresh proposal. Earlier confirmed corrections are retained." : complete ? `Source confirmed ${total} correction(s). Sync every affected period to confirm payroll input.` : `${succeeded} of ${total} source corrections confirmed in this attempt. Sync to inspect current records, then retry delivery with the same request IDs. No confirmed correction is repeated.`;
   await database.transaction(async tx => {
     await lockAttendancePayrollInput(tx);
-    await tx.update(resolutions).set({ state: complete ? "Applied" : "Failed", result: message, updatedAt: sql`clock_timestamp()` }).where(and(eq(resolutions.id, id), inArray(resolutions.state, ["Sending", "Failed"])));
+    await tx.update(resolutions).set({ state: sourceConflict ? "Expired" : complete ? "Applied" : "Failed", result: message, updatedAt: sql`clock_timestamp()` }).where(and(eq(resolutions.id, id), inArray(resolutions.state, ["Sending", "Failed"])));
     await audit(tx, actor, id, "attendance.source_delivery", { succeeded, total, complete });
   });
   return message;

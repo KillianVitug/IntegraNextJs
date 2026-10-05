@@ -1,0 +1,108 @@
+import assert from "node:assert/strict";
+import {randomUUID} from "node:crypto";
+import {eq,sql} from "drizzle-orm";
+import {matchingDatabase} from "./attendanceTest/matchingDatabase";
+import {employees,payrollPeriods,payrollRuns,employeesGeneralInfo,employeesTimekeeping} from "@/db/schema";
+import {attendanceSourceMappings as mappings,attendanceSourceRuns as runs,attendanceResolutions as resolutions,attendanceDuplicatePolicy as policies} from "@/db/attendanceSourceSchema";
+import {duplicateBursts,duplicateCandidates,type DuplicatePolicy} from "@/lib/payroll/attendanceDuplicateModel";
+import {loadDuplicateBoard,setDuplicatePolicy,approveDuplicateBatch,undoDuplicate,processAutomaticDuplicates} from "@/lib/payroll/attendanceDuplicates";
+import {reconcileAttendanceSource} from "@/lib/payroll/attendanceSourceSync";
+import {detectAttendanceCorrectionSuggestions} from "@/lib/payroll/attendanceCorrections";
+import {summarizeEmployeeDay,type ParsedAttendanceLog} from "@/lib/payroll/attendance";
+import type {SourcePunch} from "@/lib/payroll/attendanceSourceClient";
+import type {DbClient} from "@/db";
+import {duplicateImpactSafe} from "@/lib/payroll/attendanceDuplicateImpact";
+import {assertAttendanceSourceReady} from "@/lib/payroll/attendanceSourceGuard";
+
+async function main(){
+ process.env.ATTENDANCE_SOURCE_ENABLED="true";process.env.ATTENDANCE_SOURCE_ORIGIN="https://fixture.example.test";process.env.ATTENDANCE_CORRECTION_TOKEN="fictional-duplicate-key".repeat(4);
+ const {pg,database,client}=await matchingDatabase(),periodId=randomUUID(),actor=randomUUID(),employeeId=randomUUID(),deviceId=randomUUID();
+ await database.insert(employees).values({id:employeeId,employeeNo:"00003",firstName:"Fictional",lastName:"Employee"});
+ await database.insert(mappings).values({sourceEmployeeId:"3",employeeId,actorUserId:actor,reason:"Verified fixture"});
+ await database.insert(payrollPeriods).values({id:periodId,code:"FIXTURE-DUPLICATES",payrollTerms:"Semi-Monthly",cycle:"B",year:2026,month:9,startDate:"2026-09-16",endDate:"2026-09-30",nominalPayDate:"2026-09-30",adjustedPayDate:"2026-09-30"});
+ await database.insert(payrollRuns).values({payrollPeriodId:periodId,status:"Reviewed",runNumber:1});
+ const punch=(type:"IN"|"OUT",time:string,flags:string[]=[]):SourcePunch=>({eventId:randomUUID(),employeeId:"3",employeeName:"Fictional Employee",originalEmployeeId:"3",originalEmployeeName:"Fictional Employee",type,branchId:"B1",deviceId,capturedAt:`2026-09-30T${time}Z`,receivedAt:`2026-09-30T${time}Z`,updatedAt:`2026-09-30T${time}Z`,status:"VALID",correctionVersion:"original",reviewFlags:flags,reviewResolved:false,clockFlag:false,duplicateExcluded:false});
+ let records=[punch("IN","00:00:00.000",["NO_FOLLOWING_OUT"]),punch("IN","00:00:30.000",["CONSECUTIVE_IN"]),punch("OUT","09:00:00.000")];
+ const config:DuplicatePolicy={mode:"Automatic",revision:randomUUID(),enabledAfter:"2026-09-01T00:00:00Z"};
+ const candidates=(r=records,p=config)=>duplicateCandidates(r,"2026-09-16","2026-09-30",p,{verified:true,conflictingDecision:false,version:"fixture"});
+ assert.equal(candidates()[0].eligible,true);
+ const at=(r:SourcePunch,ms:number)=>({...r,capturedAt:new Date(Date.parse(records[0].capturedAt)+ms).toISOString()});
+ assert.equal(candidates([records[0],at(records[1],60000),records[2]])[0].eligible,true);
+ assert.equal(candidates([records[0],at(records[1],60001),records[2]])[0].eligible,false);
+ assert.equal(candidates([records[0],{...records[1],deviceId:randomUUID()},records[2]])[0].eligible,false);
+ assert.equal(candidates([records[0],{...records[1],branchId:"B2"},records[2]])[0].eligible,false);
+ assert.equal(candidates([records[0],{...records[1],clockFlag:true},records[2]])[0].eligible,false);
+ assert.equal(candidates([records[0],{...records[1],duplicateExcluded:true},records[2]])[0].eligible,false);
+ assert.equal(candidates(records,{...config,enabledAfter:"2026-10-01T00:00:00Z"})[0].eligible,false);
+ assert.equal(candidates(records.slice(0,2))[0].eligible,false,"a missing OUT is not repaired by a duplicate void");
+ assert.equal(duplicateCandidates(records,"2026-09-16","2026-09-30",config,{verified:false,conflictingDecision:false,version:"x"})[0].eligible,false);
+ assert.equal(duplicateCandidates(records,"2026-09-16","2026-09-30",config,{verified:true,conflictingDecision:true,version:"x"})[0].eligible,false);
+ assert.equal(duplicateBursts([{id:"1",person:"p",type:"IN",at:0},{id:"2",person:"p",type:"OUT",at:10},{id:"3",person:"p",type:"IN",at:20}]).length,0);
+ assert.deepEqual(duplicateBursts([0,50000,100000].map((at,i)=>({id:String(i),person:"p",type:"IN",at})),60000).map(b=>b.removed.length),[1]);
+ const overnight=[{...records[0],capturedAt:"2026-09-30T15:59:45Z"},{...records[1],capturedAt:"2026-09-30T16:00:15Z"},{...records[2],capturedAt:"2026-09-30T22:00:00Z"}];
+ assert.equal(candidates(overnight).length,1,"cutoff burst remains visible with adjacent-day context");
+ for(const [sequence,expected]of [ [[['IN','08:00:00'],['IN','09:59:00'],['OUT','17:00:00']],0], [[['IN','08:00:00'],['OUT','08:05:00']],0], [[['IN','08:00:00'],['IN','08:02:00'],['OUT','17:00:00']],1] ] as const){
+  const logs:ParsedAttendanceLog[]=sequence.map(([direction,time],i)=>({rawLogId:i+1,employeeNo:"TEST",loggedAt:new Date(`2026-09-30T${time}Z`),logDate:"2026-09-30",logTime:time,direction,sourceLine:i,rawText:"fixture"}));
+  const shift={checkInTime:"08:00",checkOutTime:"17:00",breakMinutes:60,hoursPerDay:8};
+  const found=detectAttendanceCorrectionSuggestions({attendanceDate:"2026-09-30",logs,shift,summary:summarizeEmployeeDay("2026-09-30",logs,shift),allowSameDirectionAutoDuplicate:false}).filter(r=>r.correctionType.includes("Duplicate"));
+  assert.equal(found.length,expected);assert.ok(found.every(r=>!r.autoApprove));
+ }
+ const dbForWorkflow=database as unknown as Parameters<typeof approveDuplicateBatch>[6];
+ await database.insert(employeesGeneralInfo).values({employeeId,employmentStatus:"Regular"});
+ await database.insert(employeesTimekeeping).values({employeeId,checkInTime:"08:00",checkOutTime:"17:00",hoursWorked:"8"});
+ const neutral=[{...records[0],capturedAt:"2026-09-29T23:50:00.000Z"},{...records[1],capturedAt:"2026-09-29T23:50:00.100Z"},records[2]];
+ assert.equal(await duplicateImpactSafe(client,periodId,employeeId,"00003",neutral,candidates(neutral)[0],"2026-09-16","2026-09-30"),true,"same rounded schedule metrics can pass");
+ const boundary=[{...records[0],capturedAt:"2026-09-30T00:30:45.000Z"},{...records[1],capturedAt:"2026-09-30T00:31:15.000Z"},records[2]];
+ assert.equal(await duplicateImpactSafe(client,periodId,employeeId,"00003",boundary,candidates(boundary)[0],"2026-09-16","2026-09-30"),false,"crossing a paid-time rounding threshold requires review");
+ await database.update(employeesGeneralInfo).set({employmentStatus:"Resigned"});
+ assert.equal(await duplicateImpactSafe(client,periodId,employeeId,"00003",neutral,candidates(neutral)[0],"2026-09-16","2026-09-30"),false,"separated employees require review");
+ await database.update(employeesGeneralInfo).set({employmentStatus:"Regular"});
+ const sync=async()=>{const id=randomUUID();await database.insert(runs).values({id,payrollPeriodId:periodId,state:"Fetching",actorUserId:actor,fromDate:"2026-09-15",throughDate:"2026-10-01",startedAt:sql`clock_timestamp()`});return reconcileAttendanceSource(database as unknown as Parameters<typeof reconcileAttendanceSource>[0],periodId,id,actor,records);};
+ await sync();let board=await loadDuplicateBoard(periodId,client);assert.equal(board.policy.mode,"Suggest");assert.equal(board.candidates.length,1);
+ await database.transaction(tx=>setDuplicatePolicy(tx as unknown as DbClient,actor,"Off",board.policy.revision,true));assert.equal((await loadDuplicateBoard(periodId,client)).candidates.length,0);
+ await assert.rejects(()=>database.transaction(tx=>setDuplicatePolicy(tx as unknown as DbClient,actor,"Automatic",board.policy.revision,true)),/policy changed/);
+ board=await loadDuplicateBoard(periodId,client);await database.transaction(tx=>setDuplicatePolicy(tx as unknown as DbClient,actor,"Suggest",board.policy.revision,true));
+ let failDelivery=true,deliveryCount=0,lateContext=false;const seen=new Map<string,string>();
+ const fetcher:typeof fetch=async(_input,init)=>{
+  const p=JSON.parse(String(init?.body));
+  if(p.operation==="duplicateContext")return Response.json({contextToken:"a".repeat(64),settled:true,coverageThrough:Date.now(),records:[...records,...lateContext?[punch("OUT","00:00:15.000")]:[]].map(r=>({id:r.eventId,type:r.type,at:r.capturedAt,action:r.status==="VOID"?"VOID":"RESTORE",device:r.deviceId,branch:r.branchId,version:r.correctionVersion,updatedAt:r.updatedAt,clock:Number(r.clockFlag),excluded:Number(!!r.duplicateExcluded),reviewFlags:r.reviewFlags,reviewResolved:r.reviewResolved}))});
+  deliveryCount++;if(failDelivery)throw Error("fictional transport failure");
+  if(!seen.has(p.id)){
+   if(p.duplicate){records=records.map(r=>p.duplicate.eventIds.includes(r.eventId)?{...r,status:"VOID",correctionVersion:randomUUID(),duplicateGroupId:p.id,updatedAt:new Date().toISOString()}:({...r,reviewFlags:[]}));}
+   else records=records.map(r=>r.eventId===p.eventId?{...r,status:"VALID",duplicateExcluded:true,duplicateGroupId:undefined,correctionVersion:randomUUID(),updatedAt:new Date().toISOString()}:r);
+   seen.set(p.id,JSON.stringify(p));
+  }return Response.json({accepted:true,id:p.id});
+ };
+ board=await loadDuplicateBoard(periodId,client);const selected=board.candidates.map(c=>({id:c.id,version:c.version}));
+ const relatedPeriod=randomUUID();await database.insert(payrollPeriods).values({id:relatedPeriod,code:"FIXTURE-RELATED",payrollTerms:"Semi-Monthly",cycle:"B",year:2026,month:9,startDate:"2026-09-30",endDate:"2026-10-15",nominalPayDate:"2026-10-15",adjustedPayDate:"2026-10-15"});
+ await assert.rejects(()=>approveDuplicateBatch(periodId,[{...selected[0],version:"stale"}],"Fixture evidence",true,actor,false,dbForWorkflow,fetcher),/selection changed/);
+ lateContext=true;await assert.rejects(()=>approveDuplicateBatch(periodId,selected,"Fixture evidence",true,actor,false,dbForWorkflow,fetcher),/Source evidence changed/);assert.equal((await database.select().from(resolutions)).length,0,"unseen neighbor must reject the whole approval");lateContext=false;
+ const applied=await approveDuplicateBatch(periodId,selected,"Supervisor verified repeated capture",true,actor,false,dbForWorkflow,fetcher);
+ assert.equal((await database.select().from(resolutions).where(eq(resolutions.id,applied.ids[0])))[0].state,"Failed");
+ assert.equal((await database.select().from(payrollRuns))[0].status,"Stale");
+ await assert.rejects(()=>assertAttendanceSourceReady(relatedPeriod,client),/resolutions need approval/,"pending correction holds a related period even before its first import");
+ const {applySourceResolution}=await import("@/lib/payroll/attendanceResolution");failDelivery=false;
+ await database.update(payrollPeriods).set({status:"Closed"}).where(eq(payrollPeriods.id,relatedPeriod));
+ await assert.rejects(()=>applySourceResolution(applied.ids[0],actor,false,dbForWorkflow,fetcher),/closed or posted/);
+ await database.update(payrollPeriods).set({status:"Open"}).where(eq(payrollPeriods.id,relatedPeriod));
+ await database.update(resolutions).set({state:"Failed"}).where(eq(resolutions.id,applied.ids[0]));
+ await applySourceResolution(applied.ids[0],actor,false,dbForWorkflow,fetcher);assert.equal(deliveryCount,2);await sync();
+ board=await loadDuplicateBoard(periodId,client);assert.equal(board.candidates.length,0);assert.equal(board.history[0].canUndo,true);
+ await database.update(payrollRuns).set({status:"Posted"});await assert.rejects(()=>undoDuplicate(applied.ids[0],"Restore verified fixture",actor,dbForWorkflow,fetcher),/closed or posted/);
+ await database.update(payrollRuns).set({status:"Stale"});await undoDuplicate(applied.ids[0],"Restore verified fixture",actor,dbForWorkflow,fetcher);await sync();
+ assert.equal((await loadDuplicateBoard(periodId,client)).candidates[0].eligible,false);
+ assert.ok(records[1].duplicateExcluded);await assert.rejects(()=>undoDuplicate(applied.ids[0],"Repeat undo",actor,dbForWorkflow,fetcher),/already requested/);
+ assert.equal((await database.select().from(policies))[0].mode,"Suggest");
+ // Exercise the actual automatic approval and outbox with an isolated, pay-neutral burst.
+ records=records.map((r,i)=>i===1?{...r,status:"VOID" as const}:r);
+ const autoRecords=neutral.map(r=>({...r,eventId:randomUUID(),capturedAt:r.capturedAt.replace("2026-09-29","2026-09-28").replace("2026-09-30","2026-09-29"),reviewFlags:[],duplicateExcluded:false}));
+ records.push(...autoRecords);await sync();board=await loadDuplicateBoard(periodId,client);
+ await database.transaction(tx=>setDuplicatePolicy(tx as unknown as DbClient,actor,"Automatic",board.policy.revision,true));
+ await database.update(policies).set({enabledAfter:new Date("2026-09-01T00:00:00Z")}); // Fixture clock only; never backdate activation in production.
+ board=await loadDuplicateBoard(periodId,client);const autoCandidate=board.candidates.find(c=>c.id===autoRecords[0].eventId)!;assert.equal(autoCandidate.eligible,true);
+ assert.equal(await processAutomaticDuplicates(periodId,actor,dbForWorkflow,fetcher),1,"actual automatic runner confirms a pay-neutral group");
+ const automaticRows=await database.select().from(resolutions).where(sql`${resolutions.duplicateMetadata}->>'automatic'='true'`);assert.equal(automaticRows.length,1);assert.equal(automaticRows[0].state,"Applied");
+ assert.equal(records.find(r=>r.eventId===autoRecords[1].eventId)!.status,"VOID");
+ await pg.close();console.log("Duplicate rules and SQL workflow passed: exact boundary, fixed bursts, opposite punches, phone/branch/clock/identity/decision/history checks, cutoff context, narrowed DTR rules, atomic approval, stale selection, failed-delivery retry, reversal, persistent exclusion and posted protection.");
+}
+main().catch(e=>{console.error(e);process.exit(1);});

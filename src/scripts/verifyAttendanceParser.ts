@@ -947,18 +947,7 @@ const fixedDoublePunchCorrection = getCorrectionByType(
   "Same-Direction Duplicate"
 );
 
-assert.ok(fixedDoublePunchCorrection);
-assert.equal(fixedDoublePunchCorrection.autoApprove, true);
-assert.deepEqual(fixedDoublePunchCorrection.payload.ignoredRawLogIds, [2]);
-assert.deepEqual(
-  fixedDoublePunchCorrection.payload.effectivePunches.map((punch) => punch.logTime),
-  ["08:00:00", "17:00:00"]
-);
-assert.ok(
-  fixedDoublePunchCorrection.payload.proposedMetrics?.anomalyFlags.includes(
-    ATTENDANCE_DOUBLE_PUNCH_FLAG
-  )
-);
+assert.equal(fixedDoublePunchCorrection, undefined, "Thirty-minute gaps require individual review.");
 
 const fixedDoublePunchSummaries = buildAttendanceSummaryComputations({
   employees: [doublePunchEmployee],
@@ -976,16 +965,9 @@ const fixedDoublePunchFlags = parseStoredAnomalyFlags(
   fixedDoublePunchSummaries[0].anomalyFlags
 );
 
-assert.ok(fixedDoublePunchFlags.includes(ATTENDANCE_DOUBLE_PUNCH_FLAG));
-assert.equal(fixedDoublePunchFlags.includes("ODD_PUNCH_COUNT"), false);
-assert.equal(fixedDoublePunchFlags.includes("MISSING_OUT"), false);
-assert.equal(fixedDoublePunchSummaries[0].firstInAt?.getHours(), 8);
-assert.equal(fixedDoublePunchSummaries[0].lastOutAt?.getHours(), 17);
-assert.equal(fixedDoublePunchSummaries[0].workedMinutes, 480);
-assert.equal(
-  getComputedAttendanceDtrStatus(toDtrMetrics(fixedDoublePunchSummaries[0])),
-  "Present"
-);
+assert.equal(fixedDoublePunchFlags.includes(ATTENDANCE_DOUBLE_PUNCH_FLAG), false);
+assert.ok(fixedDoublePunchFlags.includes("ODD_PUNCH_COUNT"));
+assert.equal(getComputedAttendanceDtrStatus(toDtrMetrics(fixedDoublePunchSummaries[0])), "Hold");
 
 const shortWindowDoublePunchSuggestions =
   buildAttendanceCorrectionSuggestionComputations({
@@ -1009,7 +991,7 @@ assert.equal(
 assert.equal(
   getCorrectionByType(shortWindowDoublePunchSuggestions, "Same-Direction Duplicate")
     ?.autoApprove,
-  true
+  false
 );
 
 const proximityDuplicatePunchSuggestions =
@@ -1031,15 +1013,7 @@ const proximityDuplicatePunchCorrection = getCorrectionByType(
   "Duplicate Punch"
 );
 
-assert.ok(proximityDuplicatePunchCorrection);
-assert.equal(proximityDuplicatePunchCorrection.autoApprove, true);
-assert.deepEqual(proximityDuplicatePunchCorrection.payload.ignoredRawLogIds, [32]);
-assert.deepEqual(
-  proximityDuplicatePunchCorrection.payload.effectivePunches.map(
-    (punch) => punch.logTime
-  ),
-  ["08:00:00", "17:00:00"]
-);
+assert.equal(proximityDuplicatePunchCorrection, undefined, "Opposite-direction punches must be preserved.");
 
 const proximityDuplicatePunchSummaries = buildAttendanceSummaryComputations({
   employees: [doublePunchEmployee],
@@ -1061,12 +1035,10 @@ const proximityDuplicatePunchFlags = parseStoredAnomalyFlags(
   proximityDuplicatePunchSummaries[0].anomalyFlags
 );
 
-assert.ok(proximityDuplicatePunchFlags.includes(ATTENDANCE_DOUBLE_PUNCH_FLAG));
-assert.equal(proximityDuplicatePunchFlags.includes("ODD_PUNCH_COUNT"), false);
-assert.equal(proximityDuplicatePunchFlags.includes("MISSING_OUT"), false);
-assert.equal(proximityDuplicatePunchSummaries[0].firstInAt?.getHours(), 8);
-assert.equal(proximityDuplicatePunchSummaries[0].lastOutAt?.getHours(), 17);
-assert.equal(proximityDuplicatePunchSummaries[0].workedMinutes, 480);
+assert.equal(proximityDuplicatePunchFlags.includes(ATTENDANCE_DOUBLE_PUNCH_FLAG), false);
+assert.ok(proximityDuplicatePunchFlags.includes("ODD_PUNCH_COUNT"));
+assert.equal(proximityDuplicatePunchSummaries[0].lastOutAt?.getHours(), 8, "The genuine early OUT is retained.");
+assert.equal(getComputedAttendanceDtrStatus(toDtrMetrics(proximityDuplicatePunchSummaries[0])), "Hold");
 
 const oppositeDirectionSuggestions = buildAttendanceCorrectionSuggestionComputations({
   employees: [doublePunchEmployee],
@@ -1203,13 +1175,7 @@ const flexibleDoublePunchCorrection = getCorrectionByType(
   "Same-Direction Duplicate"
 );
 
-assert.ok(flexibleDoublePunchCorrection);
-assert.equal(flexibleDoublePunchCorrection.autoApprove, true);
-assert.deepEqual(flexibleDoublePunchCorrection.payload.ignoredRawLogIds, [2]);
-assert.deepEqual(
-  flexibleDoublePunchCorrection.payload.effectivePunches.map((punch) => punch.logTime),
-  ["08:00:00", "17:00:00"]
-);
+assert.equal(flexibleDoublePunchCorrection, undefined);
 
 const flexibleDoublePunchSummaries = buildAttendanceSummaryComputations({
   employees: [doublePunchEmployee],
@@ -1227,11 +1193,8 @@ const flexibleDoublePunchFlags = parseStoredAnomalyFlags(
   flexibleDoublePunchSummaries[0].anomalyFlags
 );
 
-assert.ok(flexibleDoublePunchFlags.includes(ATTENDANCE_DOUBLE_PUNCH_FLAG));
-assert.equal(flexibleDoublePunchFlags.includes("ODD_PUNCH_COUNT"), false);
-assert.equal(flexibleDoublePunchFlags.includes("MISSING_OUT"), false);
-assert.equal(flexibleDoublePunchSummaries[0].firstInAt?.getHours(), 8);
-assert.equal(flexibleDoublePunchSummaries[0].lastOutAt?.getHours(), 17);
-assert.equal(flexibleDoublePunchSummaries[0].workedMinutes, 480);
+assert.equal(flexibleDoublePunchFlags.includes(ATTENDANCE_DOUBLE_PUNCH_FLAG), false);
+assert.ok(flexibleDoublePunchFlags.includes("ODD_PUNCH_COUNT"));
+assert.equal(getComputedAttendanceDtrStatus(toDtrMetrics(flexibleDoublePunchSummaries[0])), "Hold");
 
 console.log("Attendance parser fixtures passed.");

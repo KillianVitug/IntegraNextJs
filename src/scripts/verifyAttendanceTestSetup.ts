@@ -52,6 +52,7 @@ async function main() {
     await pg.exec(await readFile("src/db/migrations/0119_attendance_source.sql", "utf8")); // In-memory fixture ONLY.
     await pg.exec(await readFile("src/db/migrations/0120_attendance_matching_workflow.sql", "utf8"));
     await pg.exec(await readFile("src/db/migrations/0121_attendance_resolution.sql", "utf8"));
+  await pg.exec(await readFile("src/db/migrations/0122_attendance_duplicates.sql", "utf8"));
     await test("schema preflight accepts required fixture schema", async () => { const report = await readOnly(database, inspectSchema); assert.deepEqual(report.differences, []); });
     await test("schema type drift is reported without repair", async () => { await pg.exec("ALTER TABLE attendance_source_events ALTER COLUMN revision TYPE bigint"); const report = await readOnly(database, inspectSchema); assert.ok(report.differences.some(r => r.column === "revision" && r.issue === "different_type")); await pg.exec("ALTER TABLE attendance_source_events ALTER COLUMN revision TYPE integer"); });
     const person = c.mappings[0].employeeId;

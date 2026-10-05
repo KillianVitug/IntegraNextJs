@@ -52,6 +52,7 @@ async function verify() {
       await pg.exec(await readFile("src/db/migrations/0119_attendance_source.sql", "utf8"));
       await pg.exec(await readFile("src/db/migrations/0120_attendance_matching_workflow.sql", "utf8"));
     await pg.exec(await readFile("src/db/migrations/0121_attendance_resolution.sql", "utf8"));
+  await pg.exec(await readFile("src/db/migrations/0122_attendance_duplicates.sql", "utf8"));
       const employeeId = randomUUID(), periodId = randomUUID(), actor = randomUUID();
       const endDate = sourceDayOffset(scenario.date, 1);
       await database.insert(schema.employees).values({ id: employeeId, employeeNo: "0001", firstName: "Synthetic", lastName: "Timezone" });
