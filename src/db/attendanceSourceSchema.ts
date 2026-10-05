@@ -32,3 +32,34 @@ export const attendanceSourceProjections = pgTable("attendance_source_projection
 export const attendanceSourcePeriods = pgTable("attendance_source_periods", {
   payrollPeriodId: uuid("payroll_period_id").primaryKey().references(() => payrollPeriods.id), inputRunId: uuid("input_run_id").notNull().references(() => attendanceSourceRuns.id), summariesRunId: uuid("summaries_run_id").references(() => attendanceSourceRuns.id),
 });
+
+// Classification never changes source evidence or suppresses payroll exceptions.
+export const attendanceSourceIdentities = pgTable("attendance_source_identities", {
+  sourceEmployeeId: text("source_employee_id").primaryKey(),
+  classification: text("classification").notNull().default("Active"),
+  revision: uuid("revision").notNull().defaultRandom(),
+  actorUserId: text("actor_user_id").notNull(),
+  reason: text("reason").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export const attendanceMatchBatches = pgTable("attendance_match_batches", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  kind: text("kind").notNull(),
+  actorUserId: text("actor_user_id").notNull(),
+  reason: text("reason").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [index("attendance_match_batches_created").on(t.createdAt, t.id)]);
+export const attendanceMatchChanges = pgTable("attendance_match_changes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  batchId: uuid("batch_id").notNull().references(() => attendanceMatchBatches.id),
+  sourceEmployeeId: text("source_employee_id").notNull(),
+  sourceName: text("source_name").notNull(),
+  beforeEmployeeId: uuid("before_employee_id").references(() => employees.id),
+  afterEmployeeId: uuid("after_employee_id").references(() => employees.id),
+  beforeEmployeeLabel: text("before_employee_label"),
+  afterEmployeeLabel: text("after_employee_label"),
+  beforeClassification: text("before_classification").notNull(),
+  afterClassification: text("after_classification").notNull(),
+  afterRevision: uuid("after_revision").notNull(),
+  reversesChangeId: uuid("reverses_change_id"),
+}, t => [index("attendance_match_changes_batch").on(t.batchId), index("attendance_match_changes_source").on(t.sourceEmployeeId)]);

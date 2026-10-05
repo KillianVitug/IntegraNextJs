@@ -15,7 +15,7 @@ export function searchableName(value: string) {
   return value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 function nameKey(value: string) { return searchableName(value).split(/\s+/).sort().join(" "); }
-function codeKey(value: string) { return /^\d+$/.test(value.trim()) ? value.trim().replace(/^0+(?=\d)/, "") : value.trim(); }
+export function codeKey(value: string) { return /^\d+$/.test(value.trim()) ? value.trim().replace(/^0+(?=\d)/, "") : value.trim(); }
 export function matchesSearch(query: string, ...values: string[]) {
   const haystack = searchableName(values.join(" "));
   return searchableName(query).split(/\s+/).every(word => haystack.includes(word));
@@ -41,4 +41,51 @@ export function verificationReason(method: string, note: string) {
   const selected = verificationMethods.find(item => item.value === method);
   if (!selected || method === "other" && !note.trim()) return null;
   return `${selected.label}.${note.trim() ? ` ${note.trim()}` : ""}`;
+}
+
+export type IdentityClassification = "Active" | "TestOnly" | "NeedsReview";
+export type MatchPerson = AttendancePerson & {
+  employeeId: string | null; classification: IdentityClassification; version: string;
+  classificationReason: string; classificationActor: string | null; classificationAt: string | null;
+};
+export type BatchMatchItem = { sourceId: string; employeeId: string; version: string; reviewed: boolean };
+export type MatchHistoryChange = {
+  id: string; sourceId: string; sourceName: string; beforeEmployeeId: string | null; afterEmployeeId: string | null;
+  beforeLabel: string | null; afterLabel: string | null; beforeClassification: string; afterClassification: string;
+  canUndo: boolean; reversesChangeId: string | null;
+};
+export type MatchHistoryBatch = { id: string; kind: string; actor: string; reason: string; createdAt: string; changes: MatchHistoryChange[] };
+export type MatchBoard = { people: MatchPerson[]; employees: PayrollMatchEmployee[]; history: MatchHistoryBatch[]; historyCursor: string | null };
+export type MatchMutation =
+  | { kind: "Match"; items: BatchMatchItem[]; method: string; note: string; confirmed: boolean; nameDifferencesAcknowledged?: boolean }
+  | { kind: "Unmatch" | "TestOnly" | "Restore"; sourceId: string; version: string; reason: string; confirmed: boolean }
+  | { kind: "Undo"; batchId: string; items: { changeId: string; version: string }[]; reason: string; confirmed: boolean };
+export type WorkflowResult = { ok: true; data: { message: string; board: MatchBoard; batchId: string } } | { ok: false; error: string };
+
+export function sameIdCandidates(person: AttendancePerson, employees: PayrollMatchEmployee[]) {
+  const key = codeKey(person.sourceId);
+  return key ? employees.filter(e => codeKey(e.employeeNo) === key) : [];
+}
+export function nameDifferenceWarning(person: AttendancePerson, employee: PayrollMatchEmployee) {
+  if (!person.names.length || person.names.some(name => !nameKey(name)) || !nameKey(employee.name)) return "Name information is missing. Check this identity before confirming.";
+  return person.names.every(name => nameKey(name) === nameKey(employee.name)) ? null : "Names differ. Check this identity before confirming.";
+}
+export function identityReviewReason(person: AttendancePerson, people: AttendancePerson[], employees: PayrollMatchEmployee[]) {
+  if (people.filter(p => codeKey(p.sourceId) === codeKey(person.sourceId)).length > 1) return "Multiple attendance IDs become the same number after removing leading zeros. Review individually.";
+  const candidates = sameIdCandidates(person, employees);
+  return candidates.length > 1 ? `${candidates.length} Integra employees share this employee number. Choose the correct person in Review match.` : "No active Integra employee has this employee number. Review individually.";
+}
+/** Unique IDs create suggestions; name differences require acknowledgment at save. */
+export function batchSuggestion(person: AttendancePerson, people: AttendancePerson[], employees: PayrollMatchEmployee[]) {
+  const key = codeKey(person.sourceId);
+  if (!key || people.filter(p => codeKey(p.sourceId) === key).length !== 1) return null;
+  const candidates = sameIdCandidates(person, employees);
+  if (candidates.length !== 1) return null;
+  return candidates[0];
+}
+export function matchQueue(person: MatchPerson, people: MatchPerson[], employees: PayrollMatchEmployee[]) {
+  if (person.classification === "TestOnly") return "test";
+  if (person.employeeId && employees.some(e => e.id === person.employeeId)) return "matched";
+  if (!person.employeeId && person.classification === "Active" && batchSuggestion(person, people, employees)) return "suggested";
+  return "review";
 }
