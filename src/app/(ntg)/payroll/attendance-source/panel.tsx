@@ -73,7 +73,7 @@ export function AttendanceSourcePanel(props: Props) {
 
     {props.duplicates && <DuplicateReview key={`${period}:${props.duplicates.policy.revision}:${props.duplicates.history.map(h=>h.id+h.state).join()}:${props.duplicates.candidates.map(c=>c.version).join()}`} periodId={period} initial={props.duplicates} refresh={() => startRefresh(() => router.refresh())} />}
     {props.workbench ? <AttendanceWorkbench initial={props.workbench}/> : props.readiness && <AttendanceReview data={props.readiness} refresh={() => startRefresh(() => router.refresh())} />}
-    {props.workbench&&props.readiness&&<details className="rounded-xl border p-4"><summary className="cursor-pointer font-semibold">Source identities, test punches and earlier proposals</summary><AttendanceReview data={props.readiness} refresh={() => startRefresh(() => router.refresh())}/></details>}
+    {props.workbench&&props.readiness&&<details className="rounded-xl border p-4"><summary className="cursor-pointer font-semibold">Source identities, test punches and earlier proposals</summary><AttendanceReview anchorId="attendance-review-legacy" data={props.readiness} refresh={() => startRefresh(() => router.refresh())}/></details>}
     <section id="employee-matching"><EmployeeMatching board={props.matching} busy={busy} mutate={saveMatch} loadHistory={attendanceMatchingHistoryAction} /></section>
     <details className="min-w-0 rounded-xl border border-slate-200 bg-white p-5 text-sm">
       <summary className="min-h-8 cursor-pointer font-semibold">All records for this period</summary><p className="my-3 text-slate-600">All records from the selected period and its neighboring days. Employee matching includes identities across periods.</p>
