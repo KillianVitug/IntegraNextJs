@@ -16,6 +16,7 @@ function run(request: Request, secret: string, enabled: boolean) {
     actorId: process.env.ATTENDANCE_SYNC_ACTOR_ID,
     actorIsAuthorized: id => attendanceSchedulerActorAuthorized(db, id),
     periodIds: async () => {
+      if(process.env.ATTENDANCE_WORKBENCH_ENABLED==="true")await (await import("@/lib/payroll/attendanceWorkbenchDelivery")).processWorkDelivery(process.env.ATTENDANCE_SYNC_ACTOR_ID!,{budgetMs:35000});
       const today = manilaWallTime(new Date().toISOString()).date;
       const since = sourceDayOffset(today, -45);
       const startDate = attendanceSourceStartDate();

@@ -9,7 +9,7 @@ import type { DbClient } from "@/db";
 /** In-memory SQL only. Never reads DATABASE_URL or connects to a server. */
 export async function matchingDatabase() {
   const pg = new PGlite(), database = drizzle(pg, { schema }), dialect = new PgDialect(), enums = new Set<string>();
-  for (const table of [schema.employees, schema.payrollPeriods, schema.payrollRuns, schema.attendanceImportBatches, schema.attendanceRawLogs, schema.attendanceDailySummaries, schema.adminAuditEvents, schema.payrollRunEvents, schema.employeesGeneralInfo, schema.employeesTimekeeping, schema.employeeShiftAssignments, schema.employeeWeeklyShiftPatterns, schema.employeeWeeklyShiftPatternDays, schema.shiftTableBreaks, schema.attendanceDtrCorrections, schema.employeeAttendancePeriodOverrides, schema.employeeAttendanceDayStatusOverrides, schema.employeeAttendanceDayMetricOverrides, schema.employeesLeaveRecords]) {
+  for (const table of [schema.employees, schema.payrollPeriods, schema.payrollRuns, schema.attendanceImportBatches, schema.attendanceRawLogs, schema.attendanceDailySummaries, schema.adminAuditEvents, schema.payrollRunEvents, schema.employeesGeneralInfo, schema.employeesTimekeeping, schema.employeeShiftAssignments, schema.employeeWeeklyShiftPatterns, schema.employeeWeeklyShiftPatternDays, schema.shiftTableBreaks, schema.attendanceDtrCorrections, schema.employeeAttendancePeriodOverrides, schema.employeeAttendanceDayStatusOverrides, schema.employeeAttendanceDayMetricOverrides, schema.employeesLeaveRecords, schema.employeeLeaveRecordDays]) {
     const config = getTableConfig(table), columns: string[] = [];
     for (const col of config.columns) {
       const type = col.getSQLType();
@@ -25,5 +25,6 @@ export async function matchingDatabase() {
   await pg.exec(await readFile("src/db/migrations/0120_attendance_matching_workflow.sql", "utf8"));
   await pg.exec(await readFile("src/db/migrations/0121_attendance_resolution.sql", "utf8"));
   await pg.exec(await readFile("src/db/migrations/0122_attendance_duplicates.sql", "utf8"));
+  await pg.exec(await readFile("src/db/migrations/0123_attendance_workbench.sql", "utf8"));
   return { pg, database, client: database as unknown as DbClient };
 }
