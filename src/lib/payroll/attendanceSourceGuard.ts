@@ -1,6 +1,6 @@
 import { and, desc, eq, gte, lte, or, sql } from "drizzle-orm";
 import { db, type DbClient } from "@/db";
-import { attendanceSourcePeriods, attendanceSourceRuns, attendanceSourceMappings, attendanceSourceEvents, attendanceSourceProjections } from "@/db/attendanceSourceSchema";
+import { attendanceSourcePeriods, attendanceSourceRuns, attendanceSourceMappings, attendanceSourceEvents, attendanceSourceProjections, attendanceSourceIdentities } from "@/db/attendanceSourceSchema";
 import { attendanceImportBatches, attendanceRawLogs, payrollRunEvents } from "@/db/schema";
 import { sourceDayOffset } from "./attendanceSourceClient";
 import { PayrollValidationError } from "./validation";
@@ -56,6 +56,13 @@ export async function assertAttendanceSourceReady(periodId: string, database: Db
     .innerJoin(attendanceSourceProjections, eq(attendanceSourceProjections.eventId, attendanceSourceEvents.eventId))
     .where(and(eq(attendanceSourceProjections.payrollPeriodId, periodId), sql`${attendanceSourceMappings.updatedAt} > ${run.startedAt}`)).limit(1);
   if (changedMappings.length) throw new PayrollValidationError("Employee mappings changed after this attendance pull started. Sync the period again, refresh DTR summaries and recompute payroll.");
+  // Durable identity revisions also cover removed mappings; absence of a mapping
+  // must never let an old successful sync/summarization authorize payroll.
+  const identityChanges = await database.select({ sourceId: attendanceSourceIdentities.sourceEmployeeId }).from(attendanceSourceIdentities)
+    .innerJoin(attendanceSourceEvents, eq(attendanceSourceEvents.sourceEmployeeId, attendanceSourceIdentities.sourceEmployeeId))
+    .innerJoin(attendanceSourceProjections, eq(attendanceSourceProjections.eventId, attendanceSourceEvents.eventId))
+    .where(and(eq(attendanceSourceProjections.payrollPeriodId, periodId), sql`${attendanceSourceIdentities.updatedAt} > ${run.startedAt}`)).limit(1);
+  if (identityChanges.length) throw new PayrollValidationError("Employee mappings or classifications changed after this attendance pull started. Sync again and refresh DTR before continuing payroll.");
   const [state] = await database.select().from(attendanceSourcePeriods).where(eq(attendanceSourcePeriods.payrollPeriodId, periodId));
   const counts = run?.counts as Record<string, number> | null;
   if (!counts || counts.unmatched || counts.withheld || counts.lateChanges || counts.boundaryReview || counts.clearedEmployees) throw new PayrollValidationError(`Attendance source has unresolved exceptions: ${counts?.unmatched ?? 0} unmatched, ${counts?.withheld ?? 0} withheld, ${counts?.boundaryReview ?? 0} boundary reviews, ${counts?.clearedEmployees ?? 0} cleared employee-periods and ${counts?.lateChanges ?? 0} late changes. Open Attendance connection, resolve the listed issues and sync again. Counts can overlap.`);
