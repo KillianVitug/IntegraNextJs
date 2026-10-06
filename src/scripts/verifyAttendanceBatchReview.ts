@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { applyBatchEvidence, applyBatchDetails, changeInputErrors, draftVersion, retainedDraftVersion, reconcileDraftVerification, verificationIssues, verifyCompleteChanges, workDayRecords, type WorkKind } from "@/lib/payroll/attendanceWorkbenchModel";
+import { applyBatchEvidence, applyBatchDetails, changeInputErrors, draftVersion, retainedDraftVersion, reconcileDraftVerification, verificationIssues, verifyCompleteChanges, workDayRecords, canCorrectRecord, dayNeedsReview, simulateWork, type WorkKind } from "@/lib/payroll/attendanceWorkbenchModel";
 import { batchReviewFixture, completeChange } from "./attendanceTest/batchReviewFixture";
 
 const {board,drafts}=batchReviewFixture(),employees=board.employees,person=employees[0],draft=drafts[0];
@@ -41,4 +41,11 @@ assert.equal(draftVersion(person,["2026-09-30","2026-09-30"]),draft.version);
 const overnight=[{...person.days[0].records[0],type:"IN" as const,at:"2026-09-30T14:00:00Z"},{...person.days[0].records[1],at:"2026-09-30T22:00:00Z"}];
 assert.equal(workDayRecords(overnight,"2026-09-30").length,2,"Next-period OUT retained");
 assert.equal(workDayRecords(overnight,"2026-10-01").length,2,"Prior-period IN retained");
-console.log("PASS: batch evidence, complete-only verification, all correction kinds, stale/rejected/invalid rows, effective reasons, edit/reset and overnight context");
+const manual={...person.days[0].records[0],source:"Manual" as const,rawLogId:42,at:"2026-09-30T11:31:00Z",originalAt:undefined,originalType:undefined};
+assert.equal(canCorrectRecord(manual,"Time"),true);assert.equal(canCorrectRecord(manual,"Direction"),true);
+assert.equal(canCorrectRecord({...manual,source:"File"},"Time"),false);
+const corrected=simulateWork([manual],[completeChange({kind:"Time",eventId:undefined,rawLogId:42,at:"2026-09-30T07:34"})],person.id);
+assert.equal(corrected.records.length,1);assert.equal(corrected.records[0].at,"2026-09-29T23:34:00.000Z");assert.equal(corrected.records[0].originalAt,manual.at);
+assert.ok(simulateWork([manual],[completeChange({kind:"Manual",id:manual.id,at:"2026-09-30T07:34"})],person.id).errors.some(e=>e.includes("already recorded")));
+assert.equal(dayNeedsReview({...person.days[0],resolved:true,issues:["Late upload conflicts"]}),false);
+console.log("PASS: batch evidence, verification/reset, manual punch correction, duplicate protection, resolved queue and overnight context");

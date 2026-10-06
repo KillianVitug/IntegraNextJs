@@ -44,6 +44,13 @@ export function workDayRecords(records:WorkRecord[],day:string) {
 export function changeRecord(employee:WorkEmployee|undefined,change:WorkChange) {
  return [...(employee?.contextRecords??[]),...(employee?.days.flatMap(d=>d.records)??[])].find(r=>change.eventId?r.id===change.eventId:change.rawLogId!==undefined&&r.rawLogId===change.rawLogId);
 }
+/** Manual attendance is corrected locally with a new audited decision, never sent to a phone. */
+export function canCorrectRecord(record:WorkRecord,kind:WorkKind) {
+ return record.source==="API"||!["Direction","Time","Employee","Void","Restore","UndoCapture"].includes(kind)||(record.source==="Manual"&&record.rawLogId!==undefined&&["Direction","Time"].includes(kind));
+}
+export function dayNeedsReview(day:WorkDay) {
+ return !day.resolved&&day.issues.length>0;
+}
 /** Input checks shared by draft verification and authoritative server preview. */
 export function changeInputErrors(draft:WorkDraft,c:WorkChange,now=Date.now()) {
  const errors:string[]=[];
@@ -64,10 +71,11 @@ export function verificationIssues(employee:WorkEmployee|undefined,draft:WorkDra
  if(!employee||draft.version!==draftVersion(employee,draft.days))errors.push("Evidence changed — refresh and review this plan again");
  if(employee&&Object.entries(draft.incomingVersions??{}).some(([day,version])=>employee.days.find(d=>d.day===day)?.decision?.incomingDigest!==version))errors.push("Incoming evidence changed — review incoming attendance again");
  if(!draft.days.includes(c.day)||!employee?.days.some(d=>d.day===c.day))errors.push("Workday is outside employee eligibility");
+ if(c.kind==="Manual"&&employee&&draftRecords(employee,draft).some(r=>r.id===c.id))errors.push("This manual punch is already recorded. Correct its time instead of adding it again.");
  if(!["Manual","ConfirmSequence","NoAttendance","ReopenDay"].includes(c.kind)){
   const record=(employee?draftRecords(employee,draft):[]).find(r=>c.eventId?r.id===c.eventId:r.rawLogId===c.rawLogId)??changeRecord(employee,c);
   if(!record||record.employeeId!==draft.employeeId)errors.push("Selected punch is unavailable — refresh and review");
-  else if(record.source!=="API"&&["Direction","Time","Employee","Void","Restore","UndoCapture"].includes(c.kind))errors.push("File/manual entries require an explicit source selection and verified replacement");
+  else if(!canCorrectRecord(record,c.kind))errors.push("This entry requires an explicit source selection and verified replacement");
  }
  if(c.kind==="Employee"&&c.targetEmployeeId){const target=employees.find(p=>p.id===c.targetEmployeeId);if(!target||target.id===draft.employeeId||target.sourceIds.length!==1||!target.days.some(d=>d.day===c.day))errors.push("Select an eligible employee with a verified unique identity");}
  return errors;
@@ -115,12 +123,13 @@ export function simulateWork(records:WorkRecord[],changes:WorkChange[],employeeI
  const errors:string[]=[];
  const used=new Set<string>();
  for(const c of changes) {
-  if(c.kind==="Manual") {const at=c.at&&localToInstant(c.at);if(!at||!c.type){errors.push("Enter a verified date and time; no assumed time is supplied");continue;}next.push({id:c.id,source:"Manual",employeeId:c.employeeId??employeeId,type:c.type,at,status:"VALID",clockFlag:false});continue;}
+  if(c.kind==="Manual") {if(next.some(r=>r.id===c.id)){errors.push("This manual punch is already recorded. Correct its time instead of adding it again.");continue;}const at=c.at&&localToInstant(c.at);if(!at||!c.type){errors.push("Enter a verified date and time; no assumed time is supplied");continue;}next.push({id:c.id,source:"Manual",employeeId:c.employeeId??employeeId,type:c.type,at,status:"VALID",clockFlag:false});continue;}
   if(["ConfirmSequence","NoAttendance","ReopenDay"].includes(c.kind))continue;
   const key=c.eventId??`raw:${c.rawLogId}`;
   if(used.has(`${key}:${c.kind}`)||c.kind==="Void"&&used.has(`${key}:Restore`)||c.kind==="Restore"&&used.has(`${key}:Void`)){errors.push("Conflicting actions select the same punch");continue;}used.add(`${key}:${c.kind}`);
   const r=next.find(r=>r.id===c.eventId||c.rawLogId!==undefined&&r.rawLogId===c.rawLogId);
   if(!r){errors.push("Selected punch is outside this employee and date context");continue;}
+  if(r.source==="Manual"&&["Time","Direction"].includes(c.kind)){r.originalAt??=r.at;r.originalType??=r.type;}
   if(c.kind==="Direction")r.type=c.type??(r.type==="IN"?"OUT":"IN");
   if(c.kind==="Time"){const at=c.at&&localToInstant(c.at);if(!at)errors.push("Enter the verified capture date and time");else{r.at=at;r.clockVerified=true;}}
   if(c.kind==="Employee"){if(!c.targetEmployeeId)errors.push("Select a verified employee identity");else r.employeeId=c.targetEmployeeId;}
