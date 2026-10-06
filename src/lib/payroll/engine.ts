@@ -1,3 +1,5 @@
+import { payrollGroup, earningMonth, monthRange, remainingMonthlyLines, runPayrollGroup } from "./payrollGroupModel";
+import { monthlyPayouts, payrollGroupsInstalled, postedMonthPayments } from "./payrollGroups";
 import { assertAttendanceSourceReady, confirmAttendanceSourcePayrollInput, lockAttendancePayrollInput, attendancePayrollSnapshot, assertAttendancePayrollSnapshot } from "./attendanceSourceGuard";
 import { assertPayrollTransition, PayrollValidationError } from "./validation";
 import { db, type DbClient } from "@/db";
@@ -1492,7 +1494,7 @@ async function batchLoadBirYearToDateTaxContext(
   return result;
 }
 
-async function computeEmployeePayroll({
+export async function computeEmployeePayroll({
   employee,
   resolvedSalary,
   period,
@@ -1515,7 +1517,9 @@ async function computeEmployeePayroll({
   statutoryBundle,
   priorCycleTaxContext,
   birYearToDateTaxContext,
+  monthlyOnce = false,
 }: {
+  monthlyOnce?: boolean;
   employee: EmployeeRecord;
   resolvedSalary: ResolvedSalaryForPeriod;
   period: typeof payrollPeriods.$inferSelect;
@@ -1702,12 +1706,13 @@ async function computeEmployeePayroll({
     periodOverride.lateMinutes ?? attendanceSummary.lateMinutes;
   const effectiveUndertimeMinutes =
     periodOverride.undertimeMinutes ?? attendanceSummary.undertimeMinutes;
-  const effectiveWorkedMinutes = computeNetDtrWorkedMinutes({
+  const partialOverstatement=effectiveAttendance.filter(row=>normalizeAttendanceDtrAnomalyFlags(row.anomalyFlags).includes("PARTIAL_VALID_WORK")).reduce((total,row)=>total+Math.max(0,480-row.lateMinutes-row.undertimeMinutes-row.regularMinutes),0);
+  const effectiveWorkedMinutes = Math.max(0,computeNetDtrWorkedMinutes({
     presentDays: attendanceSummary.presentDays,
     lateMinutes: effectiveLateMinutes,
     undertimeMinutes: effectiveUndertimeMinutes,
     workedMinutesOverride: periodOverride.workedMinutes,
-  });
+  })-(periodOverride.workedMinutes==null?partialOverstatement:0));
   const regularPayMinutes = Math.max(0, effectiveWorkedMinutes);
   const regularPayHours = roundMoney(regularPayMinutes / 60);
   const hourlyRate = hoursPerDay > 0 ? dailyRate / hoursPerDay : 0;
@@ -1743,11 +1748,11 @@ async function computeEmployeePayroll({
   }
   const isMonthlyEmployee = monthlyRate > 0;
   const ignoreDtrForMonthlyRate =
-    isMonthlyEmployee && salary?.ignoreDtrForMonthlyRate === true;
+    isMonthlyEmployee && (monthlyOnce || salary?.ignoreDtrForMonthlyRate === true);
   const ignoreContributionDeduction =
     salary?.ignoreContributionDeduction === true;
   const regularPayLineAmount = isMonthlyEmployee
-    ? roundMoney(monthlyRate / 2)
+    ? roundMoney(monthlyRate / (monthlyOnce?1:2))
     : roundMoney(regularPayHours * hourlyRate);
   const paidLeavePay = isMonthlyEmployee
     ? 0
@@ -1780,7 +1785,7 @@ async function computeEmployeePayroll({
     fallbackTaxable: false,
     fallbackMonth13thEligible: false,
   });
-  const payrollExceptionRowsForPay = payrollExceptionRows;
+  const payrollExceptionRowsForPay = monthlyOnce?payrollExceptionRows.filter(row=>!row.dtrOverrideSource):payrollExceptionRows;
   const hasGeneratedWorkedRow = payrollExceptionRowsForPay.some(
     (row) => row.dtrOverrideSource === "DTR_WORKED"
   );
@@ -1925,7 +1930,7 @@ async function computeEmployeePayroll({
     }
   }
 
-  if (!ignoreDtrForMonthlyRate) {
+  if (!ignoreDtrForMonthlyRate || monthlyOnce) {
     lines.push(
       ...buildPayrollExceptionLines({
         attendanceByDate: effectiveAttendanceByDate,
@@ -1947,7 +1952,7 @@ async function computeEmployeePayroll({
       lineType: "Earning",
       code: "M-ALLOW",
       description: "Monthly Allowance",
-      amount: roundMoney(monthlyAllowance / 2),
+      amount: roundMoney(monthlyAllowance / (monthlyOnce?1:2)),
       quantity: 1,
       rate: monthlyAllowance,
       taxable: true,
@@ -2207,9 +2212,9 @@ async function computeEmployeePayroll({
     const distributeContributionAmount = hasCustomFixedShares
       ? distributeCustomFixedPayrollAmount
       : distributeScheduledAmount;
-    const employeePeriodShare = distributeContributionAmount(employeeShare, period.cycle, flags);
-    const employerPeriodShare = distributeContributionAmount(employerShare, period.cycle, flags);
-    const ecPeriodShare =
+    const employeePeriodShare = monthlyOnce?employeeShare:distributeContributionAmount(employeeShare, period.cycle, flags);
+    const employerPeriodShare = monthlyOnce?employerShare:distributeContributionAmount(employerShare, period.cycle, flags);
+    const ecPeriodShare = monthlyOnce ? ecShare :
       config.type === "SSS"
         ? isSssEcApplicableForCycle(period.cycle)
           ? roundMoney(ecShare)
@@ -2299,7 +2304,7 @@ async function computeEmployeePayroll({
     );
   }
 
-  if (!ignoreContributionDeduction && (!taxGroup || isScheduleApplicable(period.cycle, taxFlags))) {
+  if (!ignoreContributionDeduction && (monthlyOnce || !taxGroup || isScheduleApplicable(period.cycle, taxFlags))) {
     if (taxGroup?.flags?.taxFixedPercentage) {
       const taxRate =
         toAmount(taxGroup.flags.taxFixedValue) > 0
@@ -2307,7 +2312,7 @@ async function computeEmployeePayroll({
           : toAmount(taxGroup.percentage);
       taxAmount = roundMoney(taxableCompensation * taxRate);
     } else if (taxGroup && toAmount(taxGroup.fixedEmployeeShare) > 0) {
-      taxAmount = distributeCustomFixedPayrollAmount(
+      taxAmount = monthlyOnce ? toAmount(taxGroup.fixedEmployeeShare) : distributeCustomFixedPayrollAmount(
         toAmount(taxGroup.fixedEmployeeShare),
         period.cycle,
         taxFlags
@@ -2324,7 +2329,7 @@ async function computeEmployeePayroll({
       withholdingTaxBasis = basis;
       taxAmount = roundMoney(basis * toAmount(taxGroup.percentage));
     } else if (statutoryBundle.taxVersionId) {
-      if (isFinalDecemberSemiMonthlyPayroll(period)) {
+      if (isFinalDecemberSemiMonthlyPayroll(period) || monthlyOnce&&period.month===12) {
         const annualTaxableCompensation = roundMoney(
           birYearToDate.priorTaxableCompensation + taxableCompensation
         );
@@ -2347,6 +2352,8 @@ async function computeEmployeePayroll({
             birYearToDate.priorTaxWithheld
           )}`
         );
+      } else if (monthlyOnce) {
+        taxAmount = roundMoney((await computeBirWithholding(taxableCompensation / 2, statutoryBundle.taxVersionId))*2);
       } else if (taxGroup?.flags?.taxMonthEndAdjustment && period.cycle === "B") {
         const previous =
           priorCycleTaxContext?.get(employee.id) ??
@@ -2384,6 +2391,12 @@ async function computeEmployeePayroll({
     });
   }
 
+  if(!isMonthlyEmployee&&grossPay===0){
+    lines.splice(0,lines.length,...lines.filter(line=>line.lineType!=="Deduction"&&line.lineType!=="Employer Contribution"));
+    sssEmployee=philhealthEmployee=pagibigEmployee=taxAmount=sssEmployer=sssEc=philhealthEmployer=pagibigEmployer=0;
+    birNotes.push("No work — ₱0. Deductions and loan installments remain unpaid.");
+  }
+  if(monthlyOnce)birNotes.push("Full monthly salary paid once in selected half; missing attendance does not reduce fixed salary.");
   const totalDeductions = roundMoney(
     lines
       .filter((line) => line.lineType === "Deduction")
@@ -2527,7 +2540,7 @@ export async function computeManualPayrollLatestBaseline(
 ): Promise<ManualPayrollBaselineSnapshot | null> {
   await ensurePayrollFoundationData();
 
-  const period = await getPayrollPeriod(payrollPeriodId);
+  let period = await getPayrollPeriod(payrollPeriodId);
   if (!period) {
     throw new Error("Payroll period not found.");
   }
@@ -2552,11 +2565,13 @@ export async function computeManualPayrollLatestBaseline(
 
   if (!employee) return null;
 
+  const monthlyOnce=payrollGroup(employee.salary)==="Monthly";
+  if(monthlyOnce)period={...period,...monthRange(period)};
   const payrollTerms = employee.generalInfo?.payrollTerms;
   const separated = employee.generalInfo?.separationDate;
   if (
     !isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus) ||
-    payrollTerms !== "Semi-Monthly" ||
+    !(payrollTerms === "Semi-Monthly" || monthlyOnce&&payrollTerms==="Monthly") ||
     (separated && separated < period.startDate)
   ) {
     return null;
@@ -2640,7 +2655,7 @@ export async function computeManualPayrollLatestBaseline(
           eq(employeesLoans.employeeId, employee.id),
           eq(employeesLoans.status, "Active"),
           isNull(employeesLoans.deletedAt),
-          eq(loanInstallments.payrollCode, period.code),
+          monthlyOnce?inArray(loanInstallments.payrollCode,[`${earningMonth(period)}-A`,`${earningMonth(period)}-B`]):eq(loanInstallments.payrollCode, period.code),
           inArray(loanInstallments.status, ["Pending", "Due"])
         )
       ),
@@ -2670,7 +2685,7 @@ export async function computeManualPayrollLatestBaseline(
       .from(employeePayrollExceptionRows)
       .where(
         and(
-          eq(employeePayrollExceptionRows.payrollPeriodId, period.id),
+          monthlyOnce?sql`${employeePayrollExceptionRows.payrollPeriodId} in (select id from payroll_periods where year=${period.year} and month=${period.month})`:eq(employeePayrollExceptionRows.payrollPeriodId, period.id),
           eq(employeePayrollExceptionRows.employeeId, employee.id),
           gte(employeePayrollExceptionRows.attendanceDate, period.startDate),
           lte(employeePayrollExceptionRows.attendanceDate, period.endDate)
@@ -2749,7 +2764,7 @@ export async function computeManualPayrollLatestBaseline(
   }));
   const accountCodeMap = new Map(allAccountCodes.map((item) => [item.accountCode, item]));
   const statutoryBundle = await getActiveStatutoryRuleBundle(period.adjustedPayDate);
-  const computation = await computeEmployeePayroll({
+  const computation = await computeEmployeePayroll({monthlyOnce,
     employee,
     resolvedSalary:
       resolvedSalaryByEmployeeId.get(employee.id) ??
@@ -2900,6 +2915,7 @@ async function assertNoUnresolvedHeldDtrRowsForPayrollTransition(period: {
   startDate: string;
   endDate: string;
 }, database: DbClient = db) {
+  if(process.env.ATTENDANCE_WORKBENCH_ENABLED==="true")return; // Missing attendance is a warning, not a payroll veto.
   const unresolvedRows = await getUnresolvedHeldDtrRowsForPeriod(period, database);
 
   if (unresolvedRows.length === 0) return;
@@ -2949,12 +2965,15 @@ export async function getPayrollPeriod(periodId: string) {
 export async function createOrRecomputePayrollRun(
   payrollPeriodId: string,
   actorUserId: string,
-  options: Pick<PayrollPreflightOptions, "bypassTemporaryReadinessCategories"> = {}
+  options: Pick<PayrollPreflightOptions, "bypassTemporaryReadinessCategories" | "payrollGroup"> = {}
 ) {
-  const attendanceSourceInput = await assertAttendanceSourceReady(payrollPeriodId);
+  const selectedGroup=options.payrollGroup??"Daily";
+  if(selectedGroup==="Monthly"&&!await payrollGroupsInstalled())throw new PayrollValidationError("Install the payroll-group migration before computing monthly salary.");
+  const attendanceSourceInput = selectedGroup==="Monthly"?null:await assertAttendanceSourceReady(payrollPeriodId);
   await ensurePayrollFoundationData();
 
-  const period = await getPayrollPeriod(payrollPeriodId);
+  const storedPeriod = await getPayrollPeriod(payrollPeriodId);
+  const period=storedPeriod&&selectedGroup==="Monthly"?{...storedPeriod,...monthRange(storedPeriod)}:storedPeriod;
   if (!period) {
     throw new Error("Payroll period not found.");
   }
@@ -3002,17 +3021,22 @@ export async function createOrRecomputePayrollRun(
     },
   });
 
+  const payouts=await monthlyPayouts(earningMonth(period));
   const eligibleEmployees = employeesForPayroll.filter((employee) => {
     const payrollTerms = employee.generalInfo?.payrollTerms;
     const separated = employee.generalInfo?.separationDate;
     return (
       isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus) &&
-      payrollTerms === "Semi-Monthly" &&
+      (payrollTerms === "Semi-Monthly" || selectedGroup==="Monthly"&&payrollTerms==="Monthly") &&
+      payrollGroup(employee.salary)===selectedGroup && (selectedGroup!=="Monthly"||(payouts.get(employee.id)??"B")===period.cycle) &&
       (!separated || separated >= period.startDate)
     );
   });
 
-  const manualPayrollEntryRows = await loadManualPayrollEntriesForPeriod(period.id);
+  const eligibleIds=new Set(eligibleEmployees.map(e=>e.id));
+  const earningPeriods=selectedGroup==="Monthly"?await db.select({id:payrollPeriods.id}).from(payrollPeriods).where(and(eq(payrollPeriods.year,period.year),eq(payrollPeriods.month,period.month))):[{id:period.id}];
+  const manualPayrollEntryRows=(await Promise.all(earningPeriods.map(p=>loadManualPayrollEntriesForPeriod(p.id)))).flat().filter(e=>eligibleIds.has(e.employeeId));
+  if(selectedGroup==="Monthly"&&new Set(manualPayrollEntryRows.map(e=>e.employeeId)).size!==manualPayrollEntryRows.length)throw new PayrollValidationError("A monthly employee has manual payroll overrides in both halves. Retain one explicit monthly override before calculation so amounts are not silently selected or paid twice.");
   const manualPayrollEmployeeIds = new Set(
     manualPayrollEntryRows.map((entry) => entry.employeeId)
   );
@@ -3097,7 +3121,7 @@ export async function createOrRecomputePayrollRun(
                 inArray(employeesLoans.employeeId, loanEmployeeIds),
                 eq(employeesLoans.status, "Active"),
                 isNull(employeesLoans.deletedAt),
-                eq(loanInstallments.payrollCode, period.code),
+                selectedGroup==="Monthly"?inArray(loanInstallments.payrollCode,[`${earningMonth(period)}-A`,`${earningMonth(period)}-B`]):eq(loanInstallments.payrollCode, period.code),
                 inArray(loanInstallments.status, ["Pending", "Due"])
               )
             ),
@@ -3133,7 +3157,7 @@ export async function createOrRecomputePayrollRun(
             .from(employeePayrollExceptionRows)
             .where(
               and(
-                eq(employeePayrollExceptionRows.payrollPeriodId, period.id),
+                inArray(employeePayrollExceptionRows.payrollPeriodId,earningPeriods.map(p=>p.id)),
                 inArray(employeePayrollExceptionRows.employeeId, employeeIds),
                 gte(employeePayrollExceptionRows.attendanceDate, period.startDate),
                 lte(employeePayrollExceptionRows.attendanceDate, period.endDate)
@@ -3288,12 +3312,19 @@ export async function createOrRecomputePayrollRun(
     batchLoadBirYearToDateTaxContext(period, employeesToCompute.map((e) => e.id)),
   ]);
 
+  const priorPaid=await postedMonthPayments(period,eligibleEmployees.map(e=>e.id));
+  if(selectedGroup==="Monthly")for(const [id,context] of birYearToDateTaxContextMap){
+    const prior=priorPaid.employees.filter(e=>e.employeeId===id),ids=new Set(prior.map(e=>e.id));
+    context.priorTaxableCompensation=Math.max(0,context.priorTaxableCompensation-prior.reduce((n,e)=>n+Number(e.taxablePay),0));
+    context.priorTaxWithheld=Math.max(0,context.priorTaxWithheld-priorPaid.lines.filter(l=>ids.has(l.payrollRunEmployeeId)&&l.code==="TAX").reduce((n,l)=>n+Number(l.amount),0));
+  }
   const computations: EmployeePayrollComputation[] = [];
   for (const employeeChunk of chunk(employeesToCompute, PAYROLL_COMPUTATION_CONCURRENCY)) {
     const chunkComputations = await Promise.all(
       employeeChunk.map((employee) =>
         computeEmployeePayroll({
           employee,
+          monthlyOnce:selectedGroup==="Monthly",
           resolvedSalary:
             resolvedSalaryByEmployeeId.get(employee.id) ??
             ({
@@ -3342,28 +3373,57 @@ export async function createOrRecomputePayrollRun(
     )
   );
 
+  if(selectedGroup==="Daily")for(const computation of computations){
+    if(computation.grossPay===0){computation.lines=computation.lines.filter(l=>l.lineType!=="Deduction"&&l.lineType!=="Employer Contribution");computation.totalDeductions=0;computation.employeeContributions=0;computation.employerContributions=0;computation.netPay=0;computation.breakdownNotes=[computation.breakdownNotes,"No work — ₱0. Deductions and loan installments remain unpaid."].filter(Boolean).join(" | ");}
+  }
+  if(selectedGroup==="Monthly")for(const computation of computations){
+    const prior=priorPaid.employees.filter(e=>e.employeeId===computation.employeeId),ids=new Set(prior.map(e=>e.id));
+    const regularPaid=prior.reduce((n,e)=>n+Number(e.regularPay),0);
+    const paidLines=priorPaid.lines.filter(l=>ids.has(l.payrollRunEmployeeId)).map(l=>({...l,amount:Number(l.amount)}));
+    const remaining=remainingMonthlyLines(computation.lines,paidLines,regularPaid);
+    computation.lines=remaining.lines.filter(l=>!(l.sourceTable==="loan_installments"&&l.amount===0));
+    computation.regularPay=Math.max(0,computation.regularPay-regularPaid);
+    computation.grossPay=remaining.lines.filter(l=>l.lineType==="Earning").reduce((n,l)=>n+l.amount,0);
+    computation.taxablePay=Math.max(0,computation.taxablePay-prior.reduce((n,e)=>n+Number(e.taxablePay),0));
+    computation.nonTaxablePay=Math.max(0,computation.nonTaxablePay-prior.reduce((n,e)=>n+Number(e.nonTaxablePay),0));
+    computation.totalDeductions=remaining.lines.filter(l=>l.lineType==="Deduction").reduce((n,l)=>n+l.amount,0);
+    computation.employeeContributions=remaining.lines.filter(l=>l.lineType==="Deduction"&&["SSS","PHILHEALTH","PAGIBIG","TAX"].includes(l.code)).reduce((n,l)=>n+l.amount,0);
+    computation.employerContributions=remaining.lines.filter(l=>l.lineType==="Employer Contribution").reduce((n,l)=>n+l.amount,0);
+    computation.netPay=computation.grossPay-computation.totalDeductions;
+    if(remaining.credited||remaining.excess)computation.breakdownNotes=[computation.breakdownNotes,`Posted amounts credited: ${remaining.credited.toFixed(2)}. Unrecovered excess: ${remaining.excess.toFixed(2)}; review explicitly.`].filter(Boolean).join("\n");
+  }
+  const inputSnapshot={payrollGroup:selectedGroup,earningMonth:earningMonth(period),payoutHalf:period.cycle,postedPaymentDigest:priorPaid.digest,payouts:eligibleEmployees.map(e=>[e.id,payouts.get(e.id)??"B"])};
   return db.transaction(async (tx) => {
-    await confirmAttendanceSourcePayrollInput(tx, payrollPeriodId, attendanceSourceInput);
+    await lockAttendancePayrollInput(tx);
+    if(selectedGroup==="Daily")await confirmAttendanceSourcePayrollInput(tx, payrollPeriodId, attendanceSourceInput);
+    const currentPaid=await postedMonthPayments(period,eligibleEmployees.map(e=>e.id),tx);
+    if(currentPaid.digest!==priorPaid.digest)throw new PayrollValidationError("Posted payments changed during calculation. Recompute to credit the latest payments.");
     const [latestRunForPeriod] = await tx
       .select()
       .from(payrollRuns)
-      .where(eq(payrollRuns.payrollPeriodId, payrollPeriodId))
+      .where(and(eq(payrollRuns.payrollPeriodId, payrollPeriodId),sql`coalesce(${payrollRuns.inputSnapshot}->>'payrollGroup','Legacy')=${selectedGroup}`))
       .orderBy(desc(payrollRuns.createdAt))
       .limit(1);
 
+    if(latestRunForPeriod?.status==="Posted")throw new PayrollValidationError("This payroll group is already posted. Use an explicit adjustment instead of another regular payout.");
+    if(selectedGroup==="Monthly"){
+      const currentPayouts=await monthlyPayouts(earningMonth(period),tx);
+      if(eligibleEmployees.some(e=>(currentPayouts.get(e.id)??"B")!==(payouts.get(e.id)??"B")))throw new PayrollValidationError("Payout settings changed during calculation. Recompute this group.");
+    }
+    const [highestRun]=await tx.select({number:sql<number>`coalesce(max(${payrollRuns.runNumber}),0)::int`}).from(payrollRuns).where(eq(payrollRuns.payrollPeriodId,payrollPeriodId));
     let runId: string;
 
     if (
       !latestRunForPeriod ||
-      latestRunForPeriod.status === "Posted" ||
       latestRunForPeriod.status === "Void"
     ) {
       const [createdRun] = await tx
         .insert(payrollRuns)
         .values({
           payrollPeriodId,
-          runNumber: (latestRunForPeriod?.runNumber ?? 0) + 1,
+          runNumber: (highestRun?.number ?? 0) + 1,
           status: "Draft",
+          inputSnapshot,
           computedAt: new Date(),
           computedByUserId: actorUserId,
         })
@@ -3397,6 +3457,7 @@ export async function createOrRecomputePayrollRun(
       await tx
         .update(payrollRuns)
         .set({
+          inputSnapshot,
           status: "Draft",
           computedAt: new Date(),
           computedByUserId: actorUserId,
@@ -3533,12 +3594,24 @@ export async function transitionPayrollRunStatus(
       if (!run.payrollPeriod) {
         throw new Error("Payroll period not found.");
       }
-      await assertNoUnresolvedHeldDtrRowsForPayrollTransition(run.payrollPeriod, tx);
-      await assertAttendancePayrollSnapshot(tx, run.payrollPeriodId, run.id);
+      const group=runPayrollGroup(run.inputSnapshot);
+      if(group!=="Monthly"){
+        await assertNoUnresolvedHeldDtrRowsForPayrollTransition(run.payrollPeriod, tx);
+        await assertAttendancePayrollSnapshot(tx, run.payrollPeriodId, run.id);
+      }else{
+        const paid=await postedMonthPayments(run.payrollPeriod,run.employees.map(e=>e.employeeId),tx);
+        if(paid.digest!==run.inputSnapshot?.postedPaymentDigest)throw new PayrollValidationError("Posted monthly payments changed. Recompute to credit payments before continuing.");
+        const settings=await monthlyPayouts(earningMonth(run.payrollPeriod),tx);
+        if(run.employees.some(e=>(settings.get(e.employeeId)??"B")!==run.payrollPeriod!.cycle))throw new PayrollValidationError("Monthly payout settings changed. Recompute this group.");
+      }
     }
 
     if (nextStatus === "Posted") {
       const lockedRun = run;
+      if(runPayrollGroup(run.inputSnapshot)!=="Monthly"&&run.runType==="Regular"&&run.employees.length){
+        const overlap=await tx.select({id:payrollRunEmployees.id}).from(payrollRunEmployees).innerJoin(payrollRuns,eq(payrollRuns.id,payrollRunEmployees.payrollRunId)).where(and(or(eq(payrollRuns.payrollPeriodId,run.payrollPeriodId),and(sql`${payrollRuns.payrollPeriodId} in (select id from payroll_periods where year=${run.payrollPeriod!.year} and month=${run.payrollPeriod!.month})`,or(sql`${payrollRuns.inputSnapshot}->>'payrollGroup'='Monthly'`,sql`coalesce(${payrollRuns.inputSnapshot}->>'payrollGroup','Legacy')='Legacy' and ${payrollRunEmployees.breakdownNotes} like '%Monthly Rate%'`))),eq(payrollRuns.status,"Posted"),eq(payrollRuns.runType,"Regular"),inArray(payrollRunEmployees.employeeId,run.employees.map(e=>e.employeeId))));
+        if(overlap.length)throw new PayrollValidationError("An employee already has posted regular pay in this period, including legacy payroll. Use an adjustment to avoid paying twice.");
+      }
       const loanLines =
         lockedRun.runType === "Reversal"
           ? []
@@ -3683,7 +3756,12 @@ export async function transitionPayrollRunStatus(
         })
         .where(eq(payrollRuns.id, payrollRunId));
 
-      if (lockedRun.runType === "Regular") {
+      const grouped=runPayrollGroup(lockedRun.inputSnapshot)!=="Legacy";
+      const monthChoices=grouped?await monthlyPayouts(earningMonth(lockedRun.payrollPeriod!),tx):new Map();
+      const monthlyEmployees=grouped?(await tx.query.employees.findMany({where:and(isNull(employees.deletedAt),eq(employees.employeeType,DEFAULT_EMPLOYEE_TYPE)),with:{salary:true,generalInfo:true}})).filter(e=>payrollGroup(e.salary)==="Monthly"&&isPayrollEligibleEmploymentStatus(e.generalInfo?.employmentStatus)&&["Monthly","Semi-Monthly"].includes(e.generalInfo?.payrollTerms??"")&&(!e.generalInfo?.separationDate||e.generalInfo.separationDate>=monthRange(lockedRun.payrollPeriod!).startDate)):[];
+      const monthlyDue=monthlyEmployees.some(e=>(monthChoices.get(e.id)??"B")===lockedRun.payrollPeriod!.cycle);
+      const postedGroups=grouped?(await tx.select({snapshot:payrollRuns.inputSnapshot}).from(payrollRuns).where(and(eq(payrollRuns.payrollPeriodId,lockedRun.payrollPeriodId),eq(payrollRuns.status,"Posted")))).map(r=>runPayrollGroup(r.snapshot)):[];
+      if (lockedRun.runType === "Regular" && (!grouped||postedGroups.includes("Daily")&&(!monthlyDue||postedGroups.includes("Monthly")))) {
         await tx
           .update(payrollPeriods)
           .set({ status: "Processed", updatedAt: new Date() })

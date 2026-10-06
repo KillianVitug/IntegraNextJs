@@ -1,3 +1,4 @@
+import { employeePayrollRun, payrollInputPeriodScope } from "./payrollGroups";
 import { db } from "@/db";
 import {
   accountCode,
@@ -30,7 +31,7 @@ import type {
 } from "@/app/(ntg)/payroll/types";
 import { recordAdminAuditEvent, recordPayrollRunEvent } from "@/lib/admin";
 import type { SaveManualPayrollEntrySchemaType } from "@/zod-schemas/manualPayroll";
-import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { payrollEligibleEmploymentStatusCondition } from "@/lib/employmentStatus";
 import { formatEmployeeCode } from "@/utils/employeeCode";
 import { resolveEmployeeSalaryForPeriod } from "./salaryResolver";
@@ -387,16 +388,6 @@ async function getManualPayrollRateContext(
   };
 }
 
-async function getLatestRun(payrollPeriodId: string) {
-  const [latestRun] = await db
-    .select()
-    .from(payrollRuns)
-    .where(eq(payrollRuns.payrollPeriodId, payrollPeriodId))
-    .orderBy(desc(payrollRuns.createdAt))
-    .limit(1);
-
-  return latestRun ?? null;
-}
 
 function getEditBlockReason(status: string | null) {
   if (!status || EDITABLE_RUN_STATUSES.has(status)) return null;
@@ -1269,7 +1260,7 @@ export async function getManualPayrollEntryWorkspace(args: {
     args.includeAccountCodeOptions === false
       ? Promise.resolve([])
       : getManualAccountCodeOptions(),
-    getLatestRun(args.payrollPeriodId),
+    employeePayrollRun(args.payrollPeriodId,args.employeeId),
     getManualPayrollRateContext(args.payrollPeriodId, args.employeeId),
   ]);
 
@@ -1767,8 +1758,10 @@ export async function refreshManualPayrollAttendanceLinesFromBaseline(args: {
   };
 }
 
-async function assertManualPayrollEditable(payrollPeriodId: string) {
-  const latestRun = await getLatestRun(payrollPeriodId);
+async function assertManualPayrollEditable(payrollPeriodId: string,employeeId:string) {
+  const monthlyPosted=await db.select({id:payrollRuns.id}).from(payrollRuns).innerJoin(payrollRunEmployees,eq(payrollRunEmployees.payrollRunId,payrollRuns.id)).where(and(eq(payrollRunEmployees.employeeId,employeeId),eq(payrollRuns.status,"Posted"),sql`${payrollRuns.inputSnapshot}->>'payrollGroup'='Monthly'`,payrollInputPeriodScope(payrollPeriodId)));
+  if(monthlyPosted.length)throw new Error("This employee's monthly payout is already posted. Use the adjustment process; posted payroll is unchanged.");
+  const latestRun = await employeePayrollRun(payrollPeriodId,employeeId);
   const editBlockReason = getEditBlockReason(latestRun?.status ?? null);
   if (editBlockReason) {
     throw new Error(editBlockReason);
@@ -1778,14 +1771,16 @@ async function assertManualPayrollEditable(payrollPeriodId: string) {
 
 async function markLatestRunStale(args: {
   tx: DbLike;
+  payrollPeriodId:string;
+  employeeId:string;
   latestRun: typeof payrollRuns.$inferSelect | null;
   actorUserId: string;
   notes: string;
 }) {
-  if (!args.latestRun) return 0;
-  if (!EDITABLE_RUN_STATUSES.has(args.latestRun.status)) return 0;
-
-  if (args.latestRun.status !== "Stale") {
+  const monthlyRuns=await args.tx.select().from(payrollRuns).where(and(payrollInputPeriodScope(args.payrollPeriodId),sql`${payrollRuns.inputSnapshot}->>'payrollGroup'='Monthly'`,sql`exists(select 1 from payroll_run_employees where payroll_run_id=${payrollRuns.id} and employee_id=${args.employeeId})`));
+  const runs=[...new Map([...monthlyRuns,...(args.latestRun?[args.latestRun]:[])].map(run=>[run.id,run])).values()].filter(run=>["Draft","Stale","Reviewed","Approved"].includes(run.status));
+  for(const run of runs){
+  if (run.status !== "Stale") {
     await args.tx
       .update(payrollRuns)
       .set({
@@ -1796,20 +1791,21 @@ async function markLatestRunStale(args: {
         approvedByUserId: null,
         updatedAt: new Date(),
       })
-      .where(eq(payrollRuns.id, args.latestRun.id));
+      .where(eq(payrollRuns.id, run.id));
   }
 
   await recordPayrollRunEvent({
-    payrollRunId: args.latestRun.id,
+    payrollRunId: run.id,
     actorUserId: args.actorUserId,
     eventType: "MarkedStale",
-    fromStatus: args.latestRun.status as "Draft" | "Stale",
+    fromStatus: run.status,
     toStatus: "Stale",
     notes: args.notes,
     database: args.tx,
   });
 
-  return 1;
+  }
+  return runs.length;
 }
 
 export async function saveManualPayrollEntry(args: {
@@ -1822,7 +1818,7 @@ export async function saveManualPayrollEntry(args: {
       where: eq(payrollPeriods.id, args.payload.payrollPeriodId),
     }),
     getEmployeeForManualPayroll(args.payload.employeeId),
-    assertManualPayrollEditable(args.payload.payrollPeriodId),
+    assertManualPayrollEditable(args.payload.payrollPeriodId,args.payload.employeeId),
     getManualAccountCodeOptions(),
     getManualPayrollRateContext(args.payload.payrollPeriodId, args.payload.employeeId),
   ]);
@@ -1956,6 +1952,8 @@ export async function saveManualPayrollEntry(args: {
 
     await markLatestRunStale({
       tx,
+      payrollPeriodId:args.payload.payrollPeriodId,
+      employeeId:args.payload.employeeId,
       latestRun,
       actorUserId: args.actorUserId,
       notes: "Marked stale because a manual payroll override changed.",
@@ -1989,7 +1987,7 @@ export async function deleteManualPayrollEntry(args: {
   latestBaseline?: ManualPayrollBaselineSnapshot | null;
 }) {
   const [latestRun, existingEntry] = await Promise.all([
-    assertManualPayrollEditable(args.payrollPeriodId),
+    assertManualPayrollEditable(args.payrollPeriodId,args.employeeId),
     db.query.manualPayrollEntries.findFirst({
       where: and(
         eq(manualPayrollEntries.payrollPeriodId, args.payrollPeriodId),
@@ -2013,6 +2011,8 @@ export async function deleteManualPayrollEntry(args: {
 
     await markLatestRunStale({
       tx,
+      payrollPeriodId:args.payrollPeriodId,
+      employeeId:args.employeeId,
       latestRun,
       actorUserId: args.actorUserId,
       notes: "Marked stale because a manual payroll override was deleted.",

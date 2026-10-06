@@ -9,14 +9,14 @@ import { type WorkDraft, type WorkDay, localToInstant, sequenceProblems, workDat
 import { manilaWallTime, type SourcePunch } from "./attendanceSourceClient";
 import { lockAttendancePayrollInput } from "./attendanceSourceGuard";
 import { PayrollValidationError } from "./validation";
+import { adminDecision } from "./attendanceAdminDecision";
 import { resolutionDigest } from "./attendanceResolution";
 
 function fail(message:string):never {throw new PayrollValidationError(message);}
-const pending=["Approved","Applying","Sync pending","Failed","Needs fresh review"];
 export async function assertWorkbenchReady(periodId:string,database:DbClient=db) {
- const unfinished=await database.select({id:workPlans.id}).from(workPlans).where(and(inArray(workPlans.state,pending),sql`(${workPlans.periodId}=${periodId}::uuid or ${workPlans.impactedPeriodIds} @> jsonb_build_array(${periodId}::text))`)).limit(1);
- if(unfinished.length)fail("Attendance corrections are unfinished. Open batch progress and retry or review changed evidence. Payroll was not recomputed.");
- const people=await workEmployees(periodId,database);if(people.some(p=>p.days.some(d=>d.issues.length)))fail("Attendance coverage needs review. Resolve the remaining employee workdays, missing schedules and identity matches before refreshing DTR or computing payroll.");
+ // Readiness belongs to effective approved inputs, not source delivery or missing phone data.
+ void periodId; void database;
+
 }
 
 /** Called inside the reconciler's locked transaction, after a complete source pull. */
@@ -25,9 +25,11 @@ export async function reconcileWorkbenchInputs(tx:DbClient,periodId:string,recor
  const touched=new Set<string>();
  const [period]=await tx.select().from(payrollPeriods).where(eq(payrollPeriods.id,periodId));
  const payroll=await tx.select().from(payrollRuns).where(eq(payrollRuns.payrollPeriodId,periodId));
- const protectedPeriod=period.status!=="Open"||payroll.some(r=>r.status==="Posted");
+ const protectedPeriod=period.status!=="Open"||payroll.some(r=>r.status==="Posted"&&r.inputSnapshot?.payrollGroup!=="Monthly");
  const candidates=await tx.select().from(workPlans).where(and(eq(workPlans.state,"Sync pending"),sql`(${workPlans.periodId}=${periodId}::uuid or ${workPlans.impactedPeriodIds} @> jsonb_build_array(${periodId}::text))`));
  for(const plan of candidates) {
+  const localDecisions=await tx.select().from(workTreatments).where(and(eq(workTreatments.planId,plan.id),eq(workTreatments.periodId,periodId),eq(workTreatments.active,true)));
+  if(localDecisions.some(t=>adminDecision(t.payload)))continue;
   const draft=plan.draft as WorkDraft;
   const request=plan.sourceRequest as {operation:string;employeeIds:string[];from:string;through:string;reviewDays?:string[];_context:{eventId:string;type:string;capturedAt:string;employeeId:string;status:string}[];changes:{eventId:string;type?:string;capturedAt?:string;employeeId?:string;status?:string}[]}|null;
   const result=plan.sourceResult as {changes?:{event_id:string;after_json:string;revision:string}[]}|null;
@@ -108,21 +110,29 @@ export async function processWorkDelivery(actor:string,options:{batchId?:string;
   if(!claimed)continue;
   try {
    if(claimed.sourceRequest&&!claimed.sourceResult){
-    const request=claimed.sourceRequest as Record<string,unknown>;
+    const request={...claimed.sourceRequest as Record<string,unknown>};
+    const known=request.operation==="apply-plan"?await workSource({operation:"plan-status",version:1,id:request.id},options.fetcher):null;
+    if(request._deferredContext&&known?.state!=="Applied"){
+     const context=await workSource({operation:"context",version:1,employeeIds:request.employeeIds,from:request.from,through:request.through,reviewDays:request.reviewDays},options.fetcher) as {contextToken:string;records:{eventId:string;type:string;capturedAt:string;employeeId:string;status:string}[]};
+     const expected=request._context as typeof context.records;
+     const changes=request.changes as {eventId:string}[];
+     for(const change of changes){const before=expected.find(r=>r.eventId===change.eventId),live=context.records.find(r=>r.eventId===change.eventId);if(!before||!live||["type","capturedAt","employeeId","status"].some(k=>before[k as keyof typeof before]!==live[k as keyof typeof live]))fail("Source evidence changed. Payroll decision retained; review the incoming capture before retrying source delivery.");}
+     request.contextToken=context.contextToken;
+    }
     if(request.operation==="verify-context") {
      const context=await workSource({operation:"context",version:1,employeeIds:request.employeeIds,from:request.from,through:request.through,reviewDays:request.reviewDays},options.fetcher);
      if(context.contextToken!==request.contextToken)fail("Source evidence changed. Review changed evidence before applying this plan.");
      await database.update(workPlans).set({sourceResult:{state:"Verified",changes:[]}}).where(eq(workPlans.id,claimed.id));
     } else {
-    let status=await workSource({operation:"plan-status",version:1,id:request.id},options.fetcher);
-    if(status.state!=="Applied") {const {_context,_localEvidence,...wire}=request;void _context;void _localEvidence;await workSource(wire,options.fetcher);status=await workSource({operation:"plan-status",version:1,id:request.id},options.fetcher);}
+    let status=known??await workSource({operation:"plan-status",version:1,id:request.id},options.fetcher);
+    if(status.state!=="Applied") {const {_context,_localEvidence,_deferredContext,...wire}=request;void _context;void _localEvidence;void _deferredContext;await workSource(wire,options.fetcher);status=await workSource({operation:"plan-status",version:1,id:request.id},options.fetcher);}
     if(status.state!=="Applied")fail("The source has not confirmed this plan yet.");
     await database.update(workPlans).set({sourceResult:status}).where(eq(workPlans.id,claimed.id));
     }
    }
    await database.update(workPlans).set({state:"Sync pending",result:"Correction delivery confirmed. Reconciliation is pending; payroll has not been recomputed.",leaseUntil:null,updatedAt:new Date()}).where(eq(workPlans.id,claimed.id));
    (claimed.impactedPeriodIds as string[]).filter(id=>!((claimed.sourceResult as {syncedPeriodIds?:string[]}|null)?.syncedPeriodIds??[]).includes(id)).forEach(id=>pendingPeriods.add(id));
-  }catch(error){const message=error instanceof PayrollValidationError?error.message:"Delivery confirmation was interrupted. Retry unfinished work; the source may already have applied this plan.";await database.update(workPlans).set({state:message.includes("Source evidence changed")?"Needs fresh review":"Failed",leaseUntil:null,result:message,updatedAt:new Date()}).where(eq(workPlans.id,claimed.id));await database.insert(workHistory).values({planId:claimed.id,actor,action:"Delivery interrupted",details:{message}});}
+  }catch(error){const message=error instanceof PayrollValidationError?error.message:"Delivery confirmation was interrupted. Retry unfinished work; the source may already have applied this plan.";await database.update(workPlans).set({state:message.includes("Source evidence changed")?"Source conflict":"Failed",leaseUntil:null,result:message,updatedAt:new Date()}).where(eq(workPlans.id,claimed.id));await database.insert(workHistory).values({planId:claimed.id,actor,action:"Delivery interrupted",details:{message}});}
  }
  const synced=new Set<string>();
  for(const period of pendingPeriods){if(Date.now()>deadline-9000)break;try{const sync=options.sync??(await import("./attendanceSourceSync")).syncAttendanceSourcePeriod;await sync(period,actor);synced.add(period);}catch(error){const message=error instanceof PayrollValidationError?error.message:"Period reconciliation was interrupted. Retry unfinished work; delivered corrections remain recorded.";for(const plan of plans.filter(p=>(p.impactedPeriodIds as string[]).includes(period)))await database.update(workPlans).set({result:message,updatedAt:new Date()}).where(and(eq(workPlans.id,plan.id),eq(workPlans.state,"Sync pending")));}}
@@ -147,13 +157,15 @@ export async function closeAdjustment(tx:DbClient,actor:string,id:string,referen
 export async function reopenWorkPlan(tx:DbClient,actor:string,id:string) {
  await lockAttendancePayrollInput(tx);const [plan]=await tx.select().from(workPlans).where(eq(workPlans.id,id)).for("update");if(!plan||!["Needs fresh review","Rejected","Needs evidence","Ready for approval"].includes(plan.state))fail("Only unfinished review drafts can be reopened here.");
  const [batch]=await tx.select().from(workBatches).where(eq(workBatches.id,plan.batchId));
- const person=(await workEmployees(plan.periodId,tx)).find(p=>p.id===plan.employeeId);if(!person)fail("Employee no longer eligible.");
+ const people=await workEmployees(plan.periodId,tx);const person=people.find(p=>p.id===plan.employeeId);if(!person)fail("Employee no longer eligible.");
  const draft=plan.draft as WorkDraft;await tx.insert(workHistory).values({planId:id,actor,action:"Evidence review reopened",details:{previous:draft,current:person.days.filter(d=>draft.days.includes(d.day))}});
  let applied=plan.sourceResult as {state?:string;changes?:{event_id:string}[]}|null;
  if(batch.state!=="Draft"&&!applied&&plan.sourceRequest){const request=plan.sourceRequest as {operation:string;id:string};if(request.operation==="apply-plan")applied=await workSource({operation:"plan-status",version:1,id:request.id});}
  const savedManual=await tx.select().from(workRawLogs).where(eq(workRawLogs.planId,plan.id));
  const changes=draft.changes.map(c=>applied?.changes?.some(p=>p.event_id===c.eventId)||savedManual.some(m=>m.changeId===c.id)?{...c,id:crypto.randomUUID(),kind:"ConfirmSequence" as const,eventId:undefined,rawLogId:undefined,at:undefined,type:undefined,verified:false}:{...c,verified:false});
- return {draft:{...draft,version:draftVersion(person,draft.days),rejected:false,changes,...(batch.state!=="Draft"?{replaces:plan.id}:{})},existing:batch.state==="Draft"?{id:batch.id,revision:batch.revision}:undefined};
+ const current={...draft,version:draftVersion(person,draft.days),rejected:false,changes,...(batch.state!=="Draft"?{replaces:plan.id}:{})};
+ const siblings=batch.state==="Draft"?(await tx.select().from(workPlans).where(eq(workPlans.batchId,batch.id))).filter(p=>p.id!==plan.id&&["Ready for approval","Needs evidence","Rejected","Needs fresh review"].includes(p.state)).map(p=>{const saved=p.draft as WorkDraft,employee=people.find(e=>e.id===p.employeeId);return {...saved,version:employee?draftVersion(employee,saved.days):saved.version,changes:saved.changes.map(c=>({...c,verified:false}))};}):[];
+ return {draft:current,drafts:[...siblings,current],existing:batch.state==="Draft"?{id:batch.id,revision:batch.revision}:undefined};
 }
 export async function undoWorkDraft(database:DbClient,actor:string,id:string) {
  const [plan]=await database.select().from(workPlans).where(eq(workPlans.id,id));if(!plan||plan.state!=="Resolved")fail("Finish reconciliation before preparing Undo.");
@@ -166,7 +178,7 @@ export async function undoWorkDraft(database:DbClient,actor:string,id:string) {
  for(const prior of related)if(later.some(p=>!related.some(r=>r.id===p.id)&&p.employeeId===prior.employeeId&&p.updatedAt>prior.updatedAt&&(p.draft as WorkDraft).days.some(d=>(prior.draft as WorkDraft).days.includes(d))))fail("Later attendance decisions depend on this plan. Review their history before making a new correction.");
  const changes:WorkDraft["changes"]=[];
  for(const item of result?.changes??[]) {
-  const before=JSON.parse(item.before_json),record=people.flatMap(p=>p.contextRecords??p.days.flatMap(d=>d.records)).find(r=>r.id===item.event_id);
+  const before=JSON.parse(item.before_json),record=people.flatMap(p=>[...p.days.flatMap(d=>d.decision?.incomingRecords??[]),...(p.contextRecords??p.days.flatMap(d=>d.records))]).find(r=>r.id===item.event_id);
   if(!record||record.sourcePunch?.effectiveRevision!==item.revision)fail("A later source correction prevents Undo. Review its history before making a new correction.");
   const target=people.find(p=>p.sourceIds.includes(before.employeeId));if(!target)fail("Verify the original employee identity before Undo.");
   changes.push({id:crypto.randomUUID(),day:old.days.includes(workDate(before.capturedAt))?workDate(before.capturedAt):old.days[0],kind:"UndoCapture",employeeId:record.employeeId,eventId:item.event_id,type:before.type,at:manilaWallTime(before.capturedAt).timestamp.replace(" ","T"),targetEmployeeId:target.id,status:before.status,clockVerified:before.clockVerified,reason:"Undo prior correction",evidence:"",verified:false});
@@ -174,9 +186,13 @@ export async function undoWorkDraft(database:DbClient,actor:string,id:string) {
  for(const prior of related){
   const owner=people.find(p=>p.id===prior.employeeId);if(!owner)fail("A related employee is no longer eligible. Review the employee record before Undo.");
   const add=(c:WorkDraft["changes"][number])=>changes.push({...c,employeeId:owner.id});
-  const manual=await database.select().from(workRawLogs).where(eq(workRawLogs.planId,prior.id));
+  const snapshots=await database.select().from(workTreatments).where(eq(workTreatments.planId,prior.id));
+  const authoritative=snapshots.some(t=>adminDecision(t.payload));
+  const priorDraft=prior.draft as WorkDraft;
+  const manual=(await database.select().from(workRawLogs).where(eq(workRawLogs.planId,prior.id))).filter(r=>!authoritative||priorDraft.changes.some(c=>c.kind==="Manual"&&r.changeId.endsWith(":"+c.id)));
+  if(authoritative)for(const c of priorDraft.changes.filter(c=>c.kind==="Exclude"||c.kind==="Retain"))add({...c,id:crypto.randomUUID(),kind:c.kind==="Exclude"?"Retain":"Exclude",reason:"Undo source selection",evidence:"",verified:false});
   for(const r of manual){const record=owner.days.flatMap(d=>d.records).find(p=>p.rawLogId===r.rawLogId);if(!record)fail("A later attendance change removed manual evidence. Review history before Undo.");add({id:crypto.randomUUID(),day:workDate(record.at),kind:"Exclude",rawLogId:r.rawLogId,reason:"Undo verified manual entry",evidence:"",verified:false});}
-  const exclusions=await database.select().from(workExclusions).where(eq(workExclusions.planId,prior.id));
+  const exclusions=authoritative?[]:await database.select().from(workExclusions).where(eq(workExclusions.planId,prior.id));
   for(const r of exclusions){const record=owner.days.flatMap(d=>d.records).find(p=>p.rawLogId===r.rawLogId);if(!record)fail("Competing attendance evidence changed. Review history before Undo.");add({id:crypto.randomUUID(),day:workDate(record.at),kind:r.active?"Retain":"Exclude",rawLogId:r.rawLogId,reason:"Undo source selection",evidence:"",verified:false});}
   const sourceExclusions=await database.select().from(workSourceExclusions).where(and(eq(workSourceExclusions.planId,prior.id),eq(workSourceExclusions.periodId,plan.periodId)));
   for(const r of sourceExclusions){const record=owner.days.flatMap(d=>d.records).find(p=>p.id===r.eventId);if(!record||r.version!==resolutionDigest(record.sourcePunch))fail("Source selection evidence changed. Review history before Undo.");add({id:crypto.randomUUID(),day:workDate(record.at),kind:r.active?"Retain":"Exclude",eventId:r.eventId,reason:"Undo source selection",evidence:"",verified:false});}

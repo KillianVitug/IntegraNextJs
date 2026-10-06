@@ -20,7 +20,7 @@ export function AttendanceReadinessCard({ data, error, compact = false }: { data
     {!data.ready && <p className="font-medium">Payroll was not recomputed by this check. Your existing run is unchanged.</p>}
     <div className="flex flex-wrap gap-2 text-sm"><span>{cases} employee cases</span><span>·</span><span>{data.counts.withheld ?? 0} punches withheld</span><span>·</span><span>{data.counts.boundaryReview ?? 0} boundary flags</span><span>·</span><span>{data.summariesOutdated ? "DTR summaries outdated" : "DTR freshness checked"}</span></div>
     {!compact && data.blockers.map((b, i) => <p key={i} className="text-sm leading-6">{b}</p>)}
-    <p className="text-xs leading-5 text-slate-600">Flags can refer to the same records; counts are not added together. {data.syncedAt ? `Last completed sync: ${originalPunchDateTime(data.syncedAt)} (Philippine time).` : "No completed sync for this period."}</p>
+    <p className="text-xs leading-5 text-slate-600">Flags can refer to the same records; counts are not added together. {data.syncedAt ? `Last sync attempt: ${data.runState??"Unknown"} · ${originalPunchDateTime(data.syncedAt)} (Philippine time).` : "No completed sync attempt for this period."}</p>
     <div className="flex flex-wrap gap-2"><Link className={`${button} bg-blue-700 text-white`} href={base + "#attendance-review"}>View affected records</Link><Link className={button} href={base + "#reconcile-title"}>Sync and check again</Link></div>
   </section>;
 }

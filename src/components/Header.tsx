@@ -26,7 +26,7 @@ export async function Header() {
 
   return (
     <header className="animate-slide bg-background h-12 p-2 border-b sticky top-0 z-max">
-      <div className="flex h-8 items-center justify-between w-full">
+      <div className="flex h-8 min-w-0 items-center justify-between w-full">
         <div className="flex items-center gap-2">
           <NavButton href="/home" label="Home" icon={HomeIcon} />
           <Link
@@ -40,7 +40,7 @@ export async function Header() {
           </Link>
         </div>
 
-        <div className="flex items-center">
+        <div className="flex min-w-0 items-center overflow-x-auto">
           <NavButtonMenu
             icon={UsersRound}
             label="Employee Menu"

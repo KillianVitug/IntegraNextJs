@@ -155,6 +155,7 @@ import {
 } from "./sections";
 
 type Props = {
+  payrollGroup?: "Daily" | "Monthly";
   attendanceEnabled?: boolean;
   activeSection: PayrollSection;
   initialYear: number;
@@ -1179,7 +1180,7 @@ function DepartmentFilterDropdown({
 function MissingDtrBadge() {
   return (
     <span className="shrink-0 text-xs font-semibold text-destructive">
-      Missing DTR
+      No work recorded
     </span>
   );
 }
@@ -1220,7 +1221,7 @@ function EmployeeDtrPicker({
           employeeType: employee.employeeType,
           fallbackName: employee.employeeName,
         }),
-        employee.hasDtrRecord ? null : "Missing DTR",
+        employee.hasDtrRecord ? null : "No work recorded",
         employee.sourceFiles.map((sourceFile) => sourceFile.sourceFileName).join(" "),
       ],
       employeeSearch
@@ -2762,14 +2763,13 @@ function getWorkflowStepStatus(args: {
   selectedRun: PayrollRunView | null;
   readiness: PayrollReadinessView | null;
   attendanceHoldUnapprovedRowCount: number;
+  attendanceReady: boolean;
 }): "done" | "pending" | "blocked" {
   const { step, selectedPeriod, selectedRun, readiness } = args;
 
   if (step === "Period Setup") return selectedPeriod ? "done" : "pending";
   if (step === "DTR Ready") {
-    return selectedPeriod &&
-      selectedPeriod.attendanceBatchCount > 0 &&
-      args.attendanceHoldUnapprovedRowCount === 0
+    return selectedPeriod && args.attendanceReady
       ? "done"
       : "pending";
   }
@@ -2976,6 +2976,7 @@ function getAdjacentEmployeeIds<T extends { employeeId: string }>(
 
 export function PayrollWorkspace({
   attendanceEnabled = false,
+  payrollGroup = "Daily",
   activeSection,
   initialYear,
   periods: initialPeriods,
@@ -3004,6 +3005,8 @@ export function PayrollWorkspace({
   const [actionState, setActionState] = useState<string | null>(null);
   const [attendanceReadiness, setAttendanceReadiness] = useState<AttendanceReadiness | null>(null);
   const [payrollActionError, setPayrollActionError] = useState<{ periodId: string; message: string } | null>(null);
+  const payrollErrorRef=useRef<HTMLDivElement>(null);
+  useEffect(()=>{if(payrollActionError){payrollErrorRef.current?.focus();payrollErrorRef.current?.scrollIntoView({block:"center"});}},[payrollActionError]);
   const [attendanceCheckError, setAttendanceCheckError] = useState<string | null>(null);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string | null>(
     initialSelectedRun?.employees[0]?.employeeId ?? null
@@ -3411,10 +3414,13 @@ export function PayrollWorkspace({
           selectedRun,
           readiness: currentReadiness,
           attendanceHoldUnapprovedRowCount,
+          attendanceReady: payrollGroup === "Monthly" || attendanceReadiness?.ready === true,
         }),
       })),
     [
       attendanceHoldUnapprovedRowCount,
+      payrollGroup,
+      attendanceReadiness,
       currentReadiness,
       selectedPeriod,
       selectedRun,
@@ -3748,13 +3754,14 @@ export function PayrollWorkspace({
       const snapshot = await getPayrollWorkspaceSnapshotAction(
         initialYear,
         selectedPeriod?.id ?? selectedPeriodId,
-        lineEmployeeId
+        lineEmployeeId,
+        payrollGroup
       );
 
       setWorkspaceSnapshot(snapshot);
       return snapshot;
     },
-    [initialYear, selectedEmployeeId, selectedPeriod?.id, selectedPeriodId]
+    [initialYear, selectedEmployeeId, selectedPeriod?.id, selectedPeriodId, payrollGroup]
   );
 
   useEffect(() => {
@@ -4222,6 +4229,7 @@ export function PayrollWorkspace({
     void (async () => {
       try {
         const readiness = await preflightPayrollAction(selectedPeriodKey, {
+          payrollGroup,
           bypassTemporaryReadinessCategories,
         });
         if (cancelled) return;
@@ -4253,6 +4261,7 @@ export function PayrollWorkspace({
     attendanceBatchKey,
     attendanceDtrReloadKey,
     bypassTemporaryReadinessCategories,
+    payrollGroup,
   ]);
 
   useEffect(() => {
@@ -6484,6 +6493,7 @@ export function PayrollWorkspace({
       "compute-run",
       async () => {
         const readiness = await preflightPayrollAction(selectedPeriod.id, {
+          payrollGroup,
           bypassTemporaryReadinessCategories,
         });
         const nextState: PayrollReadinessState = {
@@ -6508,6 +6518,7 @@ export function PayrollWorkspace({
         }
 
         await computePayrollRun(selectedPeriod.id, {
+          payrollGroup,
           bypassTemporaryReadinessCategories,
         });
         invalidatePayrollResourceCache([
@@ -7830,14 +7841,13 @@ export function PayrollWorkspace({
     selectedRun.status !== "Void";
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 space-y-6 [&_.grid>*]:min-w-0">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="space-y-2">
           <h1 className="text-2xl font-bold">Payroll Workspace</h1>
           <p className="max-w-3xl text-sm text-muted-foreground">
-            This is the first operational UI for the new payroll engine. Use it to
-            seed semi-monthly periods, import employee time logs, compute a payroll
-            run, review employee line items, and then approve or post the run.
+            Compute the selected payroll group, review each employee’s earnings
+            and deductions, then approve and post when ready.
           </p>
         </div>
 
@@ -7905,7 +7915,7 @@ export function PayrollWorkspace({
         </CardContent>
       </Card>
 
-      <div className="grid gap-6 xl:grid-cols-[1.1fr_1.9fr]">
+      <div className="grid min-w-0 grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1.9fr)]">
         <Card>
           <CardHeader className="pb-3">
             <CardTitle>Payroll Periods</CardTitle>
@@ -8074,9 +8084,9 @@ export function PayrollWorkspace({
                   </div>
                 </div>
 
-                {attendanceEnabled && attendanceReadiness?.periodId === selectedPeriod.id && <AttendanceReadinessCard data={attendanceReadiness} error={payrollActionError?.periodId === selectedPeriod.id ? payrollActionError.message : null} />}
+                {payrollGroup==="Daily" && attendanceEnabled && attendanceReadiness?.periodId === selectedPeriod.id && <AttendanceReadinessCard data={attendanceReadiness} />}
                 {attendanceCheckError && <p role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-slate-900">{attendanceCheckError}</p>}
-                {payrollActionError?.periodId === selectedPeriod.id && <div role="alert" className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-900"><strong>Payroll action needs attention.</strong><p className="mt-2">{payrollActionError.message}</p><p className="mt-2">Check the current run and attendance review before trying again. This message stays here until you retry or change periods.</p></div>}
+                {payrollActionError?.periodId === selectedPeriod.id && <div ref={payrollErrorRef} tabIndex={-1} role="alert" className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-900"><strong>Payroll action needs attention.</strong><p className="mt-2">{payrollActionError.message}</p><p className="mt-2">Check the current run before trying again. Your inputs are retained.</p></div>}
                 <div className="rounded-lg border bg-muted/20 p-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
@@ -8180,7 +8190,7 @@ export function PayrollWorkspace({
                   <Button
                     type="button"
                     onClick={() => void handleComputePayrollRun()}
-                    disabled={actionState !== null || isNavigating || attendanceEnabled && (!attendanceReadiness || attendanceReadiness.periodId !== selectedPeriod.id || !attendanceReadiness.ready)}
+                    disabled={actionState !== null || isNavigating || payrollGroup!=="Monthly" && attendanceEnabled && (!attendanceReadiness || attendanceReadiness.periodId !== selectedPeriod.id || !attendanceReadiness.ready)}
                   >
                     {actionState === "compute-run"
                       ? "Computing..."
@@ -8304,7 +8314,7 @@ export function PayrollWorkspace({
         value={activeTab}
         className="space-y-4"
       >
-        <TabsList>
+        <TabsList className="h-auto max-w-full flex-wrap justify-start gap-1">
           <TabsTrigger value="run" asChild>
             <Link href={getSectionHref("run")}>Payroll Run</Link>
           </TabsTrigger>
@@ -8365,13 +8375,12 @@ export function PayrollWorkspace({
             </Card>
           </div>
 
-          <div className="grid gap-6 xl:grid-cols-[1.25fr_1fr]">
+          <div className="grid min-w-0 grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle>Employee Payroll Snapshot</CardTitle>
                 <CardDescription>
-                  Each row is stored in payroll_run_employees, with detailed line
-                  items in payroll_run_lines.
+                  Select an employee to review their earnings, deductions and payment basis.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3 px-6 pb-6">
@@ -8431,6 +8440,7 @@ export function PayrollWorkspace({
                               employee.payComputationMode,
                               employee.isManualPayrollOverride
                             )}
+                            {selectedRun?.payrollGroup==="Daily"&&Number(employee.grossPay)===0&&<span className="mt-1 block text-xs">No work — ₱0</span>}
                           </TableCell>
                           <TableCell>{formatMoney(employee.grossPay)}</TableCell>
                           <TableCell>{formatMoney(employee.totalDeductions)}</TableCell>
@@ -8528,7 +8538,7 @@ export function PayrollWorkspace({
 
                 {selectedRun && (
                   <div className="rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
-                    Run #{selectedRun.runNumber} created {formatDateTime(selectedRun.createdAt)}
+                    {selectedRun.payrollGroup??"Legacy"} · {selectedRun.earningMonth??""} · Run #{selectedRun.runNumber} created {formatDateTime(selectedRun.createdAt)}
                     {selectedRun.computedAt
                       ? ` and last computed ${formatDateTime(selectedRun.computedAt)}.`
                       : "."}
@@ -10091,8 +10101,7 @@ export function PayrollWorkspace({
                     </p>
                   ) : null}
                   <p className="mt-2 text-xs text-muted-foreground">
-                    Import all branch files for the selected payroll period before
-                    computing payroll. Comma, tab, semicolon, pipe, whitespace,
+                    Import available attendance files. Comma, tab, semicolon, pipe, whitespace,
                     CSV, and TXT exports are accepted; unknown or ambiguous
                     numeric IDs stay unmatched.
                   </p>
@@ -10265,10 +10274,9 @@ export function PayrollWorkspace({
                       </div>
                     </div>
                     <div className="rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
-                      Import every branch file for {selectedPeriod.code} before
-                      computing payroll. Review DTR status, approve daily OT, and
-                      adjust payroll worked time here before recomputing the run.
-                      Employees without period DTR summaries are marked as missing.
+                      Review recorded work, approved daily OT and any manual adjustments for {selectedPeriod.code}.
+                      Days without attendance contribute no recorded work and do not block payroll.
+                      Approved leave, other earnings and fixed monthly salary follow their payroll rules.
                     </div>
                   </div>
 
@@ -10616,12 +10624,12 @@ export function PayrollWorkspace({
                       ) : !selectedDtrEmployee.hasDtrRecord ? (
                         <div className="rounded-lg border border-dashed p-4 text-sm">
                           <div className="font-semibold text-destructive">
-                            Missing DTR
+                            No work recorded
                           </div>
                           <div className="mt-1 text-muted-foreground">
                             This employee has no DTR records for{" "}
-                            {selectedPeriod.code}. Import or refresh attendance
-                            summaries to review daily rows.
+                            {selectedPeriod.code}. Attendance contributes zero work.
+                            Approved leave, other earnings and fixed monthly salary remain governed by payroll rules.
                           </div>
                         </div>
                       ) : selectedDtrRows.length === 0 ? (

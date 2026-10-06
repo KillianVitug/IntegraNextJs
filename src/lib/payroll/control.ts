@@ -1,3 +1,5 @@
+import { payrollGroup, earningMonth, runPayrollGroup, type PayrollGroup } from "./payrollGroupModel";
+import { monthlyPayouts } from "./payrollGroups";
 import { db } from "@/db";
 import {
   employeePayrollReadinessChecks,
@@ -39,6 +41,7 @@ export type PayrollPreflightResult = {
 };
 
 export type PayrollPreflightOptions = {
+  payrollGroup?: PayrollGroup;
   persist?: boolean;
   bypassTemporaryReadinessCategories?: boolean;
 };
@@ -171,7 +174,9 @@ export async function preflightPayroll(
     },
   });
 
+  const selectedGroup=options.payrollGroup??"Daily",payouts=await monthlyPayouts(earningMonth(period));
   const readiness = employeesForPayroll
+    .filter(employee=>payrollGroup(employee.salary)===selectedGroup&&(selectedGroup!=="Monthly"||(payouts.get(employee.id)??"B")===period.cycle))
     .filter((employee) =>
       isPayrollEligibleEmploymentStatus(employee.generalInfo?.employmentStatus)
     )
@@ -186,7 +191,7 @@ export async function preflightPayroll(
         toAmount(salary?.monthlyRate) > 0 || toAmount(salary?.dailyRate) > 0;
 
       if (!generalInfo?.dateHired) blockers.push("Missing hire date.");
-      if (generalInfo?.payrollTerms !== "Semi-Monthly") {
+      if (generalInfo?.payrollTerms !== "Semi-Monthly" && !(selectedGroup==="Monthly"&&generalInfo?.payrollTerms==="Monthly")) {
         blockers.push("Payroll terms must be Semi-Monthly for v1.");
       }
       if (!hasSalaryRate) blockers.push("Missing monthly or daily salary rate.");
@@ -216,7 +221,7 @@ export async function preflightPayroll(
       } satisfies EmployeePayrollReadiness;
     });
 
-  if (options.persist ?? true) {
+  if (options.persist ?? false) {
     await db.transaction(async (tx) => {
       await tx
         .delete(employeePayrollReadinessChecks)
@@ -450,11 +455,14 @@ export async function publishPayslips(args: {
           kind: "Payslip",
           status: "Published",
           format: "PDF",
-          fileName: `${employeeRun.employeeNoSnapshot}-${run.payrollPeriod?.code ?? "payroll"}-payslip.pdf`,
+          fileName: `${employeeRun.employeeNoSnapshot}-${run.payrollPeriod?.code ?? "payroll"}-${runPayrollGroup(run.inputSnapshot)}-payslip.pdf`,
           metadata: {
             employeeId: employeeRun.employeeId,
             runNumber: run.runNumber,
             generatedFrom: "payroll-run-snapshot",
+            payrollGroup:runPayrollGroup(run.inputSnapshot),
+            earningMonth:run.inputSnapshot?.earningMonth??null,
+            payoutHalf:run.inputSnapshot?.payoutHalf??null,
           },
           generatedByUserId: args.actorUserId,
           generatedAt: new Date(),
@@ -523,7 +531,7 @@ export async function generateBankBatch(args: {
         kind: batchType === "Bank" ? "BankFile" : "CashPayrollList",
         status: "Generated",
         format: "CSV",
-        fileName: `${run.payrollPeriod?.code ?? "payroll"}-${batchType.toLowerCase()}-disbursement.csv`,
+        fileName: `${run.payrollPeriod?.code ?? "payroll"}-${runPayrollGroup(run.inputSnapshot)}-${batchType.toLowerCase()}-disbursement.csv`,
         metadata: {
           employeeCount: run.employees.length,
           totalNetPay: money(totalNetPay),
@@ -610,7 +618,7 @@ export async function generateGlJournal(args: {
         kind: "GlJournal",
         status: "Generated",
         format: "CSV",
-        fileName: `${run.payrollPeriod?.code ?? "payroll"}-gl-journal.csv`,
+        fileName: `${run.payrollPeriod?.code ?? "payroll"}-${runPayrollGroup(run.inputSnapshot)}-gl-journal.csv`,
         metadata: {
           totalDebits: money(totalDebits),
           totalCredits: money(totalCredits),
@@ -729,7 +737,7 @@ export async function generateStatutoryPackage(args: {
         kind: args.kind,
         status: "Generated",
         format: "CSV",
-        fileName: `${run.payrollPeriod?.code ?? "payroll"}-${args.kind}.csv`,
+        fileName: `${run.payrollPeriod?.code ?? "payroll"}-${runPayrollGroup(run.inputSnapshot)}-${args.kind}.csv`,
         metadata: {
           amountDue: money(amountDue),
           periodStart: run.payrollPeriod?.startDate,

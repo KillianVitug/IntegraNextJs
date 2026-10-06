@@ -1,4 +1,5 @@
 import { db } from "@/db";
+import { payrollInputPeriodScope } from "./payrollGroups";
 import {
   accountCode,
   attendanceDailySummaries,
@@ -963,16 +964,17 @@ async function markLatestEditableRunStale(args: {
   actorUserId: string;
   notes: string;
 }) {
-  const [latestRun] = await args.tx
+  const affectedRuns = await args.tx
     .select()
     .from(payrollRuns)
-    .where(eq(payrollRuns.payrollPeriodId, args.payrollPeriodId))
+    .where(payrollInputPeriodScope(args.payrollPeriodId))
     .orderBy(desc(payrollRuns.createdAt))
-    .limit(1);
+;
 
-  if (!latestRun) return 0;
-  if (latestRun.status !== "Draft" && latestRun.status !== "Reviewed") {
-    return 0;
+  let count=0;
+  for(const latestRun of affectedRuns){
+  if (!["Draft","Reviewed","Approved"].includes(latestRun.status)) {
+    continue;
   }
 
   await args.tx
@@ -997,7 +999,9 @@ async function markLatestEditableRunStale(args: {
     database: args.tx,
   });
 
-  return 1;
+  count++;
+  }
+  return count;
 }
 
 export async function getPayrollExceptionAccountCodeOptions() {

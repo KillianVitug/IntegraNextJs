@@ -38,13 +38,13 @@ async function main(){
  const review=await prepareWorkApproval(periodId,saved.id,saved.revision,client,fetcher);
  await assert.rejects(()=>approveWorkBatch(actor,periodId,saved.id,saved.revision,"unacknowledged",database as unknown as typeof db,fetcher),/preview changed/);
  await approveWorkBatch(actor,periodId,saved.id,saved.revision,review.digest,database as unknown as typeof db,fetcher);
- await assert.rejects(()=>assertWorkbenchReady(periodId,client),/unfinished/);
+ await assertWorkbenchReady(periodId,client); // Delivery cannot veto an approved decision.
  await processWorkDelivery(actor,{database:database as unknown as typeof db,batchId:saved.id,fetcher,sync});assert.equal((await database.select().from(workPlans))[0].state,"Failed");assert.equal(writeCount,1);
  await processWorkDelivery(actor,{database:database as unknown as typeof db,batchId:saved.id,fetcher,sync});assert.equal((await database.select().from(workPlans))[0].state,"Resolved");assert.equal(writeCount,1,"Retry must recover the already committed source result");
- await assertWorkbenchReady(periodId,client);assert.equal((await database.select().from(attendanceRawLogs)).length,4);const repeat=await sync();assert.equal(repeat.projected,0);
+ await assertWorkbenchReady(periodId,client);assert.equal((await database.select().from(attendanceRawLogs)).length,4,"Imported first day plus approved effective second-day pair");const repeat=await sync();assert.equal(repeat.projected,0);
  const undo=await undoWorkDraft(client,actor,(await database.select().from(workPlans))[0].id);assert.equal(undo[0].changes.find(c=>c.kind==="UndoCapture")?.at,"2026-09-30T07:42:31.725");
  // Coverage includes employees without a single source punch; schedules are never invented.
- const missingId=randomUUID();await database.insert(employees).values({id:missingId,employeeNo:"00999",firstName:"No",lastName:"Punches"});const noPunch=(await workEmployees(periodId,client)).find(p=>p.id===missingId)!;assert.equal(noPunch.days[0].status,"Schedule missing");assert.ok(noPunch.days[0].issues.some(x=>x.includes("mapping")));
+ const missingId=randomUUID();await database.insert(employees).values({id:missingId,employeeNo:"00999",firstName:"No",lastName:"Punches"});const noPunch=(await workEmployees(periodId,client)).find(p=>p.id===missingId)!;assert.equal(noPunch.days[0].status,"No work recorded");assert.equal(noPunch.days[0].issues.length,0);
  await database.insert(employeesTimekeeping).values({employeeId:missingId,checkInTime:"08:00:00",checkOutTime:"17:00:00",hoursWorked:"8"});await database.insert(attendanceSourceMappings).values({sourceEmployeeId:"999",employeeId:missingId,actorUserId:actor,reason:"Fixture verified match"});
  const configured=(await workEmployees(periodId,client)).find(p=>p.id===missingId)!;
  const verified={reason:"Supervisor verified actual work",evidence:"Fictional source document 52",verified:true};

@@ -50,25 +50,25 @@ export async function loadAttendanceReadiness(periodId: string, database: DbClie
   const [state] = await database.select().from(periods).where(eq(periods.payrollPeriodId, periodId));
   const people = await resolutionPeople(database, { id: period.id, startDate: period.startDate, endDate: period.endDate });
   const history = await database.select().from(resolutions).where(eq(resolutions.payrollPeriodId, periodId)).orderBy(desc(resolutions.createdAt), desc(resolutions.id)).limit(51).offset(Math.max(0, Math.min(10000, Math.floor(historyPage))) * 50);
-  const posted = await database.select({ id: payrollRuns.id }).from(payrollRuns).where(and(eq(payrollRuns.payrollPeriodId, periodId), eq(payrollRuns.status, "Posted"))).limit(1);
+  const posted = await database.select({ id: payrollRuns.id }).from(payrollRuns).where(and(eq(payrollRuns.payrollPeriodId, periodId), eq(payrollRuns.status, "Posted"),sql`coalesce(${payrollRuns.inputSnapshot}->>'payrollGroup','Legacy') <> 'Monthly'`)).limit(1);
   const blockers: string[] = [];
   let needsSync=!run||run.state!=="Complete";
   try { await assertAttendanceSourceReady(periodId, database); } catch (error) { if(error instanceof AttendanceSourceIssue)needsSync ||= error.needsSync; if (error instanceof PayrollValidationError) blockers.push(error.message); else throw error; }
-  if (!run) blockers.push("Sync attendance for this period before continuing.");
+  if (!run&&process.env.ATTENDANCE_WORKBENCH_ENABLED!=="true") blockers.push("Sync attendance for this period before continuing.");
   const counts = (run?.counts ?? {}) as Record<string, number>;
-  return { periodId, code: period.code, startDate: period.startDate, endDate: period.endDate, periodOpen: period.status === "Open" && !posted.length, runState: run?.state ?? null, syncedAt: run?.completedAt?.toISOString() ?? null, needsSync, summariesOutdated: !!state && state.inputRunId !== state.summariesRunId, ready: !blockers.length, blockers, counts, people, history: history.slice(0, 50).map(h => ({ id: h.id, sourceId: h.sourceEmployeeId, kind: h.kind, state: h.state, reason: h.reason, evidence: h.evidence, createdAt: h.createdAt.toISOString(), updatedAt: h.updatedAt.toISOString(), actor: h.actorUserId, reviewer: h.reviewerUserId, manualPunches: h.manualPunches as ManualPunch[], eventIds: h.eventIds as string[], result: h.result })), historyHasMore: history.length > 50, sourceCorrectionsEnabled: (process.env.ATTENDANCE_CORRECTION_TOKEN?.length ?? 0) >= 32 };
+  return { periodId, code: period.code, startDate: period.startDate, endDate: period.endDate, periodOpen: period.status === "Open" && !posted.length, runState: run?.state ?? null, syncedAt: run?.completedAt?.toISOString() ?? null, needsSync, summariesOutdated: !!state && state.inputRunId !== state.summariesRunId || blockers.some(b=>/DTR refresh|Refresh attendance summaries/.test(b)), ready: !blockers.length, blockers, counts, people, history: history.slice(0, 50).map(h => ({ id: h.id, sourceId: h.sourceEmployeeId, kind: h.kind, state: h.state, reason: h.reason, evidence: h.evidence, createdAt: h.createdAt.toISOString(), updatedAt: h.updatedAt.toISOString(), actor: h.actorUserId, reviewer: h.reviewerUserId, manualPunches: h.manualPunches as ManualPunch[], eventIds: h.eventIds as string[], result: h.result })), historyHasMore: history.length > 50, sourceCorrectionsEnabled: (process.env.ATTENDANCE_CORRECTION_TOKEN?.length ?? 0) >= 32 };
 }
 
 async function openPeriod(tx: DbClient, id: string) {
   const [period] = await tx.select().from(payrollPeriods).where(eq(payrollPeriods.id, id)).for("update");
   const payroll = await tx.select().from(payrollRuns).where(eq(payrollRuns.payrollPeriodId, id)).for("update");
-  if (!period || period.status !== "Open" || payroll.some(p => p.status === "Posted")) fail("This affects closed or posted payroll. Arrange a linked payroll adjustment before changing the attendance.");
+  if (!period || period.status !== "Open" || payroll.some(p => p.status === "Posted"&&p.inputSnapshot?.payrollGroup!=="Monthly")) fail("This affects closed or posted payroll. Arrange a linked payroll adjustment before changing the attendance.");
   return { period, payroll };
 }
 export async function invalidateResolutionPeriod(tx: DbClient, periodId: string, actor: string) {
   const { payroll } = await openPeriod(tx, periodId);
   await tx.update(periods).set({ summariesRunId: null }).where(eq(periods.payrollPeriodId, periodId));
-  for (const run of payroll.filter(p => ["Draft", "Reviewed", "Approved"].includes(p.status))) {
+  for (const run of payroll.filter(p => ["Draft", "Reviewed", "Approved"].includes(p.status)&&p.inputSnapshot?.payrollGroup!=="Monthly")) {
     await tx.update(payrollRuns).set({ status: "Stale", reviewedAt: null, reviewedByUserId: null, approvedAt: null, approvedByUserId: null, updatedAt: new Date() }).where(eq(payrollRuns.id, run.id));
     await tx.insert(payrollRunEvents).values({ payrollRunId: run.id, actorUserId: actor, eventType: "MarkedStale", fromStatus: run.status, toStatus: "Stale", notes: "Attendance resolution changed. Sync, refresh DTR and recompute before payroll review." });
   }

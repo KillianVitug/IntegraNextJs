@@ -79,6 +79,6 @@ export async function refreshAttendanceSourceSummariesAction(periodId: string) {
   await requireAdminActor(); requireAttendanceSource();
   return payrollActionResult(async () => {
     const result = await refreshAttendancePeriodSummariesAction(periodId);
-    return `${result.summaryCount} DTR summaries refreshed for ${result.employeeCount} employees. Review DTR and resolve remaining source exceptions before computing payroll.`;
+    return `${result.summaryCount} DTR summaries refreshed for ${result.employeeCount} employees. Review DTR, then compute payroll. Missing attendance contributes no recorded work; source warnings remain available for review.`;
   });
 }

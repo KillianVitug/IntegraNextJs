@@ -14,6 +14,10 @@ export type WeeklyShiftPatternRecord = typeof employeeWeeklyShiftPatterns.$infer
   days: WeeklyShiftPatternDayRecord[];
 };
 export type LegacyTimekeepingRecord = typeof employeesTimekeeping.$inferSelect | null;
+/** A biometrics ID alone is not a pay schedule. Retain configured flexible hours. */
+export function hasLegacyPaySchedule(timekeeping:LegacyTimekeepingRecord) {
+  return !!(timekeeping?.checkInTime&&timekeeping.checkOutTime)||Number(timekeeping?.hoursWorked??0)>0;
+}
 export type WeekdayName = (typeof restDayEnum.enumValues)[number];
 
 export type ResolvedEmployeeSchedule = {

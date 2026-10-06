@@ -15,7 +15,7 @@ const nextConfig: NextConfig = {
     "tailwind-merge",
   ],
   serverExternalPackages: ["@neondatabase/serverless", "ws"],
-  allowedDevOrigins: ["localhost", "127.0.0.1", "192.168.23.111"],
+  allowedDevOrigins: ["localhost", "127.0.0.1", "192.168.23.111", "10.1.0.207"],
 };
 
 export default nextConfig;
