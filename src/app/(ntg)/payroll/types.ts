@@ -327,6 +327,8 @@ export type PayrollRunPeriodView = {
 };
 
 export type PayrollRunHeaderView = {
+  payrollGroup?: "Daily"|"Monthly"|"Legacy";
+  earningMonth?:string;
   id: string;
   status: string;
   runNumber: number;

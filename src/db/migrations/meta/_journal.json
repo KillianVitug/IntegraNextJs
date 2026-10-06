@@ -848,6 +848,13 @@
       "when": 1791417600000,
       "tag": "0123_attendance_workbench",
       "breakpoints": true
+    },
+    {
+      "idx": 125,
+      "version": "7",
+      "when": 1791504000000,
+      "tag": "0124_payroll_groups",
+      "breakpoints": true
     }
   ]
 }

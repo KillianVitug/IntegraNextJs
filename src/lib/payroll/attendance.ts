@@ -1026,6 +1026,22 @@ type TimelineWindow = { startMinutes: number; endMinutes: number };
 function getWorkedSegments(logs: ParsedAttendanceLog[]) {
   const segments: WorkedSegment[] = [];
 
+  // Explicit directions must form actual IN/OUT pairs. An unmatched capture
+  // contributes no time; retain the legacy positional parser for undirected files.
+  if (logs.some(log => log.direction !== "UNSPECIFIED")) {
+    let opened: Date | null = null;
+    for (const log of logs) {
+      if (log.direction === "IN") opened = log.loggedAt;
+      else if (log.direction === "OUT" && opened) {
+        if (log.loggedAt > opened && log.loggedAt.getTime() - opened.getTime() <= 86400000) {
+          segments.push({ inAt: opened, outAt: log.loggedAt });
+        }
+        opened = null;
+      }
+    }
+    return segments;
+  }
+
   for (let index = 0; index + 1 < logs.length; index += 2) {
     const inAt = logs[index]?.loggedAt;
     const outAt = logs[index + 1]?.loggedAt;
@@ -1350,8 +1366,8 @@ export function summarizeEmployeeDay(
   }));
   const originalTimes = new Map(orderedLogs.map((log, index) => [log.loggedAt, originalLogs[index].loggedAt]));
 
-  const firstInAt = orderedLogs[0]?.loggedAt ?? null;
   const workedSegments = getWorkedSegments(orderedLogs);
+  const firstInAt = workedSegments[0]?.inAt ?? orderedLogs.find(log=>log.direction==="IN"||log.direction==="UNSPECIFIED")?.loggedAt ?? null;
   const lastCompletedOutAt =
     workedSegments.length > 0
       ? workedSegments[workedSegments.length - 1]?.outAt ?? null
@@ -1450,6 +1466,9 @@ export function summarizeEmployeeDay(
     anomalyFlags.push(ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG);
     anomalyFlags.push("MISSING_OUT");
   }
+
+  if(orderedLogs.some(log=>log.direction!=="UNSPECIFIED")&&workedSegments.length*2!==orderedLogs.length){if(!anomalyFlags.includes("MISSING_OUT"))anomalyFlags.push("MISSING_OUT");anomalyFlags.push("INCOMPLETE_SEQUENCE");}
+  if(anomalyFlags.includes("MISSING_OUT")&&workedSegments.length>0)anomalyFlags.push("PARTIAL_VALID_WORK");
 
   const actualInMinutes =
     firstInAt != null

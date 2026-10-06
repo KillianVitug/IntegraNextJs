@@ -3,11 +3,12 @@ import type { ShiftWindow } from "./attendance";
 
 export type WorkKind="Direction"|"Time"|"Employee"|"Void"|"Restore"|"Manual"|"ConfirmSequence"|"NoAttendance"|"Exclude"|"Retain"|"UndoCapture"|"ReopenDay";
 export type WorkChange={id:string;day:string;kind:WorkKind;eventId?:string;rawLogId?:number;type?:"IN"|"OUT";at?:string;targetEmployeeId?:string;employeeId?:string;status?:"VALID"|"VOID";clockVerified?:boolean;reason:string;evidence:string;verified:boolean};
-export type WorkDraft={employeeId:string;days:string[];changes:WorkChange[];reason:string;ownerId:string;needed:string;rejected:boolean;version:string;undoOf?:string;replaces?:string};
+export type WorkDraft={employeeId:string;days:string[];changes:WorkChange[];reason:string;ownerId:string;needed:string;rejected:boolean;version:string;undoOf?:string;replaces?:string;incomingVersions?:Record<string,string>};
 export type WorkRecord={id:string;source:"API"|"Manual"|"File";rawLogId?:number;employeeId:string;type:"IN"|"OUT"|"UNSPECIFIED";at:string;status:"VALID"|"VOID";clockFlag:boolean;clockVerified?:boolean;originalType?:string;originalAt?:string;sourceEmployeeId?:string;sourcePunch?:SourcePunch;excluded?:boolean};
-export type WorkDay={day:string;schedule:ShiftWindow|null;rest:boolean;leave:number;leaveEvidence:unknown;configuration:unknown;records:WorkRecord[];status:string;issues:string[];suggestions:{label:string;explanation:string;changes:Partial<WorkChange>[]}[];version:string;resolved:boolean};
+export type WorkFinding={code:string;severity:"error"|"warning";employeeId:string;day:string;message:string};
+export type WorkDay={findings?:WorkFinding[];day:string;schedule:ShiftWindow|null;rest:boolean;leave:number;leaveEvidence:unknown;configuration:unknown;records:WorkRecord[];status:string;issues:string[];suggestions:{label:string;explanation:string;changes:Partial<WorkChange>[]}[];version:string;resolved:boolean;decision?:{planId?:string;payrollRunId?:string;revision?:string;approvedAt:string;reason:string;lateConflict:boolean;incomingDigest:string;incomingRecords:WorkRecord[]}};
 export type WorkEmployee={id:string;no:string;name:string;sourceIds:string[];mappingEvidence:unknown;hired:string|null;separated:string|null;days:WorkDay[];contextRecords?:WorkRecord[]};
-export type WorkPlanView={id:string;batchId:string;revision:number;state:string;draft:WorkDraft;result:string|null;updatedAt:string};
+export type WorkPlanView={id:string;batchId:string;revision:number;state:string;draft:WorkDraft;result:string|null;approved?:boolean;updatedAt:string};
 export type WorkBoard={period:{id:string;code:string;startDate:string;endDate:string;posted:boolean};employees:WorkEmployee[];plans:WorkPlanView[];history?:{id:string;planId:string|null;action:string;actor:string;at:string}[];adjustments:{id:string;employeeId:string;periodId:string;state:string;impact:unknown;reference:string|null;conclusion:string|null}[];owners:{id:string;name:string}[];statuses:{sync:string;review:string;delivery:string;dtr:string;payroll:string};enabled:boolean};
 export const localToInstant=(value:string)=> {
  if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d{1,3})?)?$/.test(value))return null;
@@ -16,6 +17,80 @@ export const localToInstant=(value:string)=> {
  return wall.startsWith(value)?iso:null;
 };
 export const workDate=(at:string)=>manilaWallTime(at).date;
+export function draftVersion(employee:WorkEmployee,days:string[]) {
+ return [...new Set(days)].sort().map(day=>`${day}:${employee.days.find(d=>d.day===day)?.version??"missing"}`).join("|");
+}
+/** Incoming evidence is adopted only through an explicit, versioned draft. */
+export function draftRecords(employee:WorkEmployee,draft:WorkDraft) {
+ let records=employee.contextRecords??employee.days.flatMap(d=>d.records);
+ for(const day of Object.keys(draft.incomingVersions??{})){
+  const context=employee.days.find(d=>d.day===day),incoming=context?.decision?.incomingRecords??[];
+  const ids=new Set([...(context?.records??[]),...incoming].map(r=>r.id));
+  records=[...records.filter(r=>!ids.has(r.id)&&workDate(r.at)!==day),...incoming];
+ }
+ return [...new Map(records.filter(r=>draft.days.some(day=>workDayRecords(records,day).some(x=>x.id===r.id))||draft.changes.some(c=>c.eventId===r.id)).map(r=>[r.id,r])).values()];
+}
+/** Adding/removing dates must never silently accept changed evidence on retained dates. */
+export function retainedDraftVersion(employee:WorkEmployee,days:string[],previous?:WorkDraft) {
+ return [...new Set(days)].sort().map(day=>previous?.version.split("|").find(v=>v.startsWith(`${day}:`))??draftVersion(employee,[day])).join("|");
+}
+export function workDayRecords(records:WorkRecord[],day:string) {
+ const all=records.slice().sort((a,b)=>a.at.localeCompare(b.at)),own=all.filter(r=>workDate(r.at)===day);
+ const first=own.find(r=>r.status==="VALID"&&!r.excluded),last=own.filter(r=>r.status==="VALID"&&!r.excluded).at(-1);
+ if(first?.type==="OUT"){const prev=all.filter(r=>r.at<first.at&&r.status==="VALID"&&!r.excluded).at(-1);if(prev?.type==="IN"&&Date.parse(first.at)-Date.parse(prev.at)<=86400000)own.unshift(prev);}
+ if(last?.type==="IN"){const next=all.find(r=>r.at>last.at&&r.status==="VALID"&&!r.excluded);if(next?.type==="OUT"&&Date.parse(next.at)-Date.parse(last.at)<=86400000)own.push(next);}
+ return own;
+}
+export function changeRecord(employee:WorkEmployee|undefined,change:WorkChange) {
+ return [...(employee?.contextRecords??[]),...(employee?.days.flatMap(d=>d.records)??[])].find(r=>change.eventId?r.id===change.eventId:change.rawLogId!==undefined&&r.rawLogId===change.rawLogId);
+}
+/** Input checks shared by draft verification and authoritative server preview. */
+export function changeInputErrors(draft:WorkDraft,c:WorkChange,now=Date.now()) {
+ const errors:string[]=[];
+ if(c.evidence.trim().length<3)errors.push("Add verification evidence (at least 3 characters)");
+ if((c.reason.trim()||draft.reason.trim()).length<3)errors.push("Add a reason (at least 3 characters)");
+ if((c.kind==="Direction"||c.kind==="Manual")&&c.type!=="IN"&&c.type!=="OUT")errors.push("Select the verified direction");
+ if((c.kind==="Time"||c.kind==="Manual")&&!c.at)errors.push("Actual time required");
+ if(c.kind==="Employee"&&!c.targetEmployeeId)errors.push("Select a verified employee identity");
+ const instant=c.at?localToInstant(c.at):null;
+ if(c.at&&!instant)errors.push("Invalid verified capture time");
+ if(instant&&Date.parse(instant)>now+300000)errors.push("Verified work cannot be in the future");
+ if(c.kind==="Manual"&&c.at&&draft.days.length&&(c.at.slice(0,10)<sourceDayOffset(draft.days.slice().sort()[0],-1)||c.at.slice(0,10)>sourceDayOffset(draft.days.slice().sort().at(-1)!,1)))errors.push("Manual attendance is outside the reviewed shift context");
+ return errors;
+}
+export function verificationIssues(employee:WorkEmployee|undefined,draft:WorkDraft,c:WorkChange,employees:WorkEmployee[],now=Date.now()) {
+ const errors=changeInputErrors(draft,c,now);
+ if(draft.rejected)errors.push("Plan is rejected");
+ if(!employee||draft.version!==draftVersion(employee,draft.days))errors.push("Evidence changed — refresh and review this plan again");
+ if(employee&&Object.entries(draft.incomingVersions??{}).some(([day,version])=>employee.days.find(d=>d.day===day)?.decision?.incomingDigest!==version))errors.push("Incoming evidence changed — review incoming attendance again");
+ if(!draft.days.includes(c.day)||!employee?.days.some(d=>d.day===c.day))errors.push("Workday is outside employee eligibility");
+ if(!["Manual","ConfirmSequence","NoAttendance","ReopenDay"].includes(c.kind)){
+  const record=(employee?draftRecords(employee,draft):[]).find(r=>c.eventId?r.id===c.eventId:r.rawLogId===c.rawLogId)??changeRecord(employee,c);
+  if(!record||record.employeeId!==draft.employeeId)errors.push("Selected punch is unavailable — refresh and review");
+  else if(record.source!=="API"&&["Direction","Time","Employee","Void","Restore","UndoCapture"].includes(c.kind))errors.push("File/manual entries require an explicit source selection and verified replacement");
+ }
+ if(c.kind==="Employee"&&c.targetEmployeeId){const target=employees.find(p=>p.id===c.targetEmployeeId);if(!target||target.id===draft.employeeId||target.sourceIds.length!==1||!target.days.some(d=>d.day===c.day))errors.push("Select an eligible employee with a verified unique identity");}
+ return errors;
+}
+/** Keep attestations only while their exact values, effective reason and source remain current. */
+export function reconcileDraftVerification(previous:WorkDraft[],next:WorkDraft[],employees:WorkEmployee[]) {
+ return next.map(d=>{const old=previous.find(p=>p.employeeId===d.employeeId);return {...d,changes:d.changes.map(c=>{
+  const before=old?.changes.find(p=>p.id===c.id);
+  const content=(change:WorkChange)=>JSON.stringify({...change,verified:false,reason:""});
+  const changed=before&&(content(before)!==content(c)||(before.reason.trim()||old!.reason.trim())!==(c.reason.trim()||d.reason.trim()));
+  return {...c,verified:c.verified&&!changed&&!verificationIssues(employees.find(p=>p.id===d.employeeId),d,c,employees).length};
+ })};});
+}
+export function applyBatchEvidence(drafts:WorkDraft[],evidence:string) {
+ return drafts.map(d=>({...d,changes:d.changes.map(c=>c.evidence.trim()?c:{...c,evidence:evidence.trim(),verified:false})}));
+}
+export function applyBatchDetails(drafts:WorkDraft[],reason:string,evidence:string) {
+ const next=evidence.trim()?applyBatchEvidence(drafts,evidence):drafts;
+ return next.map(d=>({...d,reason:d.reason.trim()?d.reason:reason.trim()}));
+}
+export function verifyCompleteChanges(drafts:WorkDraft[],employees:WorkEmployee[]) {
+ return drafts.map(d=>({...d,changes:d.changes.map(c=>({...c,verified:!verificationIssues(employees.find(p=>p.id===d.employeeId),d,c,employees).length}))}));
+}
 export function sequenceProblems(records:WorkRecord[],schedule:ShiftWindow|null) {
  const list=records.filter(r=>r.status==="VALID"&&!r.excluded).sort((a,b)=>a.at.localeCompare(b.at)||a.id.localeCompare(b.id));
  const errors:string[]=[],warnings:string[]=[],pairs:{in:string;out:string;minutes:number}[]=[];
@@ -81,6 +156,6 @@ export function dayStatus(args:{day:string;schedule:ShiftWindow|null;rest:boolea
 
 export function missingDateRanges(days:WorkDay[]) {
  const ranges:{from:string;through:string;days:string[]}[]=[];
- for(const d of days.filter(d=>d.status==="Missing workday"&&!d.resolved).sort((a,b)=>a.day.localeCompare(b.day))){const last=ranges.at(-1);if(last&&sourceDayOffset(last.through,1)===d.day){last.through=d.day;last.days.push(d.day);}else ranges.push({from:d.day,through:d.day,days:[d.day]});}
+ for(const d of days.filter(d=>(d.status==="Missing workday"||d.status==="No work recorded")&&!d.resolved).sort((a,b)=>a.day.localeCompare(b.day))){const last=ranges.at(-1);if(last&&sourceDayOffset(last.through,1)===d.day){last.through=d.day;last.days.push(d.day);}else ranges.push({from:d.day,through:d.day,days:[d.day]});}
  return ranges;
 }

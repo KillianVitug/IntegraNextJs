@@ -1,0 +1,21 @@
+import assert from "node:assert/strict";
+import { parseAttendanceBuffer } from "@/lib/payroll/attendance";
+import { buildAttendanceSummaryComputations } from "@/lib/payroll/attendanceSync";
+import { applyAttendanceDtrEffectiveStatus } from "@/lib/payroll/dtrOverrides";
+
+const employee={id:"fixture",employeeNo:"F1",timekeeping:null};
+const logs=(times:string[])=>parseAttendanceBuffer(Buffer.from("EmployeeNo,DateTime,Direction\n"+times.map(t=>"F1,2026-09-29 "+t).join("\n")),"fixture.csv").logs.map(log=>({...log,employeeId:employee.id}));
+const assignment={id:1,employeeId:employee.id,shiftTableId:null,shiftName:"Fictional regular day",shiftCode:"FIXED",shiftSchedule:"Morning" as const,effectiveFrom:"2026-01-01",effectiveTo:null,checkInTime:"08:00:00",checkOutTime:"17:00:00",breakMinutes:60,graceMinutes:0,hoursPerDay:"8",restDay:null,paidBreakMinutes:0,isFlexible:false,createdAt:new Date(),updatedAt:new Date()};
+const base={employees:[employee],logs:logs(["08:00:00,IN","17:00:00,OUT"]),approvedLeaves:[],shiftAssignments:[assignment],weeklyPatterns:[],shiftTableBreaksByShiftTableId:new Map(),allowedAttendanceDateRange:{startDate:"2026-09-29",endDate:"2026-09-29"}};
+const full=buildAttendanceSummaryComputations(base)[0];assert.equal(full.regularMinutes,480);
+const missingSchedule=buildAttendanceSummaryComputations({...base,shiftAssignments:[]})[0];assert.equal(missingSchedule.workedMinutes,0);assert.equal(missingSchedule.regularMinutes,0);assert.match(missingSchedule.anomalyFlags??"",/SCHEDULE_MISSING/);
+ const idOnly=buildAttendanceSummaryComputations({...base,shiftAssignments:[],employees:[{...employee,timekeeping:{timekeepingId:"fixture",checkInTime:null,checkOutTime:null,hoursWorked:null} as NonNullable<Parameters<typeof buildAttendanceSummaryComputations>[0]["employees"][number]["timekeeping"]>}]})[0];
+ assert.equal(idOnly.regularMinutes,0,"An attendance ID without scheduled times/hours cannot imply eight paid hours");
+const empty=buildAttendanceSummaryComputations({...base,logs:[]})[0];assert.equal(empty.workedMinutes,0);assert.equal(empty.regularMinutes,0);
+const single=buildAttendanceSummaryComputations({...base,logs:logs(["08:00:00,IN"])})[0];assert.equal(single.workedMinutes,0);assert.equal(single.lastOutAt,null);
+const outgoing=buildAttendanceSummaryComputations({...base,logs:logs(["08:00:00,OUT","17:00:00,OUT"])})[0];assert.equal(outgoing.workedMinutes,0);assert.equal(outgoing.firstInAt,null);
+const partial=buildAttendanceSummaryComputations({...base,logs:logs(["08:00:00,IN","12:00:00,OUT","13:00:00,IN"])})[0];assert.equal(partial.regularMinutes,240);assert.match(partial.anomalyFlags??"",/PARTIAL_VALID_WORK/);
+assert.equal(applyAttendanceDtrEffectiveStatus(partial as Parameters<typeof applyAttendanceDtrEffectiveStatus>[0],null).regularMinutes,240,"Valid pairs survive unresolved portions without invented punches");
+assert.equal(applyAttendanceDtrEffectiveStatus(partial as Parameters<typeof applyAttendanceDtrEffectiveStatus>[0],"Hold").regularMinutes,0,"An explicit admin hold remains authoritative");
+const leave=buildAttendanceSummaryComputations({...base,logs:[],approvedLeaves:[{employeeId:employee.id,leaveStartDate:"2026-09-29",leaveEndDate:"2026-09-29",dateFiled:"2026-09-28",isPaid:true}]})[0];assert.equal(leave.paidLeaveMinutes,480);assert.equal(leave.workedMinutes,0);
+console.log("PASS no data, no schedule, incomplete direction sequences, valid partial intervals, explicit hold and approved leave");

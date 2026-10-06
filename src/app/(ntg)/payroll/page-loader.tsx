@@ -6,6 +6,7 @@ import {
   loadPayrollAccountCodeEmployees,
   loadPayrollWorkspaceSnapshot,
 } from "@/lib/payroll/workspaceSnapshot";
+import { PayrollGroups } from "./PayrollGroups";
 import { PayrollWorkspace } from "./PayrollWorkspace";
 import type { PayrollSection } from "./sections";
 
@@ -26,12 +27,15 @@ export async function loadPayrollPageContext({
     loadPayrollWorkspaceSnapshot({
       year: selectedYear,
       periodId: params.periodId,
+      runId:params.runId,
+      payrollGroup:params.group==="Monthly"?"Monthly":"Daily",
     }),
     loadPayrollAccountCodeEmployees(),
   ]);
 
   return {
     selectedYear,
+    payrollGroup:params.group==="Monthly"?"Monthly" as const:"Daily" as const,
     snapshot,
     payrollAccountCodeEmployees,
   };
@@ -44,7 +48,7 @@ export async function renderPayrollWorkspacePage({
   activeSection: PayrollSection;
   searchParams: Promise<PayrollSearchParams>;
 }) {
-  const { selectedYear, snapshot, payrollAccountCodeEmployees } =
+  const { selectedYear, payrollGroup, snapshot, payrollAccountCodeEmployees } =
     await loadPayrollPageContext({ searchParams });
 
   return (
@@ -62,7 +66,10 @@ export async function renderPayrollWorkspacePage({
           </Link>
         </div>
       )}
+      {snapshot.selectedPeriodId&&<PayrollGroups periodId={snapshot.selectedPeriodId} year={selectedYear} group={payrollGroup}/>}
       <PayrollWorkspace
+        key={payrollGroup}
+        payrollGroup={payrollGroup}
         attendanceEnabled={process.env.ATTENDANCE_SOURCE_ENABLED === "true"}
         activeSection={activeSection}
         initialYear={selectedYear}

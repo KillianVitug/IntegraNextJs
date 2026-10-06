@@ -1,3 +1,4 @@
+import { runPayrollGroup, type PayrollGroup } from "./payrollGroupModel";
 import { db } from "@/db";
 import {
   attendanceImportBatches,
@@ -125,6 +126,8 @@ export function serializePayrollRunForWorkspace(
     id: run.id,
     status: run.status,
     runNumber: run.runNumber,
+    payrollGroup:runPayrollGroup(run.inputSnapshot),
+    earningMonth:typeof run.inputSnapshot?.earningMonth==="string"?run.inputSnapshot.earningMonth:undefined,
     notes: run.notes,
     computedAt: toIsoString(run.computedAt),
     reviewedAt: toIsoString(run.reviewedAt),
@@ -253,6 +256,8 @@ export async function loadPayrollAccountCodeEmployees(): Promise<
 }
 
 export async function loadPayrollWorkspaceSnapshot(args: {
+  payrollGroup?: PayrollGroup;
+  runId?:string;
   year: number;
   periodId?: string | null;
   lineEmployeeId?: string | null;
@@ -283,7 +288,7 @@ export async function loadPayrollWorkspaceSnapshot(args: {
   ]);
 
   const latestRunByPeriod = new Map<string, typeof payrollRuns.$inferSelect>();
-  for (const run of runRows) {
+  for (const run of runRows.filter(r=>runPayrollGroup(r.inputSnapshot)===(args.payrollGroup??"Daily"))) {
     if (!latestRunByPeriod.has(run.payrollPeriodId)) {
       latestRunByPeriod.set(run.payrollPeriodId, run);
     }
@@ -337,7 +342,7 @@ export async function loadPayrollWorkspaceSnapshot(args: {
   const selectedPeriod =
     periods.find((period) => period.id === selectedPeriodId) ?? null;
   const latestSelectedRun = selectedPeriod
-    ? latestRunByPeriod.get(selectedPeriod.id) ?? null
+    ? runRows.find(r=>r.id===args.runId&&r.payrollPeriodId===selectedPeriod.id)??latestRunByPeriod.get(selectedPeriod.id) ?? null
     : null;
 
   const [selectedRunRecord, selectedPeriodBatchRows] = await Promise.all([

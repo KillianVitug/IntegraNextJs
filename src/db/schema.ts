@@ -3206,7 +3206,7 @@ export const payrollRuns = pgTable(
       .on(table.idempotencyKey)
       .where(sql`${table.idempotencyKey} is not null`),
     uniqueIndex("uq_payroll_run_posted_regular_period")
-      .on(table.payrollPeriodId)
+      .on(table.payrollPeriodId, sql`coalesce(${table.inputSnapshot}->>'payrollGroup','Legacy')`)
       .where(sql`${table.runType} = 'Regular' and ${table.status} = 'Posted'`),
   ]
 );

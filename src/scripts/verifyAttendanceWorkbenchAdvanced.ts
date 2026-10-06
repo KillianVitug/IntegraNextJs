@@ -1,12 +1,13 @@
+import { assertAttendanceSourceReady, attendanceSourceVersion, confirmAttendanceSourceSummaryRefresh } from "@/lib/payroll/attendanceSourceGuard";
 import assert from "node:assert/strict";
 import {randomUUID} from "node:crypto";
 import {eq,sql} from "drizzle-orm";
 import {matchingDatabase} from "./attendanceTest/matchingDatabase";
 import {employees,employeesTimekeeping,payrollPeriods,payrollRuns,attendanceRawLogs,attendanceImportBatches,employeesGeneralInfo,employeesLeaveRecords,employeeLeaveRecordDays} from "@/db/schema";
 import {attendanceSourceMappings,attendanceSourceRuns} from "@/db/attendanceSourceSchema";
-import {workPlans,adjustmentCases} from "@/db/attendanceWorkbenchSchema";
+import {workPlans,workBatches,adjustmentCases,workHistory} from "@/db/attendanceWorkbenchSchema";
 import {workEmployees,draftVersion,saveWorkDraft,prepareWorkApproval,approveWorkBatch,previewWork,workDayRecords} from "@/lib/payroll/attendanceWorkbench";
-import {processWorkDelivery,undoWorkDraft} from "@/lib/payroll/attendanceWorkbenchDelivery";
+import {processWorkDelivery,undoWorkDraft,reopenWorkPlan} from "@/lib/payroll/attendanceWorkbenchDelivery";
 import {reconcileAttendanceSource} from "@/lib/payroll/attendanceSourceSync";
 import {missingDateRanges,sequenceProblems,type WorkDraft,type WorkChange,type WorkRecord} from "@/lib/payroll/attendanceWorkbenchModel";
 import type {SourcePunch} from "@/lib/payroll/attendanceSourceClient";
@@ -23,6 +24,17 @@ async function main(){
   const fetcher:typeof fetch=async(_url,init)=>{const p=JSON.parse(String(init?.body));if(p.operation==="context")return Response.json({version:1,contextToken:"b".repeat(64),uploadCoverage:{state:upload?"Confirmed":"Needs upload check",through:upload?"2026-10-04T00:00:00.000Z":null},records:records.filter(r=>p.employeeIds.includes(r.employeeId)).map(r=>({eventId:r.eventId,employeeId:r.employeeId,employeeName:r.employeeName,type:r.type,capturedAt:r.capturedAt,status:r.status,clockVerified:r.clockVerified,revision:r.effectiveRevision}))});if(p.operation==="plan-status")return Response.json(applied.get(p.id)??{state:"Not found",changes:[]});if(!applied.has(p.id)){writes++;const changes=p.changes.map((c:Record<string,unknown>)=>{const r=records.find(r=>r.eventId===c.eventId)!;const before={employeeId:r.employeeId,employeeName:r.employeeName,type:r.type,capturedAt:r.capturedAt,status:r.status,clockVerified:r.clockVerified};const revision=randomUUID();Object.assign(r,...["employeeId","type","capturedAt","status"].filter(k=>c[k]!==undefined).map(k=>({[k]:c[k]})),{employeeName:`Fictional 0000${c.employeeId??r.employeeId}`,effectiveRevision:revision,correctionVersion:revision,updatedAt:new Date().toISOString(),clockVerified:c.clockVerified??(c.capturedAt?true:r.clockVerified)});return {event_id:r.eventId,revision,before_json:JSON.stringify(before),after_json:JSON.stringify({employeeId:r.employeeId,employeeName:r.employeeName,type:r.type,capturedAt:r.capturedAt,status:r.status,clockVerified:r.clockVerified})};});applied.set(p.id,{state:"Applied",changes});}return Response.json({accepted:true});};
   async function sync(id:string=sept){if(interruptSync&&id===oct)throw Error("Fictional restart before second-period sync");const runId=randomUUID();await database.insert(attendanceSourceRuns).values({id:runId,payrollPeriodId:id,actorUserId:actor,state:"Fetching",fromDate:id===sept?"2026-09-28":"2026-09-30",throughDate:id===sept?"2026-10-01":"2026-10-03",startedAt:sql`clock_timestamp()`});return reconcileAttendanceSource(dbClient,id,runId,actor,records);}
   await sync();await sync(oct);
+  // Older computed runs also retain their exact attendance until explicit adoption.
+  const snapshotRun=randomUUID();await database.insert(payrollRuns).values({id:snapshotRun,payrollPeriodId:sept,runNumber:99,status:"Reviewed",inputSnapshot:{payrollGroup:"Daily"}});
+  const originalRecords=structuredClone(records),beforeSnapshot=(await workEmployees(sept,client)).find(p=>p.id===a)!;
+  assert.equal(beforeSnapshot.days.find(d=>d.day==="2026-09-30")!.decision?.lateConflict,false,"Unchanged captured seconds/milliseconds do not create a late-upload warning");
+  records[1]={...records[1],type:"IN",effectiveRevision:"late-fixture"};await sync();
+  const afterSnapshot=(await workEmployees(sept,client)).find(p=>p.id===a)!,snapshotDay=afterSnapshot.days.find(d=>d.day==="2026-09-30")!;
+  assert.equal(snapshotDay.version,beforeSnapshot.days.find(d=>d.day==="2026-09-30")!.version,"Late upload does not stale computed input");
+  assert.equal(snapshotDay.records.find(r=>r.id===records[1].eventId)!.type,"OUT");assert.equal(snapshotDay.decision?.lateConflict,true);
+  await database.insert(workHistory).values({actor,action:"Kept payroll attendance",details:{periodId:sept,employeeId:a,day:snapshotDay.day,payrollRunId:snapshotRun,incomingDigest:snapshotDay.decision!.incomingDigest}});
+  assert.equal((await workEmployees(sept,client)).find(p=>p.id===a)!.days.find(d=>d.day===snapshotDay.day)!.decision?.lateConflict,false);
+  await database.delete(payrollRuns).where(eq(payrollRuns.id,snapshotRun));records=originalRecords;await sync();
   const verified={reason:"Supervisor verified fixture",evidence:"Fictional signed incident\nExact records checked",verified:true};
   const change=(kind:WorkChange["kind"],values:Partial<WorkChange>={}):WorkChange=>({id:randomUUID(),day:"2026-09-30",kind,...verified,...values});
   async function draft(employeeId:string,changes:WorkChange[],period=sept):Promise<WorkDraft>{const person=(await workEmployees(period,client)).find(p=>p.id===employeeId)!;const days=[...new Set(changes.map(c=>c.day))].sort();return {employeeId,changes,days,reason:verified.reason,ownerId:actor,needed:"",rejected:false,version:draftVersion(person,days)};}
@@ -31,7 +43,7 @@ async function main(){
   const bPerson=(await workEmployees(sept,client)).find(p=>p.id===b)!;assert.equal(missingDateRanges(bPerson.days)[0].days.length,2);
   const missing=await draft(b,[change("Manual",{type:"OUT"})]);assert.ok(previewWork(bPerson,missing).errors.some(e=>e.includes("verified date")));
   const transfer=[await draft(a,[...records.map(r=>change("Employee",{eventId:r.eventId,targetEmployeeId:b})),change("NoAttendance")]),await draft(b,[change("ConfirmSequence")])];
-  const held=await save(transfer);upload=false;await assert.rejects(()=>prepareWorkApproval(sept,held.id,held.revision,client,fetcher),/Uploads still need verification/);upload=true;
+  const held=await save(transfer);upload=false;await prepareWorkApproval(sept,held.id,held.revision,client,fetcher);upload=true;
   const moved=await approve(transfer);assert.equal(moved.preview.prepared[0].sourceRequest?.id,moved.preview.prepared[1].sourceRequest?.id);await processWorkDelivery(actor,{database:dbClient,batchId:moved.saved.id,fetcher,sync});assert.equal(writes,1,"Related employees share one atomic source request");assert.equal((await database.select().from(attendanceRawLogs)).filter(r=>r.employeeId===b).length,2,"Receiving employee owns the effective pair");
   const transferred=(await database.select().from(workPlans)).find(p=>p.batchId===moved.saved.id&&p.employeeId===a)!;const undo=await undoWorkDraft(client,actor,transferred.id);assert.equal(undo.length,2);assert.equal(undo.flatMap(d=>d.changes).filter(c=>c.kind==="UndoCapture").length,2);
   const reversal=await approve(undo.map(d=>({...d,changes:d.changes.map(c=>({...c,...verified}))})));await processWorkDelivery(actor,{database:dbClient,batchId:reversal.saved.id,fetcher,sync});assert.equal(writes,2);assert.ok(records.every(r=>r.employeeId==="1"));await assert.rejects(()=>undoWorkDraft(client,actor,transferred.id),/Later attendance|later source/);
@@ -44,14 +56,36 @@ async function main(){
   records=records.map((r,i)=>({...r,employeeId:"2",employeeName:"Fictional 00002",capturedAt:`2026-09-29T0${i?9:0}:00:00.123Z`,effectiveRevision:randomUUID(),updatedAt:new Date(Date.now()+10).toISOString()}));await sync();
   const [file]=await database.insert(attendanceImportBatches).values({payrollPeriodId:sept,sourceFileName:"fictional.csv",sourceFormat:"CSV",status:"Processed"}).returning();
   for(const [i,type] of (["IN","OUT"] as const).entries())await database.insert(attendanceRawLogs).values({batchId:file.id,employeeId:b,employeeNo:"00002",direction:type,loggedAt:sql`${`2026-09-29 ${i?"17":"08"}:00:00.123`}::timestamp`,logDate:"2026-09-29",logTime:`${i?"17":"08"}:00:00.123`,rawText:"Fictional file evidence",normalizedHash:randomUUID()});
-  const overlaps=(await workEmployees(sept,client)).find(p=>p.id===b)!;assert.ok(overlaps.days[0].issues.some(e=>e.includes("overlapping")));
-  const selected=await approve([await draft(b,records.map(r=>change("Exclude",{eventId:r.eventId,day:"2026-09-29"})))]);await processWorkDelivery(actor,{database:dbClient,batchId:selected.saved.id,fetcher,sync});assert.equal((await workEmployees(sept,client)).find(p=>p.id===b)!.days[0].issues.length,0);const fileBefore=await database.select().from(attendanceRawLogs).where(eq(attendanceRawLogs.batchId,file.id));await sync();assert.deepEqual(await database.select().from(attendanceRawLogs).where(eq(attendanceRawLogs.batchId,file.id)),fileBefore);
-  records.push({...records[0],eventId:randomUUID(),capturedAt:"2026-09-29T00:01:00.000Z",originalCapturedAt:"2026-09-29T00:01:00.000Z",effectiveRevision:"original"});await sync();assert.ok((await workEmployees(sept,client)).find(p=>p.id===b)!.days[0].issues.length>0,"Late originals invalidate prior sequence acceptance");
+  const overlaps=(await workEmployees(sept,client)).find(p=>p.id===b)!;assert.ok(overlaps.days.some(d=>d.decision?.lateConflict),"Changed approved captures are flagged without replacing payroll attendance");
+  const selection=await draft(b,records.map(r=>change("Exclude",{eventId:r.eventId,day:"2026-09-29"})));const incomingDay=overlaps.days.find(d=>d.decision?.lateConflict)!;selection.days=[...new Set([...selection.days,incomingDay.day])];selection.version=draftVersion(overlaps,selection.days);selection.incomingVersions={[incomingDay.day]:incomingDay.decision!.incomingDigest};const selected=await approve([selection]);await processWorkDelivery(actor,{database:dbClient,batchId:selected.saved.id,fetcher,sync});assert.equal((await workEmployees(sept,client)).find(p=>p.id===b)!.days[0].issues.length,0);const fileBefore=await database.select().from(attendanceRawLogs).where(eq(attendanceRawLogs.batchId,file.id));await sync();assert.deepEqual(await database.select().from(attendanceRawLogs).where(eq(attendanceRawLogs.batchId,file.id)),fileBefore);
+  records.push({...records[0],eventId:randomUUID(),capturedAt:"2026-09-29T00:01:00.000Z",originalCapturedAt:"2026-09-29T00:01:00.000Z",effectiveRevision:"original"});await sync();assert.ok((await workEmployees(sept,client)).find(p=>p.id===b)!.days[0].resolved,"Late originals cannot invalidate approval");assert.ok((await workEmployees(sept,client)).find(p=>p.id===b)!.days[0].decision?.lateConflict);
   const overnight:WorkRecord[]=[{id:"in",source:"Manual",employeeId:a,type:"IN",at:"2026-09-30T14:00:00Z",status:"VALID",clockFlag:false},{id:"out",source:"Manual",employeeId:a,type:"OUT",at:"2026-09-30T22:00:00Z",status:"VALID",clockFlag:false}];assert.equal(workDayRecords(overnight,"2026-09-30").length,2);assert.ok(sequenceProblems(overnight,null).warnings.some(w=>w.includes("Overnight")));assert.equal(workDayRecords([{...overnight[0],excluded:true},overnight[1]],"2026-10-01").length,1,"Excluded context cannot supply an overnight partner");
   const hired=randomUUID();await database.insert(employees).values({id:hired,employeeNo:"00444",firstName:"New",lastName:"Fictional"});await database.insert(employeesGeneralInfo).values({employeeId:hired,dateHired:"2026-09-30",separationDate:"2026-09-30"});await database.insert(employeesTimekeeping).values({employeeId:hired,checkInTime:"08:00:00",checkOutTime:"17:00:00",hoursWorked:"8"});await database.insert(attendanceSourceMappings).values({sourceEmployeeId:"444",employeeId:hired,actorUserId:actor,reason:"Fictional verified identity"});
   const [leave]=await database.insert(employeesLeaveRecords).values({employeeId:hired,dateFiled:"2026-09-29",leaveStartDate:"2026-09-30",leaveEndDate:"2026-09-30",leaveType:"Vacation",noOfDays:"1",leaveStatus:"Approved"}).returning();await database.insert(employeeLeaveRecordDays).values({leaveRecordId:leave.id,leaveDate:"2026-09-30",quantity:"1"});
   const employed=(await workEmployees(sept,client)).find(p=>p.id===hired)!;assert.deepEqual(employed.days.map(d=>d.day),["2026-09-30"]);assert.equal(employed.days[0].status,"Approved leave");assert.equal(employed.days[0].issues.length,0);assert.ok(!(await workEmployees(oct,client)).some(p=>p.id===hired));
   const wrongOwner=await draft(b,[change("Direction",{eventId:records[0].eventId,type:"OUT",day:"2026-09-30"})]);wrongOwner.employeeId=a;const ownerA=(await workEmployees(sept,client)).find(p=>p.id===a)!;assert.ok(previewWork(ownerA,wrongOwner).errors.some(e=>e.includes("another employee")));
+  // A selected complete employee can finish while every unselected plan remains resumable.
+  const partialPeople=[randomUUID(),randomUUID(),randomUUID()],emptyPeriod=randomUUID();
+  await database.insert(payrollPeriods).values({id:emptyPeriod,code:"FIXTURE-EMPTY",payrollTerms:"Semi-Monthly",cycle:"B",year:2026,month:9,startDate:"2026-09-29",endDate:"2026-09-30",nominalPayDate:"2026-09-30",adjustedPayDate:"2026-09-30"});
+  for(const [index,id] of partialPeople.entries())await database.insert(employees).values({id,employeeNo:`P${index}`,firstName:"Partial",lastName:String(index)});
+  const partialDrafts=await Promise.all(partialPeople.map((id,index)=>draft(id,[change("Manual",{type:"IN",at:index?undefined:"2026-09-30T08:00",verified:!index,reason:"",evidence:"approved"}),...(index?[]:[change("Manual",{type:"OUT",at:"2026-09-30T17:00",reason:"",evidence:"approved"})])],emptyPeriod)));
+  partialDrafts.forEach(d=>d.reason="approved");
+  const partial=await save(partialDrafts,emptyPeriod),partialPlans=await database.select().from(workPlans).where(eq(workPlans.batchId,partial.id));
+  const completeId=partialPlans.find(p=>p.employeeId===partialPeople[0])!.id;
+  await assert.rejects(()=>prepareWorkApproval(emptyPeriod,partial.id,partial.revision,client,fetcher));
+  const selectedPreview=await prepareWorkApproval(emptyPeriod,partial.id,partial.revision,client,fetcher,[completeId]);
+  assert.ok(selectedPreview.prepared[0].preview.warnings.some(w=>w.includes("schedule missing")));
+  await approveWorkBatch(actor,emptyPeriod,partial.id,partial.revision,selectedPreview.digest,dbClient,fetcher,[completeId]);
+  assert.equal((await database.select().from(workBatches).where(eq(workBatches.id,partial.id)))[0].state,"Draft");
+  const opened=await database.transaction(tx=>reopenWorkPlan(tx as unknown as DbClient,actor,partialPlans.find(p=>p.employeeId===partialPeople[1])!.id));
+  assert.equal(opened.drafts.length,2,"Resume retains both unapproved employee plans");
+  assert.ok(opened.drafts.every(d=>d.employeeId!==partialPeople[0]));
+  await database.transaction(tx=>saveWorkDraft(tx as unknown as DbClient,actor,emptyPeriod,opened.drafts,opened.existing));
+  assert.equal((await database.select().from(workPlans).where(eq(workPlans.id,completeId)))[0].state,"Approved");
+  await assert.rejects(()=>assertAttendanceSourceReady(emptyPeriod,client),/DTR refresh/);
+  const effectiveVersion=await attendanceSourceVersion(emptyPeriod,client);
+  await database.transaction(tx=>confirmAttendanceSourceSummaryRefresh(tx as unknown as DbClient,emptyPeriod,effectiveVersion));
+  await assertAttendanceSourceReady(emptyPeriod,client);
   process.env.ATTENDANCE_WORKBENCH_APPROVALS_ENABLED="false";await assert.rejects(()=>approveWorkBatch(actor,sept,selected.saved.id,selected.saved.revision,"ignored",dbClient,fetcher),/approvals are paused/);delete process.env.ATTENDANCE_WORKBENCH_APPROVALS_ENABLED;
   console.log("PASS: related-employee atomic delivery/Undo, upload holds, multi-period restart, posted-period evidence, source selection, late originals and overnight context");
  }finally{await pg.close();}

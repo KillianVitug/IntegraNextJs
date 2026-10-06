@@ -253,6 +253,7 @@ export function hasUnresolvedAttendanceDtrHoldFlag(
   return (
     normalized.includes("ODD_PUNCH_COUNT") ||
     normalized.includes("MISSING_OUT") ||
+    normalized.includes("SCHEDULE_MISSING") ||
     normalized.includes(ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG)
   );
 }
@@ -390,6 +391,7 @@ export function applyAttendanceDtrComputedHold<T extends AttendanceDtrMetrics>(
   row: T
 ): T {
   if (!hasUnresolvedAttendanceDtrHoldFlag(row.anomalyFlags)) return row;
+  if(normalizeAttendanceDtrAnomalyFlags(row.anomalyFlags).includes("PARTIAL_VALID_WORK"))return row; // Paired attendance remains payable; unpaired portions contribute zero.
 
   return {
     ...row,

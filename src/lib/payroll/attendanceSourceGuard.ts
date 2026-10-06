@@ -2,6 +2,8 @@ import { and, desc, eq, gte, lte, or, sql } from "drizzle-orm";
 import { db, type DbClient } from "@/db";
 import { attendanceSourcePeriods, attendanceSourceRuns, attendanceSourceMappings, attendanceSourceEvents, attendanceSourceProjections, attendanceSourceIdentities, attendanceResolutions } from "@/db/attendanceSourceSchema";
 import { attendanceImportBatches, attendanceRawLogs, payrollRunEvents } from "@/db/schema";
+import { workTreatments, workHistory } from "@/db/attendanceWorkbenchSchema";
+import { resolutionDigest } from "./attendanceResolution";
 import { sourceDayOffset } from "./attendanceSourceClient";
 import { PayrollValidationError } from "./validation";
 export class AttendanceSourceIssue extends PayrollValidationError {
@@ -21,23 +23,36 @@ export function attendanceApiRequired(periodId: string) {
 }
 export function attendanceSourceDateFilter(start: string, end: string) {
   const original=and(gte(attendanceRawLogs.logDate,start),lte(attendanceRawLogs.logDate,end));
-  if(process.env.ATTENDANCE_SOURCE_ENABLED !== "true") return original;
+  if(process.env.ATTENDANCE_SOURCE_ENABLED !== "true") return process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"?and(original,sql`not exists(select 1 from attendance_work_exclusions x where x.raw_log_id=${attendanceRawLogs.id} and x.active)`):original;
   const dates=or(original,and(eq(attendanceImportBatches.sourceFormat,"API"),gte(attendanceRawLogs.logDate,sourceDayOffset(start,-1)),lte(attendanceRawLogs.logDate,sourceDayOffset(end,1))));
   return process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"?and(dates,sql`not exists(select 1 from attendance_work_exclusions x where x.raw_log_id=${attendanceRawLogs.id} and x.active)`):dates;
 }
 export async function attendanceSourceVersion(periodId: string, database: DbClient = db) {
+  if(process.env.ATTENDANCE_WORKBENCH_ENABLED==="true")return attendancePayrollSnapshot(database,periodId);
   if (process.env.ATTENDANCE_SOURCE_ENABLED !== "true") return null;
   const [run] = await database.select().from(attendanceSourceRuns).where(and(eq(attendanceSourceRuns.payrollPeriodId, periodId), eq(attendanceSourceRuns.state, "Complete"))).orderBy(desc(attendanceSourceRuns.startedAt)).limit(1);
   return run?.id ?? null;
 }
 export async function confirmAttendanceSourceSummaryRefresh(tx: DbClient, periodId: string, version: string | null, completedWholePeriod = true) {
-  if (process.env.ATTENDANCE_SOURCE_ENABLED !== "true") return;
+  if (process.env.ATTENDANCE_SOURCE_ENABLED !== "true" && process.env.ATTENDANCE_WORKBENCH_ENABLED !== "true") return;
   await tx.execute(sql`select pg_advisory_xact_lock(73612849)`);
   const [state] = await tx.select().from(attendanceSourcePeriods).where(eq(attendanceSourcePeriods.payrollPeriodId, periodId));
   if (await attendanceSourceVersion(periodId, tx) !== version) throw new PayrollValidationError("Attendance changed while summaries were loading. Refresh again.");
+  if(completedWholePeriod && process.env.ATTENDANCE_WORKBENCH_ENABLED==="true") await tx.insert(workHistory).values({actor:"system:DTR refresh",action:"DTR inputs refreshed",details:{periodId,version}});
   if (state && completedWholePeriod) await tx.update(attendanceSourcePeriods).set({ summariesRunId: state.inputRunId }).where(eq(attendanceSourcePeriods.payrollPeriodId, periodId));
 }
 export async function assertAttendanceSourceReady(periodId: string, database: DbClient = db) {
+  if(process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"){
+    const [state]=await database.select().from(attendanceSourcePeriods).where(eq(attendanceSourcePeriods.payrollPeriodId,periodId));
+    if(state&&state.inputRunId!==state.summariesRunId)throw new PayrollValidationError("Approved attendance inputs need DTR refresh before payroll computation. Missing phone uploads do not block this refresh.");
+    const version=await attendancePayrollSnapshot(database,periodId);
+    const [decision]=await database.select({id:workTreatments.id}).from(workTreatments).where(and(eq(workTreatments.periodId,periodId),eq(workTreatments.active,true),sql`${workTreatments.payload}->>'kind'='AdminDecision'`)).limit(1);
+    if(decision){
+      const [receipt]=await database.select({id:workHistory.id}).from(workHistory).where(and(eq(workHistory.action,"DTR inputs refreshed"),sql`${workHistory.details}->>'periodId'=${periodId}`,sql`${workHistory.details}->>'version'=${version}`)).limit(1);
+      if(!receipt)throw new PayrollValidationError("Approved attendance needs a DTR refresh before daily payroll calculation. Missing uploads do not block the refresh.");
+    }
+    return version;
+  }
   const required = attendanceApiRequired(periodId);
   if (process.env.ATTENDANCE_SOURCE_ENABLED !== "true") {
     // Existing base tables remain available before connector migration. Compare
@@ -86,8 +101,12 @@ export async function confirmAttendanceSourcePayrollInput(tx: DbClient, periodId
 // Store the durable input version in the existing Computed audit event. An unchanged
 // repeat pull need not force a recompute; changed input always has a new inputRunId.
 export async function attendancePayrollSnapshot(tx: DbClient, periodId: string) {
-  if (process.env.ATTENDANCE_SOURCE_ENABLED !== "true") return null;
+  if (process.env.ATTENDANCE_SOURCE_ENABLED !== "true" && process.env.ATTENDANCE_WORKBENCH_ENABLED !== "true") return null;
   const [state] = await tx.select().from(attendanceSourcePeriods).where(eq(attendanceSourcePeriods.payrollPeriodId, periodId));
+  if(process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"){
+    const decisions=await tx.select({id:workTreatments.id,version:workTreatments.version}).from(workTreatments).where(and(eq(workTreatments.periodId,periodId),eq(workTreatments.active,true)));
+    return resolutionDigest([state?.inputRunId??null,decisions.sort((a,b)=>a.id.localeCompare(b.id))]);
+  }
   return state?.inputRunId ?? null;
 }
 

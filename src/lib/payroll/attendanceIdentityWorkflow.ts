@@ -50,10 +50,10 @@ async function invalidateMappings(database: DbClient, actor: string, sourceIds: 
   for (const { periodId } of affected.sort((a, b) => a.periodId.localeCompare(b.periodId))) {
     const [period] = await database.select().from(payrollPeriods).where(eq(payrollPeriods.id, periodId)).for("update");
     const runs = await database.select().from(payrollRuns).where(eq(payrollRuns.payrollPeriodId, periodId)).for("update");
-    if (!period || period.status !== "Open" || runs.some(r => r.status === "Posted")) { protectedIds.push(periodId); continue; }
+    if (!period || period.status !== "Open" || runs.some(r => r.status === "Posted"&&r.inputSnapshot?.payrollGroup!=="Monthly")) { protectedIds.push(periodId); continue; }
     open.push(periodId);
     await database.update(sourcePeriods).set({ summariesRunId: null }).where(eq(sourcePeriods.payrollPeriodId, periodId));
-    for (const run of runs.filter(r => ["Draft", "Reviewed", "Approved"].includes(r.status))) {
+    for (const run of runs.filter(r => ["Draft", "Reviewed", "Approved"].includes(r.status)&&r.inputSnapshot?.payrollGroup!=="Monthly")) {
       await database.update(payrollRuns).set({ status: "Stale", reviewedAt: null, reviewedByUserId: null, approvedAt: null, approvedByUserId: null, updatedAt: new Date() }).where(eq(payrollRuns.id, run.id));
       await database.insert(payrollRunEvents).values({ payrollRunId: run.id, actorUserId: actor, eventType: "MarkedStale", fromStatus: run.status, toStatus: "Stale", notes: "Employee mapping changed. Sync attendance, refresh DTR summaries and recompute payroll." });
     }

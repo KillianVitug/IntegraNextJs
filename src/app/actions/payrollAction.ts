@@ -1,4 +1,5 @@
 "use server";
+import { runPayrollGroup } from "@/lib/payroll/payrollGroupModel";
 
 import { revalidatePath } from "next/cache";
 import { desc, eq } from "drizzle-orm";
@@ -248,6 +249,7 @@ function serializePayrollRunHeader(run: {
   id: string;
   status: string;
   runNumber: number;
+  inputSnapshot?:Record<string,unknown>|null;
   notes: string | null;
   computedAt: Date | null;
   reviewedAt: Date | null;
@@ -269,6 +271,8 @@ function serializePayrollRunHeader(run: {
     id: run.id,
     status: run.status,
     runNumber: run.runNumber,
+    payrollGroup:runPayrollGroup(run.inputSnapshot),
+    earningMonth:typeof run.inputSnapshot?.earningMonth==="string"?run.inputSnapshot.earningMonth:undefined,
     notes: run.notes,
     computedAt: toIsoString(run.computedAt),
     reviewedAt: toIsoString(run.reviewedAt),
@@ -326,7 +330,7 @@ export async function seedPayrollPeriods(year: number) {
 
 type PayrollReadinessBypassOptions = Pick<
   PayrollPreflightOptions,
-  "bypassTemporaryReadinessCategories"
+  "bypassTemporaryReadinessCategories" | "payrollGroup"
 >;
 
 export async function preflightPayrollAction(
@@ -595,13 +599,15 @@ export async function getPayrollPeriodById(payrollPeriodId: string) {
 export async function getPayrollWorkspaceSnapshotAction(
   year: number,
   periodId?: string | null,
-  lineEmployeeId?: string | null
+  lineEmployeeId?: string | null,
+  payrollGroup?: "Daily" | "Monthly"
 ): Promise<PayrollWorkspaceSnapshotView> {
   await requireAdminActor();
   return loadPayrollWorkspaceSnapshot({
     year,
     periodId,
     lineEmployeeId,
+    payrollGroup,
   });
 }
 

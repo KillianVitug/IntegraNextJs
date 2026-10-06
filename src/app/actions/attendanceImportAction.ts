@@ -1,4 +1,5 @@
 "use server";
+import { workTreatments } from "@/db/attendanceWorkbenchSchema";
 import { assertFileAttendanceBatch } from "@/lib/payroll/validation";
 import { attendanceSourceVersion, confirmAttendanceSourceSummaryRefresh, attendanceSourceDateFilter } from "@/lib/payroll/attendanceSourceGuard";
 
@@ -37,6 +38,7 @@ import {
   employees,
   employeesGeneralInfo,
   employeesLeaveRecords,
+  employeesSalary,
   employeesTimekeeping,
   holidayTypeAccountCodes,
   holidayYearCalendar,
@@ -457,9 +459,11 @@ function buildAttendanceSummaryConflictSet() {
 function formatTimeValue(value: Date | null | undefined) {
   if (!value) return null;
 
-  const hours = String(value.getHours()).padStart(2, "0");
-  const minutes = String(value.getMinutes()).padStart(2, "0");
-  const seconds = String(value.getSeconds()).padStart(2, "0");
+  // Drizzle decodes PostgreSQL timestamp-without-timezone as UTC. These fields
+  // already contain Philippine wall time; applying the host offset adds 8 hours.
+  const hours = String(value.getUTCHours()).padStart(2, "0");
+  const minutes = String(value.getUTCMinutes()).padStart(2, "0");
+  const seconds = String(value.getUTCSeconds()).padStart(2, "0");
 
   return `${hours}:${minutes}:${seconds}`;
 }
@@ -752,6 +756,11 @@ async function loadAttendancePeriodSourceData(
         .filter((employeeId): employeeId is string => Boolean(employeeId))
     ),
   ];
+  if(process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"){
+    const prior=await database.select({employeeId:attendanceDailySummaries.employeeId}).from(attendanceDailySummaries).where(and(gte(attendanceDailySummaries.attendanceDate,payrollPeriod.startDate),lte(attendanceDailySummaries.attendanceDate,payrollPeriod.endDate)));
+    const decided=await database.select({employeeId:workTreatments.employeeId}).from(workTreatments).where(and(eq(workTreatments.periodId,payrollPeriodId),eq(workTreatments.active,true)));
+    for(const row of [...prior,...decided])if(!rawEmployeeIds.includes(row.employeeId)&&(!employeeId||row.employeeId===employeeId)&&(!scopedEmployeeIds||scopedEmployeeIds.includes(row.employeeId)))rawEmployeeIds.push(row.employeeId);
+  }
   const employeeRecords: AttendancePeriodEmployeeRecord[] =
     rawEmployeeIds.length === 0
       ? []
@@ -1227,7 +1236,7 @@ async function markPayrollPeriodRunsStale(args: {
       status: payrollRuns.status,
     })
     .from(payrollRuns)
-    .where(eq(payrollRuns.payrollPeriodId, args.payrollPeriodId))
+    .where(and(eq(payrollRuns.payrollPeriodId, args.payrollPeriodId),sql`coalesce(${payrollRuns.inputSnapshot}->>'payrollGroup','Legacy') <> 'Monthly'`))
     .orderBy(desc(payrollRuns.createdAt));
 
   const blockingRun = affectedRuns.find(
@@ -3799,7 +3808,7 @@ async function refreshAttendancePeriodSummariesForScope(args: {
     args.employeeIds ? { employeeIds: args.employeeIds } : undefined
   );
 
-  if (sourceData.rawLogs.length === 0 || sourceData.employeeRecords.length === 0) {
+  if (process.env.ATTENDANCE_WORKBENCH_ENABLED!=="true" && (sourceData.rawLogs.length === 0 || sourceData.employeeRecords.length === 0)) {
     throw new Error(
       "No matched attendance logs are available yet for the selected payroll period."
     );
@@ -3808,6 +3817,8 @@ async function refreshAttendancePeriodSummariesForScope(args: {
   const matchedEmployeeIds = sourceData.employeeRecords.map((employee) => employee.id);
   const resolvedApprovedLeaves = await resolveApprovedLeaveFlags(sourceData.approvedLeaves);
   const sourceParsedLogs = mapAttendanceRawRowsToParsedLogs(sourceData.rawLogs);
+  const decisions=process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"?await db.select().from(workTreatments).where(and(eq(workTreatments.periodId,args.payrollPeriodId),eq(workTreatments.active,true))):[];
+  const decidedDays=new Set(decisions.filter(d=>(d.payload as {kind?:string})?.kind==="AdminDecision").map(d=>`${d.employeeId}|${d.day}`));
   const correctionSuggestions = buildAttendanceCorrectionSuggestionComputations({
     employees: sourceData.employeeRecords.map((employee) => ({
       id: employee.id,
@@ -3840,7 +3851,7 @@ async function refreshAttendancePeriodSummariesForScope(args: {
       tx,
       payrollPeriod: sourceData.payrollPeriod,
       employeeIds: matchedEmployeeIds,
-      suggestions: correctionSuggestions,
+      suggestions: correctionSuggestions.filter(row=>!decidedDays.has(`${row.employeeId}|${row.attendanceDate}`)),
     });
 
     // Reload approved corrections to include any that were just auto-approved.
@@ -3874,7 +3885,7 @@ async function refreshAttendancePeriodSummariesForScope(args: {
       shiftAssignments: sourceData.shiftAssignments,
       weeklyPatterns: sourceData.weeklyPatterns,
       shiftTableBreaksByShiftTableId: sourceData.shiftTableBreaksByShiftTableId,
-      approvedCorrections: mapApprovedCorrectionRows(approvedCorrectionsAfterSync),
+      approvedCorrections: mapApprovedCorrectionRows(approvedCorrectionsAfterSync.filter(row=>!decidedDays.has(`${row.employeeId}|${row.attendanceDate}`))),
       allowedAttendanceDateRange: {
         startDate: sourceData.payrollPeriod.startDate,
         endDate: sourceData.payrollPeriod.endDate,
@@ -6188,7 +6199,10 @@ async function refreshManualPayrollAttendanceForEmployees(args: {
   refreshableExceptionRowIds?: string[];
   refreshHeldDtrLines?: boolean;
 }) {
-  const employeeIds = [...new Set(args.employeeIds)];
+  const monthlyEmployees=args.employeeIds.length?await db.select({id:employeesSalary.employeeId}).from(employeesSalary).where(and(inArray(employeesSalary.employeeId,args.employeeIds),sql`${employeesSalary.monthlyRate}>0`)):[];
+  const monthlyIds=new Set(monthlyEmployees.map(e=>e.id));
+  // DTR refresh must not rewrite explicitly entered monthly salary adjustments.
+  const employeeIds = [...new Set(args.employeeIds)].filter(id=>!monthlyIds.has(id));
   let refreshedEntryCount = 0;
 
   for (const employeeId of employeeIds) {

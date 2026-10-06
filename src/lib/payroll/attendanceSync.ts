@@ -20,6 +20,7 @@ import {
 } from "./attendanceCorrections";
 import {
   resolveEmployeeScheduleForDate,
+  hasLegacyPaySchedule,
   type ShiftAssignmentRecord,
   type WeeklyShiftPatternRecord,
 } from "./scheduleResolver";
@@ -200,6 +201,7 @@ function resolveShiftWindow(args: {
         : false;
 
   return {
+    scheduleMissing: resolvedSchedule.source==="LEGACY"&&!hasLegacyPaySchedule(legacyTimekeeping),
     activeShift: resolvedSchedule.overrideAssignment,
     allowSameDirectionAutoDuplicate:
       resolvedSchedule.source !== "OVERRIDE" ||
@@ -327,6 +329,7 @@ function buildAttendanceRow(args: {
 }) {
   const {
     activeShift,
+    scheduleMissing,
     allowSameDirectionAutoDuplicate,
     hoursPerDay,
     shiftWindow,
@@ -360,6 +363,7 @@ function buildAttendanceRow(args: {
     paidLeaveMinutes,
     unpaidLeaveMinutes
   );
+  if(scheduleMissing){summaryBase.workedMinutes=0;summaryBase.regularMinutes=0;summaryBase.overtimeMinutes=0;summaryBase.nightMinutes=0;summaryBase.lateMinutes=0;summaryBase.undertimeMinutes=0;summaryBase.anomalyFlags.push("SCHEDULE_MISSING");}
   const mergedFlags = mergeAnomalyFlags(
     summaryBase.anomalyFlags,
     correctionAnomalyFlags

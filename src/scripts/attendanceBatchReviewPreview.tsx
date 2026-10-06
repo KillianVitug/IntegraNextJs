@@ -1,0 +1,10 @@
+import React from "react";
+import { createRoot } from "react-dom/client";
+import { AttendanceWorkbench } from "@/app/(ntg)/payroll/attendance-source/workbench";
+import { batchReviewFixture } from "./attendanceTest/batchReviewFixture";
+export const fixture=batchReviewFixture();
+export const previewState={drafts:fixture.drafts,revision:0,calls:[] as string[],approved:false,interruptApproval:false};
+const storage=`integra-attendance-review:${fixture.board.period.id}`;
+if(!sessionStorage.getItem(storage))sessionStorage.setItem(storage,JSON.stringify({drafts:fixture.drafts,search:"",filter:"Needs review",employeeId:"",day:""}));
+Object.assign(window,{batchPreview:{fixture,previewState}});
+createRoot(document.getElementById("root")!).render(<main className="mx-auto max-w-6xl p-2 sm:p-6"><p className="mb-3 rounded-lg bg-amber-100 p-3 text-sm">Fictional component preview · no production data or connections. Save and approval are simulated.</p><AttendanceWorkbench initial={fixture.board}/></main>);
