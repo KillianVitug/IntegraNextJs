@@ -327,6 +327,8 @@ export type PayrollRunPeriodView = {
 };
 
 export type PayrollRunHeaderView = {
+  shortfallPolicy?: string;
+  runType?: string;
   payrollGroup?: "Daily"|"Monthly"|"Legacy";
   earningMonth?:string;
   id: string;

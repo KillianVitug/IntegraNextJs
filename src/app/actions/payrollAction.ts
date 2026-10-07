@@ -248,6 +248,7 @@ function serializePayrollRunEmployee(
 }
 
 function serializePayrollRunHeader(run: {
+  runType?: string;
   id: string;
   status: string;
   runNumber: number;
@@ -273,6 +274,8 @@ function serializePayrollRunHeader(run: {
     id: run.id,
     status: run.status,
     runNumber: run.runNumber,
+    shortfallPolicy: typeof run.inputSnapshot?.shortfallPolicy === "string" ? run.inputSnapshot.shortfallPolicy : undefined,
+    runType: run.runType,
     payrollGroup:runPayrollGroup(run.inputSnapshot),
     earningMonth:typeof run.inputSnapshot?.earningMonth==="string"?run.inputSnapshot.earningMonth:undefined,
     notes: run.notes,

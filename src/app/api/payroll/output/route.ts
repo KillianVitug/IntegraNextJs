@@ -1,3 +1,4 @@
+import { employeeShortfallAmounts, priorShortfallBalance, shortfallPolicyText } from "@/lib/payroll/shortfallModel";
 import { getCurrentAuthContext, hasPermission } from "@/lib/auth/server";
 import { AUTH_PERMISSIONS } from "@/lib/auth/permissions";
 import { db } from "@/db";
@@ -29,8 +30,8 @@ export async function GET(request: Request) {
     }
     let csv: string;
     if (format === "register") {
-      csv = payrollCsv([["Period", "Group", "Run", "Status", "Employee number", "Employee name", "Gross PHP", "Deductions PHP", "Calculated net PHP", "Payment PHP", "Shortfall PHP"],
-        ...run.employees.sort((a,b) => a.employeeNoSnapshot.localeCompare(b.employeeNoSnapshot)).map(employee => [run.payrollPeriod?.code ?? "", runPayrollGroup(run.inputSnapshot), String(run.runNumber), run.status, employee.employeeNoSnapshot, employee.employeeNameSnapshot, Number(employee.grossPay), Number(employee.totalDeductions), Number(employee.netPay), Math.max(0, Number(employee.netPay)), Math.max(0, -Number(employee.netPay))])]);
+      csv = payrollCsv([["Period", "Group", "Run", "Status", "Employee number", "Employee name", "Gross PHP", "Deductions PHP", "Calculated net PHP", "Payment PHP", "Shortfall PHP", "Deducted from earnings PHP", "Prior shortfall recovered PHP", "Prior balance remaining PHP", "Shortfall policy"],
+        ...run.employees.sort((a,b) => a.employeeNoSnapshot.localeCompare(b.employeeNoSnapshot)).map(employee => [run.payrollPeriod?.code ?? "", runPayrollGroup(run.inputSnapshot), String(run.runNumber), run.status, employee.employeeNoSnapshot, employee.employeeNameSnapshot, Number(employee.grossPay), Number(employee.totalDeductions), Number(employee.netPay), Math.max(0, Number(employee.netPay)), Math.max(0, -Number(employee.netPay)), employeeShortfallAmounts(employee).collected, employeeShortfallAmounts(employee).recovered, Math.max(0, priorShortfallBalance(run.inputSnapshot, employee.employeeId) - employeeShortfallAmounts(employee).recovered), shortfallPolicyText(run.inputSnapshot, run.status, run.runType)])]);
     } else if (format === "payment") {
       const artifactId = params.get("artifactId") ?? "";
       if (!uuid.test(artifactId)) return Response.json({error: "Prepare a payment list first."}, {status: 400, headers});

@@ -43,7 +43,12 @@ export function PaymentReview({runId, status, onGenerated}: {runId: string; stat
         <div>Deduction shortfalls<strong className="block">{money(review.shortfall)} · {review.shortfalls.length} people</strong></div>
         <div>Zero net<strong className="block">{review.zeroCount} people</strong></div>
       </div>
-      {review.shortfalls.length > 0 && <div className="rounded border border-amber-400 p-3 text-sm"><p className="font-semibold">No transfer for employees with a deduction shortfall</p>{review.shortfalls.map(row => <p key={row.employeeId}>{row.name} ({row.employeeNo}): {money(row.amount)}</p>)}<p className="mt-2">Calculated deductions remain on the register. Shortfalls need administrator follow-up; this workflow creates no automatic future collection.</p></div>}
+      {review.shortfalls.length > 0 && <div className="rounded border border-amber-400 p-3 text-sm"><p className="font-semibold">No transfer for employees with a deduction shortfall</p>{review.shortfalls.map(row => <p key={row.employeeId}>{row.name} ({row.employeeNo}): {money(row.amount)}</p>)}<p className="mt-2">{review.policyText}</p></div>}
+      {review.recoveries.length > 0 && <details className="rounded border p-3 text-sm">
+        <summary className="min-h-11 cursor-pointer py-2 font-semibold">Deductions now and carried balances · {review.recoveries.length} people</summary>
+        <p className="mb-2 text-muted-foreground">{status === "Posted" ? "Amounts recorded by this payroll." : "Preview only; posting records the recovery."} Current deductions come first; prior shortfalls use remaining positive pay. Original contributions are not charged a second time.</p>
+        <ul className="space-y-3">{review.recoveries.map(row => <li key={row.employeeId} className="break-words border-t pt-2"><strong>{row.name}</strong><br/>Deducted from earnings: {money(row.collected)} · Prior shortfall recovered: {money(row.recovered)}<br/>Prior balance remaining: {money(row.remaining)} · New shortfall: {money(row.carriedForward)}</li>)}</ul>
+      </details>}
       {unassignedCount > 0 && <label className="block text-sm">Pay {unassignedCount} employees with no assigned payment method by
         <select aria-label="Payment method for unassigned employees" value={unassignedMode} onChange={event => {setUnassignedMode(event.target.value as PaymentMode | ""); setPrepared(null);}} className="mt-1 block min-h-11 w-full rounded border bg-background px-3 md:max-w-xs">
           <option value="">Choose payment method</option><option value="Bank">Bank</option><option value="Cash">Cash</option>

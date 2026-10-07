@@ -1,3 +1,5 @@
+import { loadShortfallBalances, assertShortfallRecoveryCurrent, assertShortfallReversal } from "./shortfalls";
+import { allocateShortfallRecovery, recoveryLine, SHORTFALL_POLICY } from "./shortfallModel";
 import { payrollGroup, earningMonth, monthRange, remainingMonthlyLines, runPayrollGroup } from "./payrollGroupModel";
 import { assertPayrollOperator, payrollCents } from "./paymentModel";
 import { monthlyPayouts, payrollGroupsInstalled, postedMonthPayments } from "./payrollGroups";
@@ -3397,10 +3399,19 @@ export async function createOrRecomputePayrollRun(
   for (let index = 0; index < computations.length; index += 1) {
     computations[index] = reconcileStoredPayrollAmounts(computations[index]);
   }
-  const inputSnapshot={payrollGroup:selectedGroup,earningMonth:earningMonth(period),payoutHalf:period.cycle,postedPaymentDigest:priorPaid.digest,payouts:eligibleEmployees.map(e=>[e.id,payouts.get(e.id)??"B"])};
+  const shortfallLedger = await loadShortfallBalances(computations.map(row => row.employeeId), period.startDate);
+  for (let index = 0; index < computations.length; index += 1) {
+    const computation = computations[index];
+    const recovery = allocateShortfallRecovery(shortfallLedger.balances, computation.employeeId, computation.netPay);
+    computation.lines.push(...recovery.map(recoveryLine));
+    computations[index] = reconcileStoredPayrollAmounts(computation);
+  }
+  const inputSnapshot={payrollGroup:selectedGroup,earningMonth:earningMonth(period),payoutHalf:period.cycle,postedPaymentDigest:priorPaid.digest,payouts:eligibleEmployees.map(e=>[e.id,payouts.get(e.id)??"B"]),shortfallPolicy:SHORTFALL_POLICY,shortfallDigest:shortfallLedger.digest,shortfallBalances:shortfallLedger.balances};
   return db.transaction(async (tx) => {
     await lockAttendancePayrollInput(tx);
     if(selectedGroup==="Daily")await confirmAttendanceSourcePayrollInput(tx, payrollPeriodId, attendanceSourceInput);
+    const currentShortfalls = await loadShortfallBalances(computations.map(row => row.employeeId), period.startDate, tx);
+    if (currentShortfalls.digest !== shortfallLedger.digest) throw new PayrollValidationError("Shortfall balances changed during calculation. Recompute to use the latest balances.");
     const currentPaid=await postedMonthPayments(period,eligibleEmployees.map(e=>e.id),tx);
     if(currentPaid.digest!==priorPaid.digest)throw new PayrollValidationError("Posted payments changed during calculation. Recompute to credit the latest payments.");
     const [latestRunForPeriod] = await tx
@@ -3598,15 +3609,17 @@ export async function transitionPayrollRunStatus(
     ensurePayrollTransitionAllowed(run.status, nextStatus);
     const operatorNote = assertPayrollOperator({nextStatus, actorUserId, actorRole: authorization.actorRole, reviewedByUserId: run.reviewedByUserId, approvedByUserId: run.approvedByUserId});
     if (operatorNote) notes = [notes, operatorNote].filter(Boolean).join(" ");
-    const shortfalls = run.employees.filter(employee => payrollCents(employee.netPay) < 0);
+    const shortfalls = run.runType === "Regular" ? run.employees.filter(employee => payrollCents(employee.netPay) < 0) : [];
     if (nextStatus === "Approved" && shortfalls.length) {
-      if (!authorization.acknowledgeShortfalls) throw new PayrollValidationError("Review deduction shortfalls before approving. These employees receive no transfer; no future recovery is created automatically.");
-      notes = [notes, `Deduction shortfalls acknowledged: ${shortfalls.map(employee => `${employee.employeeNoSnapshot} PHP ${(-payrollCents(employee.netPay) / 100).toFixed(2)}`).join(", ")}. Calculated deductions retained; zero transfer; no automatic future recovery.`].filter(Boolean).join(" ");
+      if (!authorization.acknowledgeShortfalls) throw new PayrollValidationError("Review deduction shortfalls before approving. These employees receive no transfer; posting will carry their shortfalls forward for automatic deduction from future positive pay.");
+      notes = [notes, `Deduction shortfalls acknowledged: ${shortfalls.map(employee => `${employee.employeeNoSnapshot} PHP ${(-payrollCents(employee.netPay) / 100).toFixed(2)}`).join(", ")}. Calculated deductions retained; zero transfer; automatic future deduction from available positive pay after current deductions, oldest shortfall first, starting only on posting.`].filter(Boolean).join(" ");
     }
     if (nextStatus !== "Void") {
       if (!run.payrollPeriod) {
         throw new Error("Payroll period not found.");
       }
+      run.inputSnapshot = await assertShortfallRecoveryCurrent(run, tx);
+      if (nextStatus === "Posted") await assertShortfallReversal(run, tx);
       const group=runPayrollGroup(run.inputSnapshot);
       if(group!=="Monthly"){
         await assertNoUnresolvedHeldDtrRowsForPayrollTransition(run.payrollPeriod, tx);
@@ -3763,6 +3776,7 @@ export async function transitionPayrollRunStatus(
         .update(payrollRuns)
         .set({
           status: nextStatus,
+          inputSnapshot: run.inputSnapshot,
           postedAt: new Date(),
           postedByUserId: actorUserId,
           updatedAt: new Date(),
@@ -3817,6 +3831,7 @@ export async function transitionPayrollRunStatus(
       .update(payrollRuns)
       .set({
         status: nextStatus,
+        inputSnapshot: run.inputSnapshot,
         reviewedAt: nextStatus === "Reviewed" ? now : run.reviewedAt,
         reviewedByUserId: nextStatus === "Reviewed" ? actorUserId : run.reviewedByUserId,
         approvedAt: nextStatus === "Approved" ? now : run.approvedAt,
