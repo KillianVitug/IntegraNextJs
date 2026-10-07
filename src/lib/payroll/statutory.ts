@@ -37,6 +37,28 @@ export type ActiveStatutoryRuleBundle = {
   taxVersionId: number | null;
 };
 
+/** Read once per calculation. Never shared across requests or rule revisions. */
+export type StatutoryCalculationRules = {
+  versions: ActiveStatutoryRuleBundle;
+  sss: (typeof sssContributionBrackets.$inferSelect)[];
+  philhealth: (typeof philhealthContributionRates.$inferSelect)[];
+  pagibig: (typeof pagibigContributionRates.$inferSelect)[];
+  tax: (typeof birWithholdingTaxBrackets.$inferSelect)[];
+};
+export async function loadStatutoryCalculationRules(versions: ActiveStatutoryRuleBundle): Promise<StatutoryCalculationRules> {
+  const [sss,philhealth,pagibig,tax]=await Promise.all([
+    versions.sssVersionId ? db.select().from(sssContributionBrackets).where(eq(sssContributionBrackets.versionId,versions.sssVersionId)).orderBy(sssContributionBrackets.rangeFrom) : [],
+    versions.philhealthVersionId ? db.select().from(philhealthContributionRates).where(eq(philhealthContributionRates.versionId,versions.philhealthVersionId)).limit(1) : [],
+    versions.pagibigVersionId ? db.select().from(pagibigContributionRates).where(eq(pagibigContributionRates.versionId,versions.pagibigVersionId)).orderBy(pagibigContributionRates.rangeFrom) : [],
+    versions.taxVersionId ? db.select().from(birWithholdingTaxBrackets).where(and(eq(birWithholdingTaxBrackets.versionId,versions.taxVersionId),eq(birWithholdingTaxBrackets.payrollTerms,"Semi-Monthly"))).orderBy(birWithholdingTaxBrackets.compensationFrom) : [],
+  ]);
+  return {versions:{...versions},sss,philhealth,pagibig,tax};
+}
+function checkedRules(rules:StatutoryCalculationRules,version:keyof ActiveStatutoryRuleBundle,id:number) {
+  if(rules.versions[version]!==id)throw new Error("Calculation rule version mismatch. Reload the payroll calculation.");
+  return rules;
+}
+
 function toAmount(value: string | number | null | undefined) {
   if (value == null) return 0;
   const numericValue = Number(value);
@@ -121,9 +143,10 @@ export async function getActiveStatutoryRuleBundle(
 
 export async function computeSssContribution(
   monthlyCompensation: number,
-  versionId: number
+  versionId: number,
+  rules?: StatutoryCalculationRules
 ): Promise<SssContributionResult> {
-  const brackets = await db
+  const brackets = rules ? checkedRules(rules,"sssVersionId",versionId).sss : await db
     .select()
     .from(sssContributionBrackets)
     .where(eq(sssContributionBrackets.versionId, versionId))
@@ -159,9 +182,10 @@ export async function computeSssContribution(
 
 export async function computePhilhealthContribution(
   monthlyCompensation: number,
-  versionId: number
+  versionId: number,
+  rules?: StatutoryCalculationRules
 ) {
-  const [rate] = await db
+  const [rate] = rules ? checkedRules(rules,"philhealthVersionId",versionId).philhealth : await db
     .select()
     .from(philhealthContributionRates)
     .where(eq(philhealthContributionRates.versionId, versionId))
@@ -185,9 +209,10 @@ export async function computePhilhealthContribution(
 
 export async function computePagibigContribution(
   monthlyCompensation: number,
-  versionId: number
+  versionId: number,
+  rules?: StatutoryCalculationRules
 ) {
-  const rates = await db
+  const rates = rules ? checkedRules(rules,"pagibigVersionId",versionId).pagibig : await db
     .select()
     .from(pagibigContributionRates)
     .where(eq(pagibigContributionRates.versionId, versionId))
@@ -217,9 +242,10 @@ export async function computePagibigContribution(
 export async function computeBirWithholding(
   taxableCompensation: number,
   versionId: number,
-  payrollTerms: "Semi-Monthly" = "Semi-Monthly"
+  payrollTerms: "Semi-Monthly" = "Semi-Monthly",
+  rules?: StatutoryCalculationRules
 ) {
-  const brackets = await db
+  const brackets = rules ? checkedRules(rules,"taxVersionId",versionId).tax : await db
     .select()
     .from(birWithholdingTaxBrackets)
     .where(

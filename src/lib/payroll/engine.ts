@@ -1,3 +1,4 @@
+import { findComputeReceipt, recordComputeReceipt, validateComputeRequest } from "./computeReceipt";
 import { loadShortfallBalances, assertShortfallRecoveryCurrent, assertShortfallReversal } from "./shortfalls";
 import { allocateShortfallRecovery, recoveryLine, SHORTFALL_POLICY } from "./shortfallModel";
 import { payrollGroup, earningMonth, monthRange, remainingMonthlyLines, runPayrollGroup } from "./payrollGroupModel";
@@ -76,6 +77,8 @@ import {
 } from "./scheduleResolver";
 import {
   computeBirWithholding,
+  loadStatutoryCalculationRules,
+  type StatutoryCalculationRules,
   computePagibigContribution,
   computePhilhealthContribution,
   computeSssContribution,
@@ -1519,6 +1522,7 @@ export async function computeEmployeePayroll({
   accountCodes,
   customPayrollMap,
   statutoryBundle,
+  statutoryRules,
   priorCycleTaxContext,
   birYearToDateTaxContext,
   monthlyOnce = false,
@@ -1549,6 +1553,7 @@ export async function computeEmployeePayroll({
   accountCodes: Map<string, typeof accountCode.$inferSelect>;
   customPayrollMap: Map<number, { id: number; code: string; groups: ContributionGroupWithFlags[] }>;
   statutoryBundle: ActiveStatutoryRuleBundle;
+  statutoryRules?: StatutoryCalculationRules;
   priorCycleTaxContext?: Map<string, PriorCycleTaxContext>;
   birYearToDateTaxContext?: Map<string, BirYearToDateTaxContext>;
 }): Promise<EmployeePayrollComputation> {
@@ -2155,16 +2160,16 @@ export async function computeEmployeePayroll({
   // Pre-fetch all three statutory DB lookups in parallel to avoid sequential awaits in the loop
   const [sssStatutoryResult, philhealthStatutoryResult, pagibigStatutoryResult] = await Promise.all([
     !ignoreContributionDeduction && !hasCustomFixed(sssGroup) && statutoryBundle.sssVersionId
-      ? computeSssContribution(monthlyCompensationBase, statutoryBundle.sssVersionId)
+      ? computeSssContribution(monthlyCompensationBase, statutoryBundle.sssVersionId, statutoryRules)
       : Promise.resolve(null),
     !ignoreContributionDeduction && !hasCustomFixed(phGroup) && statutoryBundle.philhealthVersionId
       ? computePhilhealthContribution(
           philhealthMonthlyCompensation.monthlyCompensationBase,
-          statutoryBundle.philhealthVersionId
+          statutoryBundle.philhealthVersionId, statutoryRules
         )
       : Promise.resolve(null),
     !ignoreContributionDeduction && !hasCustomFixed(pgGroup) && statutoryBundle.pagibigVersionId
-      ? computePagibigContribution(monthlyCompensationBase, statutoryBundle.pagibigVersionId)
+      ? computePagibigContribution(monthlyCompensationBase, statutoryBundle.pagibigVersionId, statutoryRules)
       : Promise.resolve(null),
   ]);
 
@@ -2357,7 +2362,7 @@ export async function computeEmployeePayroll({
           )}`
         );
       } else if (monthlyOnce) {
-        taxAmount = roundMoney((await computeBirWithholding(taxableCompensation / 2, statutoryBundle.taxVersionId))*2);
+        taxAmount = roundMoney((await computeBirWithholding(taxableCompensation / 2, statutoryBundle.taxVersionId, "Semi-Monthly", statutoryRules))*2);
       } else if (taxGroup?.flags?.taxMonthEndAdjustment && period.cycle === "B") {
         const previous =
           priorCycleTaxContext?.get(employee.id) ??
@@ -2366,7 +2371,7 @@ export async function computeEmployeePayroll({
         const monthlyTax = roundMoney(
           (await computeBirWithholding(
             monthlyTaxableCompensation / 2,
-            statutoryBundle.taxVersionId
+            statutoryBundle.taxVersionId, "Semi-Monthly", statutoryRules
           )) * 2
         );
         taxAmount = roundMoney(
@@ -2375,7 +2380,7 @@ export async function computeEmployeePayroll({
       } else if (!(taxGroup?.flags?.taxMonthEndAdjustment && period.cycle === "A")) {
         taxAmount = await computeBirWithholding(
           taxableCompensation,
-          statutoryBundle.taxVersionId
+          statutoryBundle.taxVersionId, "Semi-Monthly", statutoryRules
         );
       }
     }
@@ -2969,9 +2974,11 @@ export async function getPayrollPeriod(periodId: string) {
 export async function createOrRecomputePayrollRun(
   payrollPeriodId: string,
   actorUserId: string,
-  options: Pick<PayrollPreflightOptions, "bypassTemporaryReadinessCategories" | "payrollGroup"> = {}
+  options: Pick<PayrollPreflightOptions, "bypassTemporaryReadinessCategories" | "payrollGroup"> & {requestId?:string} = {}
 ) {
   const selectedGroup=options.payrollGroup??"Daily";
+  const request=options.requestId?validateComputeRequest({requestId:options.requestId,periodId:payrollPeriodId,group:selectedGroup,bypass:options.bypassTemporaryReadinessCategories===true}):null;
+  if(request){const receipt=await findComputeReceipt(actorUserId,request);if(receipt)return db.query.payrollRuns.findFirst({where:eq(payrollRuns.id,receipt.runId),with:{payrollPeriod:true,employees:{with:{lines:true}}}});}
   if(selectedGroup==="Monthly"&&!await payrollGroupsInstalled())throw new PayrollValidationError("Install the payroll-group migration before computing monthly salary.");
   const attendanceSourceInput = selectedGroup==="Monthly"?null:await assertAttendanceSourceReady(payrollPeriodId);
   await ensurePayrollFoundationData();
@@ -3316,6 +3323,7 @@ export async function createOrRecomputePayrollRun(
     batchLoadBirYearToDateTaxContext(period, employeesToCompute.map((e) => e.id)),
   ]);
 
+  const statutoryRules=await loadStatutoryCalculationRules(statutoryBundle);
   const priorPaid=await postedMonthPayments(period,eligibleEmployees.map(e=>e.id));
   if(selectedGroup==="Monthly")for(const [id,context] of birYearToDateTaxContextMap){
     const prior=priorPaid.employees.filter(e=>e.employeeId===id),ids=new Set(prior.map(e=>e.id));
@@ -3359,6 +3367,7 @@ export async function createOrRecomputePayrollRun(
           accountCodes: accountCodeMap,
           customPayrollMap,
           statutoryBundle,
+          statutoryRules,
           priorCycleTaxContext: priorCycleTaxContextMap,
           birYearToDateTaxContext: birYearToDateTaxContextMap,
         })
@@ -3409,6 +3418,7 @@ export async function createOrRecomputePayrollRun(
   const inputSnapshot={payrollGroup:selectedGroup,earningMonth:earningMonth(period),payoutHalf:period.cycle,postedPaymentDigest:priorPaid.digest,payouts:eligibleEmployees.map(e=>[e.id,payouts.get(e.id)??"B"]),shortfallPolicy:SHORTFALL_POLICY,shortfallDigest:shortfallLedger.digest,shortfallBalances:shortfallLedger.balances};
   return db.transaction(async (tx) => {
     await lockAttendancePayrollInput(tx);
+    if(request){const receipt=await findComputeReceipt(actorUserId,request,tx);if(receipt)return tx.query.payrollRuns.findFirst({where:eq(payrollRuns.id,receipt.runId),with:{payrollPeriod:true,employees:{with:{lines:true}}}});}
     if(selectedGroup==="Daily")await confirmAttendanceSourcePayrollInput(tx, payrollPeriodId, attendanceSourceInput);
     const currentShortfalls = await loadShortfallBalances(computations.map(row => row.employeeId), period.startDate, tx);
     if (currentShortfalls.digest !== shortfallLedger.digest) throw new PayrollValidationError("Shortfall balances changed during calculation. Recompute to use the latest balances.");
@@ -3560,6 +3570,7 @@ export async function createOrRecomputePayrollRun(
       database: tx,
     });
 
+    if(request)await recordComputeReceipt(actorUserId,request,runId,tx);
     return tx.query.payrollRuns.findFirst({
       where: eq(payrollRuns.id, runId),
       with: {

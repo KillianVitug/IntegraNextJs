@@ -1,3 +1,4 @@
+import { PayrollValidationError } from "@/lib/payroll/validation";
 import { addDays, format } from "date-fns";
 import type { DbClient } from "@/db";
 import {
@@ -517,7 +518,7 @@ export async function markAffectedShiftRunsStale(args: {
   );
 
   if (blockingRun) {
-    throw new Error(
+    throw new PayrollValidationError(
       `Schedule changes are blocked because payroll period ${blockingRun.periodCode} already has a ${blockingRun.status} run.`
     );
   }

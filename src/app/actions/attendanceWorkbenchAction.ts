@@ -8,13 +8,23 @@ import { processWorkDelivery, closeAdjustment, reopenWorkPlan, undoWorkDraft } f
 import { payrollActionResult } from "@/lib/payroll/validation";
 import type { WorkDraft } from "@/lib/payroll/attendanceWorkbenchModel";
 import { and, eq } from "drizzle-orm";
-import { workTreatments, workHistory } from "@/db/attendanceWorkbenchSchema";
+import { workTreatments, workHistory, workPlans } from "@/db/attendanceWorkbenchSchema";
 import { shiftTables } from "@/db/schema";
 import { adminDecision } from "@/lib/payroll/attendanceAdminDecision";
 import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
 import { PayrollValidationError } from "@/lib/payroll/validation";
 export async function saveWorkDraftAction(periodId:string,drafts:WorkDraft[],existing?:{id:string;revision:number}) {const actor=await requireAdminActor();return payrollActionResult(()=>db.transaction(tx=>saveWorkDraft(tx,actor.userId,periodId,drafts.map(d=>({...d,ownerId:d.ownerId||actor.userId})),existing)));}
 export async function previewWorkBatchAction(periodId:string,batchId:string,revision:number,planIds?:string[]) {await requireAdminActor();return payrollActionResult(()=>prepareWorkApproval(periodId,batchId,revision,db,fetch,planIds));}
+/** One bounded request saves the entire batch, then previews the explicitly chosen employees. */
+export async function saveAndPreviewWorkBatchAction(periodId:string,drafts:WorkDraft[],existing:{id:string;revision:number}|undefined,employeeIds:string[]) {
+ const actor=await requireAdminActor();return payrollActionResult(async()=>{
+  if(!employeeIds.length||employeeIds.some(id=>!drafts.some(d=>d.employeeId===id)))throw new PayrollValidationError("Select complete employee plans for review.");
+  const saved=await db.transaction(tx=>saveWorkDraft(tx,actor.userId,periodId,drafts.map(d=>({...d,ownerId:d.ownerId||actor.userId})),existing));
+  const plans=await db.select({id:workPlans.id,employeeId:workPlans.employeeId}).from(workPlans).where(eq(workPlans.batchId,saved.id));
+  const result=await payrollActionResult(()=>prepareWorkApproval(periodId,saved.id,saved.revision,db,fetch,plans.filter(p=>employeeIds.includes(p.employeeId)).map(p=>p.id)));
+  return {saved,preview:result.ok?result.data:null,error:result.ok?null:result.error};
+ });
+}
 export async function approveWorkBatchAction(periodId:string,batchId:string,revision:number,digest:string,planIds?:string[]) {
  const actor=await requireAdminActor();return payrollActionResult(async()=>{
   await approveWorkBatch(actor.userId,periodId,batchId,revision,digest,db,fetch,planIds);

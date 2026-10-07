@@ -24,9 +24,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { toast } from "sonner";
-import { cn } from "@/lib/utils";
 import { PayrollPageNav } from "../PayrollPageNav";
-import { PaymentReview, PayrollDownloadLink } from "./PaymentReview";
+import { PayrollArtifacts, artifactKindLabel } from "./PayrollArtifacts";
+import { PaymentReview } from "./PaymentReview";
 import type { PayrollRunPeriodView, PayrollRunHeaderView } from "../types";
 
 type LoadStatus = "idle" | "loading" | "ready" | "error";
@@ -80,28 +80,6 @@ function formatDateTime(value: string | null) {
   }).format(new Date(value));
 }
 
-function getToneClass(status: string | null | undefined) {
-  if (status === "Posted" || status === "Processed" || status === "Approved") {
-    return "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300";
-  }
-  if (status === "Draft" || status === "Reviewed" || status === "Generated") {
-    return "bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300";
-  }
-  if (status === "Void" || status === "Reversed" || status === "Failed") {
-    return "bg-rose-100 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300";
-  }
-  return "bg-muted text-muted-foreground";
-}
-
-function getArtifactKindLabel(kind: string) {
-  const statutory = STATUTORY_PACKAGE_OPTIONS.find((option) => option.kind === kind);
-  if (statutory) return statutory.label;
-  if (kind === "CashPayrollList") return "Cash Payroll List";
-  if (kind === "BankFile") return "Bank File";
-  if (kind === "GlJournal") return "GL Journal";
-  if (kind === "PayrollRegister") return "Payroll Register";
-  return kind;
-}
 
 function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
@@ -114,6 +92,7 @@ export function PayrollOutputsPageClient({ selectedPeriod, selectedRun }: Props)
     data: null,
     error: null,
   });
+  const [outputNotice,setOutputNotice]=useState("");
   const [actionState, setActionState] = useState<string | null>(null);
   const cacheRef = useRef<Record<string, PayrollControlState>>({});
   const selectedRunId = selectedRun?.id ?? null;
@@ -189,21 +168,24 @@ export function PayrollOutputsPageClient({ selectedPeriod, selectedRun }: Props)
     successMessage: string
   ) {
     if (!selectedRunId) return;
+    let saved=false;
     try {
       setActionState(label);
       await callback();
+      saved=true;setOutputNotice(successMessage);
       delete cacheRef.current[`control:${selectedRunId}`];
       await refreshControlBundle(selectedRunId);
       toast.success(successMessage);
     } catch (error) {
-      toast.error(getErrorMessage(error, "Unable to generate payroll output."));
+      const message=saved?"Output saved. Refresh output history to see its download link.":getErrorMessage(error, "Unable to confirm output. Refresh output history before retrying.");
+      setOutputNotice(message);toast.error(message);
     } finally {
       setActionState(null);
     }
   }
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 w-full space-y-6 [&>*]:min-w-0">
       <PayrollPageNav
         activeSection="outputs"
         title="Payroll Outputs"
@@ -214,6 +196,7 @@ export function PayrollOutputsPageClient({ selectedPeriod, selectedRun }: Props)
 
       {selectedRun && <PaymentReview key={selectedRun.id} runId={selectedRun.id} status={selectedRun.status} onGenerated={refreshControlBundle} />}
 
+      {outputNotice&&<p role="status" className="rounded border border-emerald-500 p-3 text-sm">{outputNotice}</p>}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle>Output Actions</CardTitle>
@@ -313,52 +296,8 @@ export function PayrollOutputsPageClient({ selectedPeriod, selectedRun }: Props)
         </Card>
       ) : (
         <>
-          <div className="grid gap-4 xl:grid-cols-2">
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle>Generated Artifacts</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Kind</TableHead>
-                        <TableHead>Status</TableHead>
-                        <TableHead>File</TableHead>
-                        <TableHead>Generated</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {(currentBundle?.artifacts ?? []).map((artifact) => (
-                        <TableRow key={artifact.id}>
-                          <TableCell className="font-medium">
-                            {getArtifactKindLabel(artifact.kind)}
-                          </TableCell>
-                          <TableCell>
-                            <span
-                              className={cn(
-                                "rounded-full px-2 py-1 text-xs font-medium",
-                                getToneClass(artifact.status)
-                              )}
-                            >
-                              {artifact.status}
-                            </span>
-                          </TableCell>
-                          <TableCell>{artifact.fileName ?? "-"}
-                            {selectedRun && ["BankFile", "CashPayrollList", "Payslip"].includes(artifact.kind) && <PayrollDownloadLink url={`/api/payroll/output?runId=${selectedRun.id}&format=${artifact.kind === "Payslip" ? "payslips" : "payment"}&artifactId=${artifact.id}${artifact.kind === "Payslip" && typeof artifact.metadata?.employeeId === "string" ? `&employeeId=${artifact.metadata.employeeId}` : ""}`}>Download</PayrollDownloadLink>}
-                          </TableCell>
-                          <TableCell>{formatDateTime(artifact.generatedAt)}</TableCell>
-                        </TableRow>
-                      ))}
-                      {(currentBundle?.artifacts.length ?? 0) === 0 && (
-                        <EmptyRow colSpan={4} message="No artifacts generated for this run yet." />
-                      )}
-                    </TableBody>
-                  </Table>
-                </div>
-              </CardContent>
-            </Card>
+          <div className="grid min-w-0 gap-4 xl:grid-cols-2 [&>*]:min-w-0">
+            <PayrollArtifacts artifacts={currentBundle?.artifacts ?? []} runId={selectedRunId} />
 
             <Card>
               <CardHeader className="pb-3">
@@ -444,7 +383,7 @@ export function PayrollOutputsPageClient({ selectedPeriod, selectedRun }: Props)
                     {(currentBundle?.statutoryPackages ?? []).map((filing) => (
                       <TableRow key={filing.id}>
                         <TableCell className="font-medium">
-                          {getArtifactKindLabel(filing.kind)}
+                          {artifactKindLabel(filing.kind)}
                         </TableCell>
                         <TableCell>{filing.status}</TableCell>
                         <TableCell>

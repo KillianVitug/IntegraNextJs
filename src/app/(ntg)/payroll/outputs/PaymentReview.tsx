@@ -8,7 +8,7 @@ type Review = Awaited<ReturnType<typeof getPayrollPaymentReviewAction>>;
 const money = (value: number) => new Intl.NumberFormat("en-PH", {style: "currency", currency: "PHP"}).format(value);
 
 export function PayrollDownloadLink({url, children}: {url: string; children: React.ReactNode}) {
-  return <Button asChild variant="outline"><a href={url} download>{children}</a></Button>;
+  return <Button asChild variant="outline" className="h-auto min-h-11 max-w-full whitespace-normal text-center"><a href={url} download>{children}</a></Button>;
 }
 
 export function PaymentReview({runId, status, onGenerated}: {runId: string; status: string; onGenerated: () => Promise<unknown>}) {
@@ -22,13 +22,20 @@ export function PaymentReview({runId, status, onGenerated}: {runId: string; stat
   useEffect(() => {
     let active = true;
     setReview(null); setError(null); setPrepared(null);
-    void getPayrollPaymentReviewAction(runId).then(value => {if (active) setReview(value);}).catch(() => {if (active) setError("Payment review could not load. Retry; this does not change payroll.");});
+    void getPayrollPaymentReviewAction(runId).then(value => {if (active) {
+      setReview(value);
+      const remembered=value.preparedLists[0]?.unassignedMode;
+      setUnassignedMode(current=>current||(remembered==="Bank"||remembered==="Cash"?remembered:""));
+    }}).catch(() => {if (active) setError("Payment review could not load. Retry; this does not change payroll.");});
     return () => {active = false;};
   }, [runId, status, retry]);
   useEffect(() => {if (error) errorRef.current?.focus();}, [error]);
   async function action(name: string, operation: () => Promise<unknown>) {
     setBusy(name); setError(null);
-    try {await operation();} catch (cause) {setError(cause instanceof Error ? cause.message : "Action failed. Check output history before retrying.");} finally {setBusy(null);}
+    try {await operation();setReview(await getPayrollPaymentReviewAction(runId));} catch (cause) {
+      try {setReview(await getPayrollPaymentReviewAction(runId));} catch {/* Keep the local receipt when a status read also fails. */}
+      setError(cause instanceof Error ? cause.message : "The response was interrupted. Check the prepared lists below before retrying.");
+    } finally {setBusy(null);}
   }
   const unassignedCount = review?.rows.filter(row => Number(row.netPay) > 0 && !row.paymentMode).length ?? 0;
   const canPrepare = ["Approved", "Posted"].includes(status) && (!unassignedCount || !!unassignedMode) && !!review;
@@ -43,6 +50,7 @@ export function PaymentReview({runId, status, onGenerated}: {runId: string; stat
         <div>Deduction shortfalls<strong className="block">{money(review.shortfall)} · {review.shortfalls.length} people</strong></div>
         <div>Zero net<strong className="block">{review.zeroCount} people</strong></div>
       </div>
+      {review.preparedLists.length>0&&<div aria-label="Prepared payment lists" className="space-y-2 rounded border border-emerald-500 p-3 text-sm"><strong>Prepared payment lists</strong><p>Saved lists remain available after leaving this page. Preparing or downloading a list does not transfer money.</p>{review.preparedLists.map(list=><div key={list.id} className="flex min-w-0 flex-wrap items-center gap-2"><span>{list.batchType} · {list.employeeCount} people · {money(Number(list.totalNetPay))}</span><PayrollDownloadLink url={`/api/payroll/output?runId=${runId}&format=payment&artifactId=${list.artifactId}`}>Download {list.batchType} list</PayrollDownloadLink></div>)}</div>}
       {review.shortfalls.length > 0 && <div className="rounded border border-amber-400 p-3 text-sm"><p className="font-semibold">No transfer for employees with a deduction shortfall</p>{review.shortfalls.map(row => <p key={row.employeeId}>{row.name} ({row.employeeNo}): {money(row.amount)}</p>)}<p className="mt-2">{review.policyText}</p></div>}
       {review.recoveries.length > 0 && <details className="rounded border p-3 text-sm">
         <summary className="min-h-11 cursor-pointer py-2 font-semibold">Deductions now and carried balances · {review.recoveries.length} people</summary>

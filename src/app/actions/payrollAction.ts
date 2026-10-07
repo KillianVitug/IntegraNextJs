@@ -348,7 +348,7 @@ export async function preflightPayrollAction(
 
 export async function computePayrollRun(
   payrollPeriodId: string,
-  options: PayrollReadinessBypassOptions = {}
+  options: PayrollReadinessBypassOptions & {requestId?:string} = {}
 ) {
   const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_COMPUTE);
   const result = await createOrRecomputePayrollRun(
