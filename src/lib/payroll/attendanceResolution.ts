@@ -42,15 +42,17 @@ export async function resolutionPeople(database: DbClient, period: { id: string;
   });
 }
 
-export async function loadAttendanceReadiness(periodId: string, database: DbClient = db, historyPage = 0): Promise<AttendanceReadiness> {
+export async function loadAttendanceReadiness(periodId: string, database: DbClient = db, historyPage = 0, includeDetails = true): Promise<AttendanceReadiness> {
   enabled(); if (!uuid.test(periodId)) fail("Select a payroll period.");
   const [period] = await database.select().from(payrollPeriods).where(eq(payrollPeriods.id, periodId));
   if (!period) fail("Payroll period not found.");
-  const [run] = await database.select().from(runs).where(eq(runs.payrollPeriodId, periodId)).orderBy(desc(runs.startedAt), desc(runs.id)).limit(1);
-  const [state] = await database.select().from(periods).where(eq(periods.payrollPeriodId, periodId));
-  const people = await resolutionPeople(database, { id: period.id, startDate: period.startDate, endDate: period.endDate });
-  const history = await database.select().from(resolutions).where(eq(resolutions.payrollPeriodId, periodId)).orderBy(desc(resolutions.createdAt), desc(resolutions.id)).limit(51).offset(Math.max(0, Math.min(10000, Math.floor(historyPage))) * 50);
-  const posted = await database.select({ id: payrollRuns.id }).from(payrollRuns).where(and(eq(payrollRuns.payrollPeriodId, periodId), eq(payrollRuns.status, "Posted"),sql`coalesce(${payrollRuns.inputSnapshot}->>'payrollGroup','Legacy') <> 'Monthly'`)).limit(1);
+  const [[run], [state], people, history, posted] = await Promise.all([
+    database.select().from(runs).where(eq(runs.payrollPeriodId, periodId)).orderBy(desc(runs.startedAt), desc(runs.id)).limit(1),
+    database.select().from(periods).where(eq(periods.payrollPeriodId, periodId)),
+    includeDetails ? resolutionPeople(database, { id: period.id, startDate: period.startDate, endDate: period.endDate }) : Promise.resolve([]),
+    includeDetails ? database.select().from(resolutions).where(eq(resolutions.payrollPeriodId, periodId)).orderBy(desc(resolutions.createdAt), desc(resolutions.id)).limit(51).offset(Math.max(0, Math.min(10000, Math.floor(historyPage))) * 50) : Promise.resolve([]),
+    database.select({ id: payrollRuns.id }).from(payrollRuns).where(and(eq(payrollRuns.payrollPeriodId, periodId), eq(payrollRuns.status, "Posted"),sql`coalesce(${payrollRuns.inputSnapshot}->>'payrollGroup','Legacy') <> 'Monthly'`)).limit(1),
+  ]);
   const blockers: string[] = [];
   let needsSync=!run||run.state!=="Complete";
   try { await assertAttendanceSourceReady(periodId, database); } catch (error) { if(error instanceof AttendanceSourceIssue)needsSync ||= error.needsSync; if (error instanceof PayrollValidationError) blockers.push(error.message); else throw error; }

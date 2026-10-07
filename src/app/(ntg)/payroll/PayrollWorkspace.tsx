@@ -1,4 +1,5 @@
 "use client";
+import { payrollRead } from "@/lib/payroll/readClient";
 
 import {
   Fragment,
@@ -22,7 +23,6 @@ import {
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
-import { attendanceReadinessAction } from "@/app/actions/attendanceSourceAction";
 import type { AttendanceReadiness } from "@/lib/payroll/attendanceResolutionModel";
 import { AttendanceReadinessCard } from "./attendance-source/attendance-review";
 import {
@@ -3112,7 +3112,7 @@ export function PayrollWorkspace({
   const [attendanceDtrDepartmentFilter, setAttendanceDtrDepartmentFilter] =
     useState<DepartmentFilterValue>(ALL_DEPARTMENTS_VALUE);
   const [selectedDtrEmployeeId, setSelectedDtrEmployeeId] = useState<string | null>(
-    null
+    () => searchParams.get("employeeId")
   );
   const [
     selectedPayrollAccountCodeEmployeeId,
@@ -3928,7 +3928,7 @@ export function PayrollWorkspace({
   }, [filteredManualPayrollEmployees, selectedManualPayrollEmployeeId]);
 
   useEffect(() => {
-    if (!selectedRun || !selectedEmployeeSummary || !selectedEmployeeDetailKey) {
+    if (activeTab !== "run" || !selectedRun || !selectedEmployeeSummary || !selectedEmployeeDetailKey) {
       return;
     }
 
@@ -3983,6 +3983,7 @@ export function PayrollWorkspace({
       }
     })();
   }, [
+    activeTab,
     employeeDetailsByKey,
     selectedEmployeeDetailKey,
     selectedEmployeeSummary,
@@ -4198,6 +4199,7 @@ export function PayrollWorkspace({
   }, [payrollLoanRows]);
 
   useEffect(() => {
+    if (activeTab !== "run") return;
     if (!selectedPeriodKey) {
       setPayrollReadinessState({
         status: "idle",
@@ -4228,9 +4230,8 @@ export function PayrollWorkspace({
 
     void (async () => {
       try {
-        const readiness = await preflightPayrollAction(selectedPeriodKey, {
-          payrollGroup,
-          bypassTemporaryReadinessCategories,
+        const readiness = await payrollRead<Awaited<ReturnType<typeof preflightPayrollAction>>>("preflight", {
+          periodId:selectedPeriodKey, group:payrollGroup, bypass:String(bypassTemporaryReadinessCategories),
         });
         if (cancelled) return;
 
@@ -4257,6 +4258,7 @@ export function PayrollWorkspace({
       cancelled = true;
     };
   }, [
+    activeTab,
     selectedPeriodKey,
     attendanceBatchKey,
     attendanceDtrReloadKey,
@@ -4992,6 +4994,7 @@ export function PayrollWorkspace({
   }, [attendanceDtrDepartmentFilter, attendanceDtrDepartmentOptions]);
 
   useEffect(() => {
+    if (!attendanceDtrState.data || attendanceDtrState.status === "loading") return;
     if (filteredAttendanceDtrEmployees.length === 0) {
       if (selectedDtrEmployeeId !== null) {
         setSelectedDtrEmployeeId(null);
@@ -5006,7 +5009,7 @@ export function PayrollWorkspace({
     if (!employeeStillExists) {
       setSelectedDtrEmployeeId(filteredAttendanceDtrEmployees[0]?.employeeId ?? null);
     }
-  }, [filteredAttendanceDtrEmployees, selectedDtrEmployeeId]);
+  }, [attendanceDtrState.data, attendanceDtrState.status, filteredAttendanceDtrEmployees, selectedDtrEmployeeId]);
 
   useEffect(() => {
     const filterStillExists = payrollAccountCodeDepartmentOptions.some(
@@ -6449,14 +6452,12 @@ export function PayrollWorkspace({
   }
 
   useEffect(() => {
-    let cancelled = false;
-    setAttendanceReadiness(null); setAttendanceCheckError(null);
-    if (attendanceEnabled && selectedPeriod?.id) attendanceReadinessAction(selectedPeriod.id).then(result => {
-      if (cancelled) return;
-      if (result.ok) setAttendanceReadiness(result.data); else setAttendanceCheckError(result.error);
-    }).catch(() => { if (!cancelled) setAttendanceCheckError("Attendance readiness could not be loaded. Refresh this page or open Attendance review & sync."); });
-    return () => { cancelled = true; };
-  }, [attendanceEnabled, selectedPeriod?.id, actionState]);
+    if(activeTab!=="run"||actionState)return;
+    const controller=new AbortController();
+    setAttendanceReadiness(null);setAttendanceCheckError(null);
+    if(attendanceEnabled&&selectedPeriod?.id)payrollRead<AttendanceReadiness>("readiness",{periodId:selectedPeriod.id},controller.signal).then(setAttendanceReadiness).catch(error=>{if(!controller.signal.aborted)setAttendanceCheckError(error instanceof Error?error.message:"Attendance readiness could not be loaded. Open Attendance review & sync.");});
+    return()=>controller.abort();
+  },[attendanceEnabled,selectedPeriod?.id,actionState,activeTab]);
 
   async function runAction(
     label: string,
