@@ -1,5 +1,7 @@
 "use client";
 import { shortfallPolicyText } from "@/lib/payroll/shortfallModel";
+import { CalculationStatus } from "./CalculationStatus";
+import { generateUUID } from "@/lib/uuid";
 import { payrollRead } from "@/lib/payroll/readClient";
 
 import {
@@ -3001,11 +3003,17 @@ export function PayrollWorkspace({
   const [periodSearch, setPeriodSearch] = useState("");
   const activeTab = activeSection;
   const [employeeSnapshotSearch, setEmployeeSnapshotSearch] = useState("");
+  const [showZeroPayrollRows,setShowZeroPayrollRows]=useState(false);
   const [employeeSnapshotDepartmentFilter, setEmployeeSnapshotDepartmentFilter] =
     useState<DepartmentFilterValue>(ALL_DEPARTMENTS_VALUE);
   const [actionState, setActionState] = useState<string | null>(null);
   const [shortfallAcknowledgment, setShortfallAcknowledgment] = useState<string | null>(null);
   const [attendanceReadiness, setAttendanceReadiness] = useState<AttendanceReadiness | null>(null);
+  const [payrollActionNotice,setPayrollActionNotice]=useState<string|null>(null);
+  const [calculationRequest,setCalculationRequest]=useState<{periodId:string;group:"Daily"|"Monthly";requestId:string;bypass:boolean;startedAt:number}|null>(null);
+  const calculationStorage=`integra-payroll-calculation:${workspaceSnapshot.selectedPeriodId}:${payrollGroup}`;
+  useEffect(()=>{try{setCalculationRequest(JSON.parse(sessionStorage.getItem(calculationStorage)??"null"));}catch{setCalculationRequest(null);}},[calculationStorage]);
+  function retainCalculation(request:typeof calculationRequest){setCalculationRequest(request);try{if(request)sessionStorage.setItem(calculationStorage,JSON.stringify(request));else sessionStorage.removeItem(calculationStorage);}catch{/* Keep in-memory receipt if browser storage is unavailable. */}}
   const [payrollActionError, setPayrollActionError] = useState<{ periodId: string; message: string } | null>(null);
   const payrollErrorRef=useRef<HTMLDivElement>(null);
   useEffect(()=>{if(payrollActionError){payrollErrorRef.current?.focus();payrollErrorRef.current?.scrollIntoView({block:"center"});}},[payrollActionError]);
@@ -3377,6 +3385,9 @@ export function PayrollWorkspace({
       ),
     [employeeSnapshotDepartmentFilter, employeeSnapshotSearch, runEmployees]
   );
+  const zeroPayrollRow=(employee:(typeof runEmployees)[number])=>[employee.grossPay,employee.totalDeductions,employee.netPay,employee.employerContributions].every(value=>Number(value)===0);
+  // Display scope only: exports, computation inputs and totals retain all employees.
+  const visibleRunEmployees=filteredRunEmployees.filter(employee=>showZeroPayrollRows||employeeSnapshotSearch.trim()||!zeroPayrollRow(employee));
   const selectedEmployeeSummary =
     runEmployees.find((employee) => employee.employeeId === selectedEmployeeId) ??
     runEmployees[0] ??
@@ -6464,73 +6475,46 @@ export function PayrollWorkspace({
   async function runAction(
     label: string,
     callback: () => Promise<unknown>,
-    successMessage: string | (() => string)
+    successMessage: string | (() => string),
+    checkSaved?:()=>Promise<boolean>
   ) {
+    let confirmed=false;
     try {
-      setActionState(label);
-      setPayrollActionError(null);
-      const result = await callback();
-      if (result && typeof result === "object" && "ok" in result && result.ok === false && "error" in result) {
-        throw new Error(String(result.error));
-      }
-      invalidatePayrollResourceCache(["reports:", "payslip:"]);
+      setActionState(label);setPayrollActionError(null);setPayrollActionNotice(null);
+      const result=await callback();
+      if(result&&typeof result==="object"&&"ok" in result&&result.ok===false&&"error" in result)throw new Error(String(result.error));
+      confirmed=true;
+      const message=typeof successMessage==="function"?successMessage():successMessage;
+      setPayrollActionNotice(message);toast.success(message);
+      invalidatePayrollResourceCache(["reports:","payslip:"]);
       await refreshWorkspaceSnapshot();
-      await refreshManualPayrollAfterExternalChange();
-      toast.success(
-        typeof successMessage === "function" ? successMessage() : successMessage
-      );
-    } catch (error) {
-      if (selectedPeriod) setPayrollActionError({ periodId: selectedPeriod.id, message: error instanceof Error ? error.message : "The payroll action could not be confirmed. Refresh before retrying." });
-      toast.error(
-        error instanceof Error ? error.message : "Something went wrong."
-      );
-    } finally {
-      setActionState(null);
-    }
+      // Other tabs load their current data when opened; don't reload the manual editor after compute.
+      if(label!=="compute-run")await refreshManualPayrollAfterExternalChange();
+    } catch(error) {
+      if(!confirmed&&checkSaved){try{confirmed=await checkSaved();}catch{/* Preserve the request for an explicit read-only status check. */}}
+      const message=confirmed?"The action was saved. This view could not refresh; reload the current run to review its saved result.":error instanceof Error?error.message:"The payroll action could not be confirmed. Check status before retrying.";
+      if(selectedPeriod)setPayrollActionError({periodId:selectedPeriod.id,message});
+      if(!confirmed)toast.error(message);
+    } finally {setActionState(null);}
   }
 
+  async function checkCalculation(request=calculationRequest) {
+    if(!request)return false;
+    const receipt=await payrollRead<{runId:string;computedAt:string;requestId:string}|null>("compute-receipt",{periodId:request.periodId,group:request.group,requestId:request.requestId,bypass:String(request.bypass)});
+    if(receipt){retainCalculation(null);setPayrollActionNotice(`Calculation saved at ${new Date(receipt.computedAt).toLocaleString("en-PH",{timeZone:"Asia/Manila"})} Philippine time. Review the current run before approving.`);return true;}
+    return false;
+  }
   async function handleComputePayrollRun() {
-    if (!selectedPeriod) return;
-
-    await runAction(
-      "compute-run",
-      async () => {
-        const readiness = await preflightPayrollAction(selectedPeriod.id, {
-          payrollGroup,
-          bypassTemporaryReadinessCategories,
-        });
-        const nextState: PayrollReadinessState = {
-          status: "ready",
-          periodId: selectedPeriod.id,
-          data: readiness,
-          error: null,
-        };
-        payrollReadinessCacheRef.current[
-          getReadinessCacheKey(
-            selectedPeriod.id,
-            bypassTemporaryReadinessCategories
-          )
-        ] = nextState;
-        setPayrollReadinessState(nextState);
-
-        if (!readiness.canCompute) {
-          const counts = getReadinessCounts(readiness);
-          throw new Error(
-            `Payroll readiness has ${counts.blockers} blocker(s). Resolve them before computing.`
-          );
-        }
-
-        await computePayrollRun(selectedPeriod.id, {
-          payrollGroup,
-          bypassTemporaryReadinessCategories,
-        });
-        invalidatePayrollResourceCache([
-          `readiness:${selectedPeriod.id}`,
-          "control:",
-        ]);
-      },
-      selectedRun ? "Payroll run refreshed." : "Payroll run computed."
-    );
+    if(!selectedPeriod||actionState)return;
+    const request=calculationRequest??{periodId:selectedPeriod.id,group:payrollGroup,requestId:generateUUID(),bypass:bypassTemporaryReadinessCategories,startedAt:Date.now()};
+    if(request.periodId!==selectedPeriod.id||request.group!==payrollGroup)return;
+    retainCalculation(request);
+    await runAction("compute-run",async()=>{
+      // The server performs authoritative readiness once. A retry first checks the saved receipt.
+      if(!await checkCalculation(request))await computePayrollRun(selectedPeriod.id,{payrollGroup:request.group,bypassTemporaryReadinessCategories:request.bypass,requestId:request.requestId});
+      retainCalculation(null);
+      invalidatePayrollResourceCache([`readiness:${selectedPeriod.id}`,"control:"]);
+    },selectedRun?"Payroll run refreshed. Review the saved amounts.":"Payroll run computed. Review the saved amounts.",()=>checkCalculation(request));
   }
 
   async function handleReversePostedRun() {
@@ -8092,6 +8076,8 @@ export function PayrollWorkspace({
 
                 {payrollGroup==="Daily" && attendanceEnabled && attendanceReadiness?.periodId === selectedPeriod.id && <AttendanceReadinessCard data={attendanceReadiness} />}
                 {attendanceCheckError && <p role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-slate-900">{attendanceCheckError}</p>}
+                {payrollActionNotice&&<p role="status" className="rounded-lg border border-blue-300 p-3 text-sm">{payrollActionNotice}</p>}
+                {calculationRequest?.periodId===selectedPeriod.id&&calculationRequest.group===payrollGroup&&<CalculationStatus startedAt={calculationRequest.startedAt} busy={actionState!==null} checking={actionState==="check-compute"} onCheck={()=>void runAction("check-compute",async()=>{if(!await checkCalculation())throw Error("No saved receipt yet. Use Retry same calculation; the same request cannot be saved twice.");},"Saved calculation confirmed.")}/> }
                 {payrollActionError?.periodId === selectedPeriod.id && <div ref={payrollErrorRef} tabIndex={-1} role="alert" className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-900"><strong>Payroll action needs attention.</strong><p className="mt-2">{payrollActionError.message}</p><p className="mt-2">Check the current run before trying again. Your inputs are retained.</p></div>}
                 <div className="rounded-lg border bg-muted/20 p-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
@@ -8206,8 +8192,8 @@ export function PayrollWorkspace({
                     disabled={actionState !== null || isNavigating || payrollGroup!=="Monthly" && attendanceEnabled && (!attendanceReadiness || attendanceReadiness.periodId !== selectedPeriod.id || !attendanceReadiness.ready)}
                   >
                     {actionState === "compute-run"
-                      ? "Computing..."
-                      : selectedRun &&
+                      ? "Computing…"
+                      : calculationRequest ? "Retry same calculation" : selectedRun &&
                           (selectedRun.status === "Posted" ||
                             selectedRun.status === "Void")
                         ? "Create New Draft Run"
@@ -8414,6 +8400,8 @@ export function PayrollWorkspace({
                     ariaLabel="Filter employee payroll snapshots by department"
                   />
                 </div>
+                <label className="flex min-h-11 items-center gap-2 text-sm"><input type="checkbox" checked={showZeroPayrollRows} onChange={event=>setShowZeroPayrollRows(event.target.checked)}/>Show zero-amount employees ({runEmployees.filter(zeroPayrollRow).length})</label>
+                <p className="text-xs text-muted-foreground">Showing {visibleRunEmployees.length} matching employees. Search includes zero-amount employees. This checkbox does not change totals or export scope.</p>
                 <div className="max-h-[380px] overflow-auto rounded-md border">
                   <Table>
                     <TableHeader>
@@ -8428,7 +8416,7 @@ export function PayrollWorkspace({
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {filteredRunEmployees.map((employee) => (
+                      {visibleRunEmployees.map((employee) => (
                         <TableRow
                           key={employee.id}
                           className={cn(
@@ -8475,7 +8463,7 @@ export function PayrollWorkspace({
                         </TableRow>
                       )}
                       {runEmployees.length > 0 &&
-                        filteredRunEmployees.length === 0 && (
+                        visibleRunEmployees.length === 0 && (
                           <TableRow>
                             <TableCell
                               colSpan={5}

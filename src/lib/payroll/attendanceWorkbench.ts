@@ -1,3 +1,4 @@
+import { deliverySummary, affectedWorkDates } from "./attendanceStage6Model";
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { and, eq, desc, gte, lte, isNull, inArray, sql } from "drizzle-orm";
@@ -119,7 +120,7 @@ export async function loadWorkBoard(periodId:string,database:DbClient=db):Promis
  const [people,progress,readiness]=await Promise.all([workEmployees(periodId,database),loadWorkProgress(periodId,database),loadAttendanceReadiness(periodId,database,0,false)]);
  const {plans}=progress;
  for(const plan of plans.filter(p=>p.state==="Rejected")){const draft=plan.draft as WorkDraft,person=people.find(p=>p.id===draft.employeeId);if(person&&draft.version===draftVersion(person,draft.days))for(const day of person.days.filter(d=>draft.days.includes(d.day)))day.suggestions=[];}
- return {period:{id:period.id,code:period.code,startDate:period.startDate,endDate:period.endDate,posted:!readiness.periodOpen},employees:people,...progress,statuses:{sync:readiness.needsSync?"Sync required":"Up to date",review:people.some(e=>e.days.some(dayNeedsReview))?"Needs review":"Ready",delivery:plans.some(p=>activeStates.includes(p.state))?"Unfinished work":"Up to date",dtr:readiness.summariesOutdated?"Refresh needed":"Up to date",payroll:readiness.periodOpen?"Recompute and review explicitly":"Posted / closed — adjustment required"},enabled:true};
+ return {period:{id:period.id,code:period.code,startDate:period.startDate,endDate:period.endDate,posted:!readiness.periodOpen},employees:people,...progress,statuses:{sync:readiness.needsSync?"Sync required":"Up to date",review:people.some(e=>e.days.some(dayNeedsReview))?"Needs review":"Ready",delivery:deliverySummary(plans),dtr:readiness.summariesOutdated?"Refresh needed":"Up to date",payroll:readiness.periodOpen?"Recompute and review explicitly":"Posted / closed — adjustment required"},enabled:true};
 }
 async function history(database:DbClient,actor:string,planId:string|null,action:string,details:unknown){await database.insert(workHistory).values({actor,planId,action,details});}
 export async function saveWorkDraft(database:DbClient,actor:string,periodId:string,drafts:WorkDraft[],existing?:{id:string;revision:number}) {
@@ -169,7 +170,7 @@ export async function prepareWorkApproval(periodId:string,batchId:string,revisio
   const targets=draft.changes.filter(c=>c.kind==="Employee"||c.kind==="UndoCapture"&&c.targetEmployeeId&&c.targetEmployeeId!==person.id).map(c=>people.find(p=>p.id===c.targetEmployeeId));
   if(targets.some(t=>!t||t.sourceIds.length!==1||!plans.some(p=>p.employeeId===t.id)))fail("Employee reassignment requires a verified unique target identity and both employees in this batch.");
   const sourceChanges=draft.changes.filter(c=>c.eventId&&draftRecords(person,draft).some(r=>r.id===c.eventId&&r.source==="API")&&!["Exclude","Retain"].includes(c.kind));
-  const affectedDates=[...new Set([...draft.days,...draft.changes.flatMap(c=>[...(c.at?[c.at.slice(0,10)]:[]),...(c.eventId?sharedRecords.filter(r=>r.id===c.eventId).map(r=>workDate(r.at)):[])])])].sort();
+  const affectedDates=affectedWorkDates(draft,sharedRecords);
   let sourceRequest:Record<string,unknown>|null=null;
   if(sourceChanges.length&&person.sourceIds.length){
    const employeeIds=[...new Set([...person.sourceIds,...targets.flatMap(t=>t!.sourceIds)])],from=sourceDayOffset(affectedDates[0],-1),through=sourceDayOffset(affectedDates.at(-1)!,1);
@@ -186,7 +187,10 @@ export async function prepareWorkApproval(periodId:string,batchId:string,revisio
   const periodEvidence=[];
   for(const period of allPeriods){
    const scoped=(period.id===periodId?people:await workEmployees(period.id,database)).find(p=>p.id===person.id);
-   if(!scoped)fail(`Employee is not eligible in affected period ${period.code}. Review employment dates before approval.`);
+   if(!scoped){
+    if(affectedDates.some(date=>date>=period.startDate&&date<=period.endDate))fail(`Employee is not eligible in affected period ${period.code}. Review employment dates before approval.`);
+    continue; // Neighbor context alone does not extend employment eligibility.
+   }
    for(const date of draft.changes.filter(c=>c.at).map(c=>c.at!.slice(0,10)))if(date>=period.startDate&&date<=period.endDate&&!scoped.days.some(d=>d.day===date))fail(`The corrected date ${date} is outside this employee's employment dates.`);
    const days=scoped.days.filter(d=>affectedDates.some(day=>Math.abs(Date.parse(d.day)-Date.parse(day))<=86400000));
    const runs=await database.select().from(payrollRuns).where(eq(payrollRuns.payrollPeriodId,period.id));
@@ -200,7 +204,7 @@ export async function prepareWorkApproval(periodId:string,batchId:string,revisio
     for(const day of days){const check=sequenceProblems(workDayRecords(simulated.records,day.day),day.schedule);preview.warnings.push(...[...check.errors,...check.warnings].map(w=>`${period.code} / ${day.day}: ${w}`));}
    }
   }
-  const impacts=allPeriods.map(p=>p.id);prepared.push({id:plan.id,draft,version:draft.version,preview,sourceRequest,impacts,periodEvidence});
+  const impacts=periodEvidence.map(p=>p.id);prepared.push({id:plan.id,draft,version:draft.version,preview,sourceRequest,impacts,periodEvidence});
  }
  // Related employees share one durable source transaction and one request ID.
  const groups:number[][]=[];

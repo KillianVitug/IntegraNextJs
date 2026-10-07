@@ -1,3 +1,4 @@
+import { findComputeReceipt } from "@/lib/payroll/computeReceipt";
 import { getCurrentAuthContext, hasPermission } from "@/lib/auth/server";
 import { AUTH_PERMISSIONS } from "@/lib/auth/permissions";
 import { db } from "@/db";
@@ -20,13 +21,18 @@ export async function GET(request:Request) {
  const auth=await getCurrentAuthContext();
  if(!auth)return Response.json({error:"Sign in again to load payroll. Your draft is retained."},{status:401,headers});
  const params=new URL(request.url).searchParams,view=params.get("view"),periodId=params.get("periodId")??"";
- if(auth.role!=="ADMIN"||view==="preflight"&&!hasPermission(auth,AUTH_PERMISSIONS.PAYROLL_COMPUTE))return Response.json({error:"You do not have access to this payroll view."},{status:403,headers});
+ if(auth.role!=="ADMIN"||["preflight","compute-receipt"].includes(view??"")&&!hasPermission(auth,AUTH_PERMISSIONS.PAYROLL_COMPUTE))return Response.json({error:"You do not have access to this payroll view."},{status:403,headers});
  if(!uuid.test(periodId))return Response.json({error:"Select a valid payroll period."},{status:400,headers});
- if(view!=="preflight"&&!attendanceSourceEnabled())return Response.json({error:"Attendance connection is disabled."},{status:404,headers});
+ if(!["preflight","compute-receipt"].includes(view??"")&&!attendanceSourceEnabled())return Response.json({error:"Attendance connection is disabled."},{status:404,headers});
  if(["workbench","progress","employee"].includes(view??"")&&!workbenchEnabled())return Response.json({error:"Attendance review is disabled."},{status:404,headers});
  try {
   let result:unknown;
   switch(view) {
+   case "compute-receipt": {
+    const group=params.get("group"),requestId=params.get("requestId")??"";
+    if(!["Daily","Monthly"].includes(group??"")||!uuid.test(requestId))return Response.json({error:"Select a valid calculation request."},{status:400,headers});
+    result=await findComputeReceipt(auth.accountId,{requestId,periodId,group:group as "Daily"|"Monthly",bypass:params.get("bypass")==="true"});break;
+   }
    case "workbench": result=await loadWorkBoard(periodId);break;
    case "progress": result=await loadWorkProgress(periodId);break;
    case "employee": {
