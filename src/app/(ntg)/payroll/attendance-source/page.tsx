@@ -5,6 +5,7 @@ import { payrollPeriods } from "@/db/schema";
 import { attendanceSourceRuns } from "@/db/attendanceSourceSchema";
 import { requireAdminActor } from "@/lib/admin";
 import { attendanceSourceEnabled } from "@/lib/payroll/attendanceSourceSync";
+import { AttendanceReviewPage } from "./review-page";
 import { AttendanceSourcePanel } from "./panel";
 import { selectAttendanceSourcePeriod } from "@/lib/payroll/attendanceSourcePeriods";
 import { loadAttendanceReadiness } from "@/lib/payroll/attendanceResolution";
@@ -15,12 +16,11 @@ export const maxDuration = 60;
 export default async function AttendanceSourcePage({ searchParams }: { searchParams: Promise<{ year?: string; periodId?: string }> }) {
   await requireAdminActor(); if (!attendanceSourceEnabled()) notFound();
   const params = await searchParams;
-  const [periods, matching] = await Promise.all([
-    db.select({ id: payrollPeriods.id, code: payrollPeriods.code, year: payrollPeriods.year, startDate: payrollPeriods.startDate, endDate: payrollPeriods.endDate }).from(payrollPeriods),
-    loadMatchBoard(db),
-  ]);
+  const periods = await db.select({ id: payrollPeriods.id, code: payrollPeriods.code, year: payrollPeriods.year, startDate: payrollPeriods.startDate, endDate: payrollPeriods.endDate }).from(payrollPeriods);
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   const selection = selectAttendanceSourcePeriod(periods, params, today);
+  if(workbenchEnabled())return <AttendanceReviewPage key={`${selection.year}:${selection.periodId}`} periods={periods} year={selection.year} periodId={selection.periodId} today={today}/>;
+  const matching=await loadMatchBoard(db);
   const readiness = selection.periodId ? await loadAttendanceReadiness(selection.periodId) : null;
   const duplicates = selection.periodId ? await loadDuplicateBoard(selection.periodId) : null;
   const workbench = selection.periodId && workbenchEnabled() ? await loadWorkBoard(selection.periodId) : null;

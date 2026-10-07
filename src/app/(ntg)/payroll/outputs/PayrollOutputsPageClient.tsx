@@ -2,8 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  generateBankBatchAction,
-  generateCashBatchAction,
   generateGlJournalAction,
   generateStatutoryPackageAction,
   getPayrollControlBundleAction,
@@ -28,7 +26,8 @@ import {
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { PayrollPageNav } from "../PayrollPageNav";
-import type { PayrollPeriodSummary, PayrollRunView } from "../types";
+import { PaymentReview, PayrollDownloadLink } from "./PaymentReview";
+import type { PayrollRunPeriodView, PayrollRunHeaderView } from "../types";
 
 type LoadStatus = "idle" | "loading" | "ready" | "error";
 type PayrollControlBundleView = Awaited<
@@ -42,8 +41,8 @@ type PayrollControlState = {
 };
 
 type Props = {
-  selectedPeriod: PayrollPeriodSummary | null;
-  selectedRun: PayrollRunView | null;
+  selectedPeriod: PayrollRunPeriodView | null;
+  selectedRun: PayrollRunHeaderView | null;
 };
 
 const STATUTORY_PACKAGE_OPTIONS = [
@@ -213,6 +212,8 @@ export function PayrollOutputsPageClient({ selectedPeriod, selectedRun }: Props)
         runLabel={selectedRun ? `#${selectedRun.runNumber} (${selectedRun.status})` : null}
       />
 
+      {selectedRun && <PaymentReview key={selectedRun.id} runId={selectedRun.id} status={selectedRun.status} onGenerated={refreshControlBundle} />}
+
       <Card>
         <CardHeader className="pb-3">
           <CardTitle>Output Actions</CardTitle>
@@ -246,34 +247,6 @@ export function PayrollOutputsPageClient({ selectedPeriod, selectedRun }: Props)
                   {actionState === "publish-payslips"
                     ? "Publishing..."
                     : "Publish Payslips"}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() =>
-                    void runOutputAction(
-                      "generate-bank",
-                      () => generateBankBatchAction(selectedRun.id),
-                      "Bank file generated."
-                    )
-                  }
-                  disabled={actionState !== null}
-                >
-                  Generate Bank File
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() =>
-                    void runOutputAction(
-                      "generate-cash",
-                      () => generateCashBatchAction(selectedRun.id),
-                      "Cash payroll list generated."
-                    )
-                  }
-                  disabled={actionState !== null}
-                >
-                  Generate Cash List
                 </Button>
                 <Button
                   type="button"
@@ -372,7 +345,9 @@ export function PayrollOutputsPageClient({ selectedPeriod, selectedRun }: Props)
                               {artifact.status}
                             </span>
                           </TableCell>
-                          <TableCell>{artifact.fileName ?? "-"}</TableCell>
+                          <TableCell>{artifact.fileName ?? "-"}
+                            {selectedRun && ["BankFile", "CashPayrollList", "Payslip"].includes(artifact.kind) && <PayrollDownloadLink url={`/api/payroll/output?runId=${selectedRun.id}&format=${artifact.kind === "Payslip" ? "payslips" : "payment"}&artifactId=${artifact.id}${artifact.kind === "Payslip" && typeof artifact.metadata?.employeeId === "string" ? `&employeeId=${artifact.metadata.employeeId}` : ""}`}>Download</PayrollDownloadLink>}
+                          </TableCell>
                           <TableCell>{formatDateTime(artifact.generatedAt)}</TableCell>
                         </TableRow>
                       ))}

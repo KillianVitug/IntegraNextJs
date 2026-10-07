@@ -8,7 +8,23 @@ export type WorkRecord={id:string;source:"API"|"Manual"|"File";rawLogId?:number;
 export type WorkFinding={code:string;severity:"error"|"warning";employeeId:string;day:string;message:string};
 export type WorkDay={findings?:WorkFinding[];day:string;schedule:ShiftWindow|null;rest:boolean;leave:number;leaveEvidence:unknown;configuration:unknown;records:WorkRecord[];status:string;issues:string[];suggestions:{label:string;explanation:string;changes:Partial<WorkChange>[]}[];version:string;resolved:boolean;decision?:{planId?:string;payrollRunId?:string;revision?:string;approvedAt:string;reason:string;lateConflict:boolean;incomingDigest:string;incomingRecords:WorkRecord[]}};
 export type WorkEmployee={id:string;no:string;name:string;sourceIds:string[];mappingEvidence:unknown;hired:string|null;separated:string|null;days:WorkDay[];contextRecords?:WorkRecord[]};
-export type WorkPlanView={id:string;batchId:string;revision:number;state:string;draft:WorkDraft;result:string|null;approved?:boolean;updatedAt:string};
+export type WorkPlanView={id:string;batchId:string;revision:number;state:string;draft:WorkDraft;result:string|null;approved?:boolean;approvedAt?:string;supersededBy?:string[];updatedAt:string};
+export type WorkProgress=Pick<WorkBoard,"plans"|"history"|"adjustments"|"owners">;
+const editablePlanStates=["Draft","Ready for approval","Needs evidence","Rejected","Needs fresh review"];
+/** Conservative display classification: every exact requested correction must have
+ * a later approval. Partial overlaps, changed values and new intentions stay visible. */
+export function classifyWorkPlans(plans:WorkPlanView[]):WorkPlanView[] {
+ const key=(c:WorkChange)=>JSON.stringify([c.day,c.kind,c.eventId??null,c.rawLogId??null,c.type??null,c.at?(localToInstant(c.at)??c.at):null,c.targetEmployeeId??null,c.employeeId??null,c.status??null,c.clockVerified??null]);
+ return plans.map(plan=>{
+  if(plan.approved||!editablePlanStates.includes(plan.state)||!plan.draft.changes.length||plan.draft.undoOf||plan.draft.replaces||Object.keys(plan.draft.incomingVersions??{}).length)return plan;
+  const later=plans.filter(p=>p.id!==plan.id&&p.approved&&p.approvedAt&&p.approvedAt>plan.updatedAt&&p.draft.employeeId===plan.draft.employeeId&&!p.draft.undoOf&&!p.draft.replaces&&!Object.keys(p.draft.incomingVersions??{}).length);
+  const covering=plan.draft.changes.map(c=>later.find(p=>p.draft.changes.some(other=>key(other)===key(c))&&!plans.some(newer=>newer.approved&&newer.approvedAt&&newer.approvedAt>p.approvedAt!&&newer.draft.employeeId===plan.draft.employeeId&&newer.draft.days.includes(c.day))));
+  return covering.every(Boolean)?{...plan,supersededBy:[...new Set(covering.map(p=>p!.id))]}:plan;
+ });
+}
+export function isActiveWorkPlan(plan:WorkPlanView) {
+ return !plan.supersededBy?.length&&!['Resolved','Removed from draft','Superseded'].includes(plan.state);
+}
 export type WorkBoard={period:{id:string;code:string;startDate:string;endDate:string;posted:boolean};employees:WorkEmployee[];plans:WorkPlanView[];history?:{id:string;planId:string|null;action:string;actor:string;at:string}[];adjustments:{id:string;employeeId:string;periodId:string;state:string;impact:unknown;reference:string|null;conclusion:string|null}[];owners:{id:string;name:string}[];statuses:{sync:string;review:string;delivery:string;dtr:string;payroll:string};enabled:boolean};
 export const localToInstant=(value:string)=> {
  if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d{1,3})?)?$/.test(value))return null;

@@ -2,7 +2,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { and, eq, desc, gte, lte, isNull, inArray, sql } from "drizzle-orm";
 import { db, type DbClient } from "@/db";
-import { employees, employeesGeneralInfo, employeesTimekeeping, employeeShiftAssignments, employeeWeeklyShiftPatterns, employeeWeeklyShiftPatternDays, employeesLeaveRecords, employeeLeaveRecordDays, payrollPeriods, payrollRuns, attendanceRawLogs, attendanceImportBatches, authAccounts } from "@/db/schema";
+import { employees, employeesGeneralInfo, employeesTimekeeping, employeeShiftAssignments, employeeWeeklyShiftPatterns, employeeWeeklyShiftPatternDays, employeesLeaveRecords, employeeLeaveRecordDays, payrollPeriods, payrollRuns, attendanceRawLogs, attendanceImportBatches } from "@/db/schema";
 import { attendanceSourceMappings as mappings, attendanceSourceEvents as events, attendanceSourceProjections as projections, attendanceSourceIdentities as identities } from "@/db/attendanceSourceSchema";
 import { workBatches, workPlans, workTreatments, workHistory, adjustmentCases, workRawLogs, workExclusions, workSourceExclusions } from "@/db/attendanceWorkbenchSchema";
 import { resolutionDigest, loadAttendanceReadiness, invalidateResolutionPeriod } from "./attendanceResolution";
@@ -14,6 +14,7 @@ import { PayrollValidationError } from "./validation";
 import { attendanceSchedulerActorAuthorized } from "./attendanceSourceActor";
 import { summarizeEmployeeDay } from "./attendance";
 import { adminDecision, applyAdminDecisions, attendanceEvidence, decisionIncomingRecords } from "./attendanceAdminDecision";
+import { loadWorkProgress } from "./attendanceWorkProgress";
 import { persistAdminDecision } from "./attendanceAdminDecisionStore";
 
 export const workbenchEnabled=()=>process.env.ATTENDANCE_WORKBENCH_ENABLED==="true";
@@ -23,10 +24,10 @@ function enabled(){if(!workbenchEnabled())fail("The new attendance workflow is n
 const idPattern=/^[0-9a-f-]{36}$/i;
 const activeStates=["Approved","Applying","Sync pending","Failed"];
 export { draftVersion, workDayRecords } from "./attendanceWorkbenchModel";
-export async function workEmployees(periodId:string,database:DbClient=db,incoming?:SourcePunch[],now=new Date().toISOString()):Promise<WorkEmployee[]> {
+export async function workEmployees(periodId:string,database:DbClient=db,incoming?:SourcePunch[],now=new Date().toISOString(),employeeId?:string):Promise<WorkEmployee[]> {
  const [period]=await database.select().from(payrollPeriods).where(eq(payrollPeriods.id,periodId));if(!period)fail("Payroll period not found.");
  const [roster,links,identity,source,raw,timekeeping,assignments,patterns,patternDays,leaves,leaveDays,treatments,excluded,manualLinks,sourceExcluded,periodRuns,keptSnapshots]=await Promise.all([
-  database.select({person:employees,info:employeesGeneralInfo}).from(employees).leftJoin(employeesGeneralInfo,eq(employeesGeneralInfo.employeeId,employees.id)).where(and(isNull(employees.deletedAt),eq(employees.employeeType,"EMP"))),
+  database.select({person:employees,info:employeesGeneralInfo}).from(employees).leftJoin(employeesGeneralInfo,eq(employeesGeneralInfo.employeeId,employees.id)).where(and(isNull(employees.deletedAt),eq(employees.employeeType,"EMP"),employeeId?eq(employees.id,employeeId):undefined)),
   database.select().from(mappings),database.select().from(identities),incoming?Promise.resolve(incoming):database.select({payload:events.payload}).from(projections).innerJoin(events,eq(events.eventId,projections.eventId)).where(eq(projections.payrollPeriodId,periodId)).then(r=>r.map(x=>x.payload as SourcePunch)),
   database.select({log:attendanceRawLogs,format:attendanceImportBatches.sourceFormat}).from(attendanceRawLogs).innerJoin(attendanceImportBatches,eq(attendanceImportBatches.id,attendanceRawLogs.batchId)).where(eq(attendanceImportBatches.payrollPeriodId,periodId)),
   database.select().from(employeesTimekeeping),database.select().from(employeeShiftAssignments),database.select().from(employeeWeeklyShiftPatterns),database.select().from(employeeWeeklyShiftPatternDays),
@@ -115,11 +116,10 @@ export function previewWork(employee:WorkEmployee,draft:WorkDraft,sharedRecords?
 }
 export async function loadWorkBoard(periodId:string,database:DbClient=db):Promise<WorkBoard> {
  enabled();const [period]=await database.select().from(payrollPeriods).where(eq(payrollPeriods.id,periodId));if(!period)fail("Select a payroll period.");
- const [people,plans,adjustments,batches,readiness,accounts]=await Promise.all([workEmployees(periodId,database),database.select().from(workPlans).where(eq(workPlans.periodId,periodId)).orderBy(desc(workPlans.updatedAt)).limit(200),database.select().from(adjustmentCases).where(eq(adjustmentCases.periodId,periodId)),database.select().from(workBatches).where(eq(workBatches.periodId,periodId)),loadAttendanceReadiness(periodId,database),database.select({id:authAccounts.id,name:employees.firstName}).from(authAccounts).innerJoin(employees,eq(authAccounts.employeeId,employees.id)).where(eq(authAccounts.status,"Active"))]);
- const owners=[];for(const a of accounts)if(await attendanceSchedulerActorAuthorized(database,a.id))owners.push(a);
- const auditHistory=await database.select({id:workHistory.id,planId:workHistory.planId,action:workHistory.action,actor:workHistory.actor,at:workHistory.createdAt}).from(workHistory).innerJoin(workPlans,eq(workPlans.id,workHistory.planId)).where(eq(workPlans.periodId,periodId)).orderBy(desc(workHistory.createdAt)).limit(300);
- for(const plan of plans.filter(p=>p.state==="Rejected")){const draft=plan.draft as WorkDraft,person=people.find(p=>p.id===plan.employeeId);if(person&&draft.version===draftVersion(person,draft.days))for(const day of person.days.filter(d=>draft.days.includes(d.day)))day.suggestions=[];}
- return {period:{id:period.id,code:period.code,startDate:period.startDate,endDate:period.endDate,posted:!readiness.periodOpen},employees:people,plans:plans.map(p=>({id:p.id,batchId:p.batchId,revision:batches.find(b=>b.id===p.batchId)?.revision??0,state:p.state,draft:p.draft as WorkDraft,result:p.result,approved:!!p.sourceRequest||["Approved","Applying","Sync pending","Resolved","Source conflict"].includes(p.state),updatedAt:p.updatedAt.toISOString()})),history:auditHistory.map(h=>({...h,at:h.at.toISOString()})),adjustments:adjustments.map(a=>({id:a.id,employeeId:a.employeeId,periodId:a.periodId,state:a.state,impact:a.impact,reference:a.adjustmentReference,conclusion:a.conclusion})),owners,statuses:{sync:readiness.needsSync?"Sync required":"Up to date",review:people.some(e=>e.days.some(dayNeedsReview))?"Needs review":"Ready",delivery:plans.some(p=>activeStates.includes(p.state))?"Unfinished work":"Up to date",dtr:readiness.summariesOutdated?"Refresh needed":"Up to date",payroll:readiness.periodOpen?"Recompute and review explicitly":"Posted / closed — adjustment required"},enabled:true};
+ const [people,progress,readiness]=await Promise.all([workEmployees(periodId,database),loadWorkProgress(periodId,database),loadAttendanceReadiness(periodId,database,0,false)]);
+ const {plans}=progress;
+ for(const plan of plans.filter(p=>p.state==="Rejected")){const draft=plan.draft as WorkDraft,person=people.find(p=>p.id===draft.employeeId);if(person&&draft.version===draftVersion(person,draft.days))for(const day of person.days.filter(d=>draft.days.includes(d.day)))day.suggestions=[];}
+ return {period:{id:period.id,code:period.code,startDate:period.startDate,endDate:period.endDate,posted:!readiness.periodOpen},employees:people,...progress,statuses:{sync:readiness.needsSync?"Sync required":"Up to date",review:people.some(e=>e.days.some(dayNeedsReview))?"Needs review":"Ready",delivery:plans.some(p=>activeStates.includes(p.state))?"Unfinished work":"Up to date",dtr:readiness.summariesOutdated?"Refresh needed":"Up to date",payroll:readiness.periodOpen?"Recompute and review explicitly":"Posted / closed — adjustment required"},enabled:true};
 }
 async function history(database:DbClient,actor:string,planId:string|null,action:string,details:unknown){await database.insert(workHistory).values({actor,planId,action,details});}
 export async function saveWorkDraft(database:DbClient,actor:string,periodId:string,drafts:WorkDraft[],existing?:{id:string;revision:number}) {

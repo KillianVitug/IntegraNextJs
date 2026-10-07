@@ -1,5 +1,7 @@
 import { payrollGroup, earningMonth, runPayrollGroup, type PayrollGroup } from "./payrollGroupModel";
 import { monthlyPayouts } from "./payrollGroups";
+import { loadPaymentEmployees } from "./paymentReview";
+import { bankListCsv, payrollCents, selectPaymentRows, type PaymentMode } from "./paymentModel";
 import { db } from "@/db";
 import {
   employeePayrollReadinessChecks,
@@ -265,32 +267,23 @@ export async function transitionPayrollRun(args: {
   payrollRunId: string;
   nextStatus: "Reviewed" | "Approved" | "Posted" | "Void";
   actorUserId: string;
+  actorRole?: string | null;
+  acknowledgeShortfalls?: boolean;
   transition: (
     payrollRunId: string,
     nextStatus: "Reviewed" | "Approved" | "Posted" | "Void",
     actorUserId: string,
-    notes?: string | null
+    notes?: string | null,
+    authorization?: { actorRole?: string | null; acknowledgeShortfalls?: boolean }
   ) => Promise<unknown>;
   notes?: string | null;
 }) {
-  const run = await db.query.payrollRuns.findFirst({
-    where: eq(payrollRuns.id, args.payrollRunId),
-  });
-
-  if (!run) throw new Error("Payroll run not found.");
-
-  if (args.nextStatus === "Approved" && run.reviewedByUserId === args.actorUserId) {
-    throw new Error("Maker-checker violation: reviewer cannot approve the same payroll run.");
-  }
-  if (args.nextStatus === "Posted" && run.approvedByUserId === args.actorUserId) {
-    throw new Error("Maker-checker violation: approver cannot post the same payroll run.");
-  }
-
   return args.transition(
     args.payrollRunId,
     args.nextStatus,
     args.actorUserId,
-    args.notes ?? null
+    args.notes ?? null,
+    { actorRole: args.actorRole, acknowledgeShortfalls: args.acknowledgeShortfalls }
   );
 }
 
@@ -438,75 +431,36 @@ export async function reversePayrollRun(args: {
   });
 }
 
-export async function publishPayslips(args: {
-  payrollRunId: string;
-  actorUserId: string;
-}) {
-  const run = await assertRunCanProduceArtifacts(args.payrollRunId);
-
-  return db.transaction(async (tx) => {
-    let publishedCount = 0;
-    for (const employeeRun of run.employees) {
-      const [artifact] = await tx
-        .insert(payrollArtifacts)
-        .values({
-          payrollRunId: run.id,
-          payrollRunEmployeeId: employeeRun.id,
-          kind: "Payslip",
-          status: "Published",
-          format: "PDF",
-          fileName: `${employeeRun.employeeNoSnapshot}-${run.payrollPeriod?.code ?? "payroll"}-${runPayrollGroup(run.inputSnapshot)}-payslip.pdf`,
-          metadata: {
-            employeeId: employeeRun.employeeId,
-            runNumber: run.runNumber,
-            generatedFrom: "payroll-run-snapshot",
-            payrollGroup:runPayrollGroup(run.inputSnapshot),
-            earningMonth:run.inputSnapshot?.earningMonth??null,
-            payoutHalf:run.inputSnapshot?.payoutHalf??null,
-          },
-          generatedByUserId: args.actorUserId,
-          generatedAt: new Date(),
-          publishedByUserId: args.actorUserId,
-          publishedAt: new Date(),
-        })
-        .returning();
-
-      await tx
-        .insert(payslipPublications)
-        .values({
-          payrollRunEmployeeId: employeeRun.id,
-          artifactId: artifact.id,
-          status: "Published",
-          publishedByUserId: args.actorUserId,
-          publishedAt: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: payslipPublications.payrollRunEmployeeId,
-          set: {
-            artifactId: artifact.id,
-            status: "Published",
-            publishedByUserId: args.actorUserId,
-            publishedAt: new Date(),
-            revokedByUserId: null,
-            revokedAt: null,
-            revokeReason: null,
-            updatedAt: new Date(),
-          },
-        });
-      publishedCount += 1;
+export async function publishPayslips(args: { payrollRunId: string; actorUserId: string }, database: typeof db = db) {
+  return database.transaction(async tx => {
+    await tx.execute(sql`select id from payroll_runs where id=${args.payrollRunId} for update`);
+    const run = await tx.query.payrollRuns.findFirst({where: eq(payrollRuns.id, args.payrollRunId), with: {payrollPeriod: true, employees: true}});
+    if (!run || !["Approved", "Posted"].includes(run.status)) throw new Error("Approve this run before publishing payslips.");
+    const existing = await tx.query.payrollArtifacts.findMany({where: and(eq(payrollArtifacts.payrollRunId, run.id), eq(payrollArtifacts.kind, "Payslip"))});
+    const byEmployee = new Map(existing.filter(a => a.payrollRunEmployeeId).map(a => [a.payrollRunEmployeeId, a]));
+    const now = new Date();
+    const missing = run.employees.filter(employee => !byEmployee.has(employee.id));
+    if (missing.length) {
+      const added = await tx.insert(payrollArtifacts).values(missing.map(employee => ({
+        payrollRunId: run.id, payrollRunEmployeeId: employee.id, kind: "Payslip" as const, status: "Published" as const, format: "PDF" as const,
+        fileName: `${employee.employeeNoSnapshot}-${run.payrollPeriod?.code ?? "payroll"}-${runPayrollGroup(run.inputSnapshot)}-payslip.pdf`,
+        metadata: {employeeId: employee.employeeId, runNumber: run.runNumber, generatedFrom: "payroll-run-snapshot", payrollGroup: runPayrollGroup(run.inputSnapshot)},
+        generatedByUserId: args.actorUserId, generatedAt: now, publishedByUserId: args.actorUserId, publishedAt: now,
+      }))).returning();
+      for (const artifact of added) byEmployee.set(artifact.payrollRunEmployeeId, artifact);
     }
-
-    await recordPayrollRunEvent({
-      payrollRunId: run.id,
-      actorUserId: args.actorUserId,
-      eventType: "PayslipsPublished",
-      fromStatus: run.status,
-      toStatus: run.status,
-      notes: `Published ${publishedCount} payslip(s).`,
-      database: tx,
-    });
-
-    return { publishedCount };
+    const publications = run.employees.length ? await tx.query.payslipPublications.findMany({where: inArray(payslipPublications.payrollRunEmployeeId, run.employees.map(employee => employee.id))}) : [];
+    const changed = run.employees.filter(employee => !publications.some(publication => publication.payrollRunEmployeeId === employee.id && publication.status === "Published" && publication.artifactId === byEmployee.get(employee.id)?.id));
+    if (changed.length) {
+      await tx.insert(payslipPublications).values(changed.map(employee => ({
+        payrollRunEmployeeId: employee.id, artifactId: byEmployee.get(employee.id)!.id, status: "Published" as const, publishedByUserId: args.actorUserId, publishedAt: now,
+      }))).onConflictDoUpdate({target: payslipPublications.payrollRunEmployeeId, set: {
+        artifactId: sql`excluded.artifact_id`, status: "Published", publishedByUserId: args.actorUserId, publishedAt: now,
+        revokedByUserId: null, revokedAt: null, revokeReason: null, updatedAt: now,
+      }});
+      await recordPayrollRunEvent({payrollRunId: run.id, actorUserId: args.actorUserId, eventType: "PayslipsPublished", fromStatus: run.status, toStatus: run.status, notes: `Published ${changed.length} payslip(s).`, database: tx});
+    }
+    return {publishedCount: run.employees.length};
   });
 }
 
@@ -515,15 +469,25 @@ export async function generateBankBatch(args: {
   actorUserId: string;
   batchType?: "Bank" | "Cash";
   bankAdapter?: string;
-}) {
-  const run = await assertRunCanProduceArtifacts(args.payrollRunId);
-  const totalNetPay = run.employees.reduce(
-    (total, employee) => total + toAmount(employee.netPay),
-    0
-  );
+  unassignedMode?: PaymentMode;
+}, database: typeof db = db) {
   const batchType = args.batchType ?? "Bank";
 
-  return db.transaction(async (tx) => {
+  return database.transaction(async (tx) => {
+    await tx.execute(sql`select id from payroll_runs where id=${args.payrollRunId} for update`);
+    const run = await tx.query.payrollRuns.findFirst({where: eq(payrollRuns.id, args.payrollRunId), with: {payrollPeriod: true}});
+    if (!run || !["Approved", "Posted"].includes(run.status)) throw new Error("Approve this run before preparing a payment list.");
+    const rows = selectPaymentRows(await loadPaymentEmployees(run.id, tx), batchType, args.unassignedMode);
+    if (!rows.length) throw new Error(`No positive ${batchType.toLowerCase()} payments in this run.`);
+    const totalNetPay = rows.reduce((total, row) => total + payrollCents(row.netPay), 0) / 100;
+    const csv = bankListCsv(rows, batchType);
+    // Retries return the same immutable list instead of creating duplicate batches.
+    const prior = await tx.query.payrollArtifacts.findMany({where: and(eq(payrollArtifacts.payrollRunId, run.id), eq(payrollArtifacts.kind, batchType === "Bank" ? "BankFile" : "CashPayrollList"))});
+    const matching = prior.find(artifact => artifact.metadata?.paymentListCsv === csv);
+    if (matching) {
+      const previousBatch = await tx.query.payrollDisbursementBatches.findFirst({where: eq(payrollDisbursementBatches.artifactId, matching.id)});
+      if (previousBatch) return previousBatch;
+    }
     const [artifact] = await tx
       .insert(payrollArtifacts)
       .values({
@@ -533,9 +497,12 @@ export async function generateBankBatch(args: {
         format: "CSV",
         fileName: `${run.payrollPeriod?.code ?? "payroll"}-${runPayrollGroup(run.inputSnapshot)}-${batchType.toLowerCase()}-disbursement.csv`,
         metadata: {
-          employeeCount: run.employees.length,
+          employeeCount: rows.length,
           totalNetPay: money(totalNetPay),
-          bankAdapter: args.bankAdapter ?? null,
+          bankAdapter: null,
+          paymentListCsv: csv,
+          unassignedMode: args.unassignedMode ?? null,
+          purpose: "Payment review list; not a bank-specific upload file or proof of payment.",
         },
         generatedByUserId: args.actorUserId,
         generatedAt: new Date(),
@@ -548,8 +515,8 @@ export async function generateBankBatch(args: {
         payrollRunId: run.id,
         batchType,
         status: "Generated",
-        bankAdapter: args.bankAdapter ?? null,
-        employeeCount: run.employees.length,
+        bankAdapter: null,
+        employeeCount: rows.length,
         totalNetPay: money(totalNetPay),
         artifactId: artifact.id,
         createdByUserId: args.actorUserId,
@@ -560,9 +527,9 @@ export async function generateBankBatch(args: {
       await tx.insert(payrollBankFiles).values({
         disbursementBatchId: batch.id,
         artifactId: artifact.id,
-        bankAdapter: args.bankAdapter ?? "PNB",
+        bankAdapter: "Generic review CSV",
         fileName: artifact.fileName ?? "payroll-bank-file.csv",
-        employeeCount: run.employees.length,
+        employeeCount: rows.length,
         totalAmount: money(totalNetPay),
         generatedByUserId: args.actorUserId,
       });

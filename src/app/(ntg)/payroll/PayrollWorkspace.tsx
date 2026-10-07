@@ -1,4 +1,5 @@
 "use client";
+import { payrollRead } from "@/lib/payroll/readClient";
 
 import {
   Fragment,
@@ -22,7 +23,6 @@ import {
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
-import { attendanceReadinessAction } from "@/app/actions/attendanceSourceAction";
 import type { AttendanceReadiness } from "@/lib/payroll/attendanceResolutionModel";
 import { AttendanceReadinessCard } from "./attendance-source/attendance-review";
 import {
@@ -3003,6 +3003,7 @@ export function PayrollWorkspace({
   const [employeeSnapshotDepartmentFilter, setEmployeeSnapshotDepartmentFilter] =
     useState<DepartmentFilterValue>(ALL_DEPARTMENTS_VALUE);
   const [actionState, setActionState] = useState<string | null>(null);
+  const [shortfallAcknowledgment, setShortfallAcknowledgment] = useState<string | null>(null);
   const [attendanceReadiness, setAttendanceReadiness] = useState<AttendanceReadiness | null>(null);
   const [payrollActionError, setPayrollActionError] = useState<{ periodId: string; message: string } | null>(null);
   const payrollErrorRef=useRef<HTMLDivElement>(null);
@@ -3112,7 +3113,7 @@ export function PayrollWorkspace({
   const [attendanceDtrDepartmentFilter, setAttendanceDtrDepartmentFilter] =
     useState<DepartmentFilterValue>(ALL_DEPARTMENTS_VALUE);
   const [selectedDtrEmployeeId, setSelectedDtrEmployeeId] = useState<string | null>(
-    null
+    () => searchParams.get("employeeId")
   );
   const [
     selectedPayrollAccountCodeEmployeeId,
@@ -3928,7 +3929,7 @@ export function PayrollWorkspace({
   }, [filteredManualPayrollEmployees, selectedManualPayrollEmployeeId]);
 
   useEffect(() => {
-    if (!selectedRun || !selectedEmployeeSummary || !selectedEmployeeDetailKey) {
+    if (activeTab !== "run" || !selectedRun || !selectedEmployeeSummary || !selectedEmployeeDetailKey) {
       return;
     }
 
@@ -3983,6 +3984,7 @@ export function PayrollWorkspace({
       }
     })();
   }, [
+    activeTab,
     employeeDetailsByKey,
     selectedEmployeeDetailKey,
     selectedEmployeeSummary,
@@ -4198,6 +4200,7 @@ export function PayrollWorkspace({
   }, [payrollLoanRows]);
 
   useEffect(() => {
+    if (activeTab !== "run") return;
     if (!selectedPeriodKey) {
       setPayrollReadinessState({
         status: "idle",
@@ -4228,9 +4231,8 @@ export function PayrollWorkspace({
 
     void (async () => {
       try {
-        const readiness = await preflightPayrollAction(selectedPeriodKey, {
-          payrollGroup,
-          bypassTemporaryReadinessCategories,
+        const readiness = await payrollRead<Awaited<ReturnType<typeof preflightPayrollAction>>>("preflight", {
+          periodId:selectedPeriodKey, group:payrollGroup, bypass:String(bypassTemporaryReadinessCategories),
         });
         if (cancelled) return;
 
@@ -4257,6 +4259,7 @@ export function PayrollWorkspace({
       cancelled = true;
     };
   }, [
+    activeTab,
     selectedPeriodKey,
     attendanceBatchKey,
     attendanceDtrReloadKey,
@@ -4992,6 +4995,7 @@ export function PayrollWorkspace({
   }, [attendanceDtrDepartmentFilter, attendanceDtrDepartmentOptions]);
 
   useEffect(() => {
+    if (!attendanceDtrState.data || attendanceDtrState.status === "loading") return;
     if (filteredAttendanceDtrEmployees.length === 0) {
       if (selectedDtrEmployeeId !== null) {
         setSelectedDtrEmployeeId(null);
@@ -5006,7 +5010,7 @@ export function PayrollWorkspace({
     if (!employeeStillExists) {
       setSelectedDtrEmployeeId(filteredAttendanceDtrEmployees[0]?.employeeId ?? null);
     }
-  }, [filteredAttendanceDtrEmployees, selectedDtrEmployeeId]);
+  }, [attendanceDtrState.data, attendanceDtrState.status, filteredAttendanceDtrEmployees, selectedDtrEmployeeId]);
 
   useEffect(() => {
     const filterStillExists = payrollAccountCodeDepartmentOptions.some(
@@ -6449,14 +6453,12 @@ export function PayrollWorkspace({
   }
 
   useEffect(() => {
-    let cancelled = false;
-    setAttendanceReadiness(null); setAttendanceCheckError(null);
-    if (attendanceEnabled && selectedPeriod?.id) attendanceReadinessAction(selectedPeriod.id).then(result => {
-      if (cancelled) return;
-      if (result.ok) setAttendanceReadiness(result.data); else setAttendanceCheckError(result.error);
-    }).catch(() => { if (!cancelled) setAttendanceCheckError("Attendance readiness could not be loaded. Refresh this page or open Attendance review & sync."); });
-    return () => { cancelled = true; };
-  }, [attendanceEnabled, selectedPeriod?.id, actionState]);
+    if(activeTab!=="run"||actionState)return;
+    const controller=new AbortController();
+    setAttendanceReadiness(null);setAttendanceCheckError(null);
+    if(attendanceEnabled&&selectedPeriod?.id)payrollRead<AttendanceReadiness>("readiness",{periodId:selectedPeriod.id},controller.signal).then(setAttendanceReadiness).catch(error=>{if(!controller.signal.aborted)setAttendanceCheckError(error instanceof Error?error.message:"Attendance readiness could not be loaded. Open Attendance review & sync.");});
+    return()=>controller.abort();
+  },[attendanceEnabled,selectedPeriod?.id,actionState,activeTab]);
 
   async function runAction(
     label: string,
@@ -7832,6 +7834,9 @@ export function PayrollWorkspace({
     );
   }
 
+  const shortfalls = selectedRun?.employees.filter(employee => Number(employee.netPay) < 0) ?? [];
+  const shortfallKey = `${selectedRun?.id}:${selectedRun?.computedAt}`;
+  const shortfallsAcknowledged = shortfallAcknowledgment === shortfallKey;
   const canReview = selectedRun?.status === "Draft";
   const canApprove = selectedRun?.status === "Reviewed";
   const canPost = selectedRun?.status === "Approved";
@@ -8186,6 +8191,13 @@ export function PayrollWorkspace({
                     )}
                 </div>
 
+                {shortfalls.length > 0 && <div className="space-y-2 rounded border border-amber-400 p-3 text-sm" role="region" aria-label="Deduction shortfalls">
+                  <p className="font-semibold">{shortfalls.length} employees have deductions greater than earnings</p>
+                  {shortfalls.map(employee => <p key={employee.employeeId}>{employee.employeeNameSnapshot}: {formatMoney(-Number(employee.netPay))} shortfall; payment is ₱0.</p>)}
+                  <p>Calculated deductions remain unchanged. No future collection is created automatically.</p>
+                  {["Draft", "Reviewed"].includes(selectedRun?.status ?? "") && <label className="flex min-h-11 items-start gap-2 py-2"><input type="checkbox" className="mt-1 h-5 w-5 shrink-0" checked={shortfallsAcknowledged} onChange={event => setShortfallAcknowledgment(event.target.checked ? shortfallKey : null)} />I accept these deductions, zero transfers and administrator follow-up for the shortfalls.</label>}
+                </div>}
+
                 <div className="flex flex-wrap gap-2">
                   <Button
                     type="button"
@@ -8200,6 +8212,7 @@ export function PayrollWorkspace({
                         ? "Create New Draft Run"
                         : "Compute / Recompute Run"}
                   </Button>
+                  {selectedRun && <Button asChild variant="outline"><Link href={`/payroll/outputs?year=${yearInput}&periodId=${selectedPeriod.id}&group=${payrollGroup}&runId=${selectedRun.id}`}>Payment review &amp; downloads</Link></Button>}
                   <Button
                     type="button"
                     variant="outline"
@@ -8222,11 +8235,11 @@ export function PayrollWorkspace({
                       selectedRun &&
                       runAction(
                         "approve-run",
-                        () => approvePayrollRun(selectedRun.id),
+                        () => approvePayrollRun(selectedRun.id, shortfallsAcknowledged),
                         "Payroll run approved."
                       )
                     }
-                    disabled={!canApprove || actionState !== null || isNavigating}
+                    disabled={!canApprove || actionState !== null || isNavigating || shortfalls.length > 0 && !shortfallsAcknowledged}
                   >
                     {actionState === "approve-run" ? "Approving..." : "Approve"}
                   </Button>
