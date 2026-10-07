@@ -10,17 +10,19 @@ import {
 import { and, eq, gte, lte, sql } from "drizzle-orm";
 
 export async function getPayrollRegister(runId: string) {
-  return db.query.payrollRuns.findFirst({
+  const run = await db.query.payrollRuns.findFirst({
     where: eq(payrollRuns.id, runId),
-    with: {
-      payrollPeriod: true,
-      employees: {
-        with: {
-          lines: true,
-        },
-      },
-    },
+    with: { payrollPeriod: true },
   });
+  if (!run) return undefined;
+  // Flat indexed reads avoid repeated correlated line scans for every employee.
+  const [employees, lineRows] = await Promise.all([
+    db.select().from(payrollRunEmployees).where(eq(payrollRunEmployees.payrollRunId, runId)),
+    db.select({line: payrollRunLines}).from(payrollRunLines).innerJoin(payrollRunEmployees, eq(payrollRunLines.payrollRunEmployeeId, payrollRunEmployees.id)).where(eq(payrollRunEmployees.payrollRunId, runId)),
+  ]);
+  const byEmployee = new Map<string, (typeof payrollRunLines.$inferSelect)[]>();
+  for (const {line} of lineRows) { const lines = byEmployee.get(line.payrollRunEmployeeId) ?? []; lines.push(line); byEmployee.set(line.payrollRunEmployeeId, lines); }
+  return {...run, employees: employees.map(employee => ({...employee, lines: byEmployee.get(employee.id) ?? []}))};
 }
 
 export async function getEmployeePayslip(runId: string, employeeId: string) {

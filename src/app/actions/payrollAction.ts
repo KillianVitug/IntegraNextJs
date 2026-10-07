@@ -1,5 +1,7 @@
 "use server";
 import { runPayrollGroup } from "@/lib/payroll/payrollGroupModel";
+import { loadPaymentReview } from "@/lib/payroll/paymentReview";
+import type { PaymentMode } from "@/lib/payroll/paymentModel";
 
 import { revalidatePath } from "next/cache";
 import { desc, eq } from "drizzle-orm";
@@ -361,19 +363,22 @@ export async function reviewPayrollRun(payrollRunId: string) {
     payrollRunId,
     nextStatus: "Reviewed",
     actorUserId: actor.accountId,
-    transition: transitionPayrollRunStatus,
+    actorRole: actor.role,
+    transition: (id, status, user, notes, authorization) => transitionPayrollRunStatus(id, status, user, notes, undefined, authorization),
   });
   revalidatePath("/payroll");
   return result;
 }
 
-export async function approvePayrollRun(payrollRunId: string) {
+export async function approvePayrollRun(payrollRunId: string, acknowledgeShortfalls = false) {
   const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_APPROVE);
   const result = await transitionPayrollRun({
     payrollRunId,
     nextStatus: "Approved",
     actorUserId: actor.accountId,
-    transition: transitionPayrollRunStatus,
+    actorRole: actor.role,
+    acknowledgeShortfalls: acknowledgeShortfalls === true,
+    transition: (id, status, user, notes, authorization) => transitionPayrollRunStatus(id, status, user, notes, undefined, authorization),
   });
   revalidatePath("/payroll");
   return result;
@@ -385,7 +390,8 @@ export async function postPayrollRun(payrollRunId: string) {
     payrollRunId,
     nextStatus: "Posted",
     actorUserId: actor.accountId,
-    transition: transitionPayrollRunStatus,
+    actorRole: actor.role,
+    transition: (id, status, user, notes, authorization) => transitionPayrollRunStatus(id, status, user, notes, undefined, authorization),
   });
   revalidatePath("/payroll");
   return result;
@@ -397,7 +403,8 @@ export async function voidPayrollRun(payrollRunId: string, reason?: string | nul
     payrollRunId,
     nextStatus: "Void",
     actorUserId: actor.accountId,
-    transition: transitionPayrollRunStatus,
+    actorRole: actor.role,
+    transition: (id, status, user, notes, authorization) => transitionPayrollRunStatus(id, status, user, notes, undefined, authorization),
     notes: reason ?? null,
   });
   revalidatePath("/payroll");
@@ -428,24 +435,35 @@ export async function publishPayslipsAction(payrollRunId: string) {
   return result;
 }
 
-export async function generateBankBatchAction(payrollRunId: string) {
+export async function getPayrollPaymentReviewAction(payrollRunId: string) {
+  await requirePermission(AUTH_PERMISSIONS.PAYROLL_EXPORT);
+  return loadPaymentReview(payrollRunId);
+}
+
+function paymentMode(value?: PaymentMode) {
+  if (value !== undefined && value !== "Bank" && value !== "Cash") throw new Error("Choose Bank or Cash.");
+  return value;
+}
+
+export async function generateBankBatchAction(payrollRunId: string, unassignedMode?: PaymentMode) {
   const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_EXPORT);
   const result = await generateBankBatch({
     payrollRunId,
     actorUserId: actor.accountId,
     batchType: "Bank",
-    bankAdapter: "PNB",
+    unassignedMode: paymentMode(unassignedMode),
   });
   revalidatePath("/payroll");
   return result;
 }
 
-export async function generateCashBatchAction(payrollRunId: string) {
+export async function generateCashBatchAction(payrollRunId: string, unassignedMode?: PaymentMode) {
   const actor = await requirePermission(AUTH_PERMISSIONS.PAYROLL_EXPORT);
   const result = await generateBankBatch({
     payrollRunId,
     actorUserId: actor.accountId,
     batchType: "Cash",
+    unassignedMode: paymentMode(unassignedMode),
   });
   revalidatePath("/payroll");
   return result;
@@ -501,7 +519,7 @@ export async function getPayrollControlBundleAction(payrollRunId: string) {
       format: artifact.format,
       fileName: artifact.fileName,
       storageKey: artifact.storageKey,
-      metadata: artifact.metadata,
+      metadata: artifact.metadata ? Object.fromEntries(Object.entries(artifact.metadata).filter(([key]) => key !== "paymentListCsv")) : null,
       generatedByUserId: artifact.generatedByUserId,
       generatedAt: serializePayrollControlDate(artifact.generatedAt),
       publishedByUserId: artifact.publishedByUserId,

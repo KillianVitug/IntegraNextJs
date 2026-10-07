@@ -1,4 +1,5 @@
 import { payrollGroup, earningMonth, monthRange, remainingMonthlyLines, runPayrollGroup } from "./payrollGroupModel";
+import { assertPayrollOperator, payrollCents } from "./paymentModel";
 import { monthlyPayouts, payrollGroupsInstalled, postedMonthPayments } from "./payrollGroups";
 import { assertAttendanceSourceReady, confirmAttendanceSourcePayrollInput, lockAttendancePayrollInput, attendancePayrollSnapshot, assertAttendancePayrollSnapshot } from "./attendanceSourceGuard";
 import { assertPayrollTransition, PayrollValidationError } from "./validation";
@@ -134,6 +135,7 @@ import { isPayrollEligibleEmploymentStatus } from "@/lib/employmentStatus";
 import { getManualPayrollAccountRateMultiplier } from "./manualPayrollRate";
 import type { ManualPayrollBaselineSnapshot } from "./manualPayroll";
 import { applyLoanPaymentToBalance } from "./loan";
+import { reconcileStoredPayrollAmounts } from "./storedAmounts";
 
 function chunk<T>(items: T[], size: number) {
   const chunks: T[][] = [];
@@ -3392,6 +3394,9 @@ export async function createOrRecomputePayrollRun(
     computation.netPay=computation.grossPay-computation.totalDeductions;
     if(remaining.credited||remaining.excess)computation.breakdownNotes=[computation.breakdownNotes,`Posted amounts credited: ${remaining.credited.toFixed(2)}. Unrecovered excess: ${remaining.excess.toFixed(2)}; review explicitly.`].filter(Boolean).join("\n");
   }
+  for (let index = 0; index < computations.length; index += 1) {
+    computations[index] = reconcileStoredPayrollAmounts(computations[index]);
+  }
   const inputSnapshot={payrollGroup:selectedGroup,earningMonth:earningMonth(period),payoutHalf:period.cycle,postedPaymentDigest:priorPaid.digest,payouts:eligibleEmployees.map(e=>[e.id,payouts.get(e.id)??"B"])};
   return db.transaction(async (tx) => {
     await lockAttendancePayrollInput(tx);
@@ -3563,7 +3568,8 @@ export async function transitionPayrollRunStatus(
   nextStatus: PayrollRunTransitionStatus,
   actorUserId: string,
   notes?: string | null,
-  database: typeof db = db
+  database: typeof db = db,
+  authorization: { actorRole?: string | null; acknowledgeShortfalls?: boolean } = {}
 ) {
   return database.transaction(async tx => {
     await lockAttendancePayrollInput(tx);
@@ -3590,6 +3596,13 @@ export async function transitionPayrollRunStatus(
     }
 
     ensurePayrollTransitionAllowed(run.status, nextStatus);
+    const operatorNote = assertPayrollOperator({nextStatus, actorUserId, actorRole: authorization.actorRole, reviewedByUserId: run.reviewedByUserId, approvedByUserId: run.approvedByUserId});
+    if (operatorNote) notes = [notes, operatorNote].filter(Boolean).join(" ");
+    const shortfalls = run.employees.filter(employee => payrollCents(employee.netPay) < 0);
+    if (nextStatus === "Approved" && shortfalls.length) {
+      if (!authorization.acknowledgeShortfalls) throw new PayrollValidationError("Review deduction shortfalls before approving. These employees receive no transfer; no future recovery is created automatically.");
+      notes = [notes, `Deduction shortfalls acknowledged: ${shortfalls.map(employee => `${employee.employeeNoSnapshot} PHP ${(-payrollCents(employee.netPay) / 100).toFixed(2)}`).join(", ")}. Calculated deductions retained; zero transfer; no automatic future recovery.`].filter(Boolean).join(" ");
+    }
     if (nextStatus !== "Void") {
       if (!run.payrollPeriod) {
         throw new Error("Payroll period not found.");

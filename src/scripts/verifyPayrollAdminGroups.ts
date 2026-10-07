@@ -66,7 +66,7 @@ async function main(){
   await tx.insert(payrollRunEmployees).values({payrollRunId:pending,employeeId:id,employeeNoSnapshot:"FIXTURE",employeeNameSnapshot:"Fictional Payroll"});
   // Inject the test transaction while retaining the real posting validator.
   const testDatabase={transaction:async(fn:(value:typeof tx)=>Promise<unknown>)=>fn(tx)} as unknown as typeof db;
-  await assert.rejects(()=>transitionPayrollRunStatus(pending,"Posted","fixture",null,testDatabase),/Posted monthly payments changed/);
+  await assert.rejects(()=>transitionPayrollRunStatus(pending,"Posted","fixture",null,testDatabase,{actorRole:"ADMIN"}),/Posted monthly payments changed/);
   throw rollback;
  });}catch(error){if(error!==rollback)throw error;}
  assert.equal((await db.select().from(employees).where(eq(employees.id,id))).length,0);

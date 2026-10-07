@@ -68,7 +68,7 @@ async function main() {
     const snapshot = async () => {
       await database.insert(schema.payrollRunEvents).values({ payrollRunId: payrollId, eventType: "Computed", actorUserId: actor, notes: JSON.stringify({ attendanceSourceInputRunId: await attendancePayrollSnapshot(client, periodId) }) });
     };
-    const move = (status: "Reviewed" | "Approved" | "Posted") => transitionPayrollRunStatus(payrollId, status, actor, undefined, engineDb);
+    const move = (status: "Reviewed" | "Approved" | "Posted") => transitionPayrollRunStatus(payrollId, status, actor, undefined, engineDb, {actorRole: "ADMIN"});
     await sync(); await refresh();
     process.env.ATTENDANCE_SOURCE_ENABLED = "false";
     await assert.rejects(() => assertAttendanceSourceReady(periodId, client), /connection is disabled/, "Disabling the connector must not bypass existing API-batch checks");

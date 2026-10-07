@@ -1,0 +1,28 @@
+import assert from "node:assert/strict";
+import { assertPayrollOperator, bankListCsv, paymentSummary, payrollCsv, selectPaymentRows, type PaymentEmployee } from "@/lib/payroll/paymentModel";
+
+const row = (id: string, netPay: string, paymentMode: "Bank" | "Cash" | null = null): PaymentEmployee => ({employeeId: id, employeeNoSnapshot: id, employeeNameSnapshot: `Person ${id}`, grossPay: "1000", totalDeductions: String(1000-Number(netPay)), netPay, paymentMode, bankAccountNo: "0012345678"});
+const rows = [row("B", "900", "Bank"), row("C", "100.12", "Cash"), row("U", "50.23"), row("Z", "0"), row("N", "-420.08")];
+const before = JSON.stringify(rows);
+assert.equal(paymentSummary(rows).payable, 1050.35);
+assert.equal(paymentSummary(rows).net, 630.27);
+assert.equal(paymentSummary(rows).shortfall, 420.08);
+assert.throws(() => selectPaymentRows(rows, "Bank"), /Choose Bank or Cash/);
+assert.deepEqual(selectPaymentRows(rows, "Bank", "Bank").map(r => r.employeeId), ["B", "U"]);
+assert.deepEqual(selectPaymentRows(rows, "Cash", "Bank").map(r => r.employeeId), ["C"]);
+assert.deepEqual(selectPaymentRows(rows, "Cash", "Cash").map(r => r.employeeId), ["C", "U"]);
+assert.throws(() => selectPaymentRows([{...rows[0], bankAccountNo: " "}], "Bank"), /Bank account required/);
+assert.equal(selectPaymentRows([{...rows[3], bankAccountNo: null}], "Bank").length, 0, "Zero payments need no bank setup");
+assert.match(bankListCsv(selectPaymentRows(rows, "Bank", "Bank"), "Bank"), /'0012345678/);
+assert.doesNotMatch(bankListCsv(selectPaymentRows(rows, "Bank", "Bank"), "Bank"), /-420/);
+assert.match(payrollCsv([["=FORMULA()", "\t=FORMULA()", 'A,"B', -420.08]]), /"'=FORMULA\(\)"/);
+assert.match(payrollCsv([['A,"B']]), /"A,""B"/);
+assert.equal(JSON.stringify(rows), before);
+assert.throws(() => paymentSummary([row("bad", "NaN")]), /Invalid payroll amount/);
+const actor = {actorUserId: "one", reviewedByUserId: "one", approvedByUserId: "one"};
+assert.match(assertPayrollOperator({...actor, nextStatus: "Approved", actorRole: "ADMIN"})!, /single-admin/);
+assert.match(assertPayrollOperator({...actor, nextStatus: "Posted", actorRole: "ADMIN"})!, /single-admin/);
+assert.throws(() => assertPayrollOperator({...actor, nextStatus: "Approved", actorRole: "MANAGER"}), /administrator/);
+assert.throws(() => assertPayrollOperator({...actor, nextStatus: "Posted"}), /administrator/);
+assert.equal(assertPayrollOperator({...actor, actorUserId: "two", nextStatus: "Approved"}), null);
+console.log("PASS payment cents, Bank/Cash/unassigned scope, negative/zero exclusion, account preservation, formula-safe CSV and single-admin authorization");

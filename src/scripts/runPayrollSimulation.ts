@@ -1146,7 +1146,7 @@ async function main() {
     assert.ok(monthlyCodes.has(`${SIM_PREFIX}-LWOP`), "Monthly employee has unpaid leave deduction.");
 
     const invalidPost = await payrollEngine
-      .transitionPayrollRunStatus(run.id, "Posted", adminAccountId)
+      .transitionPayrollRunStatus(run.id, "Posted", adminAccountId, undefined, undefined, {actorRole: "ADMIN"})
       .then(
         () => null,
         (caught: unknown) => caught
@@ -1154,7 +1154,7 @@ async function main() {
     assert.ok(invalidPost instanceof Error, "Draft -> Posted should be rejected.");
 
     await payrollEngine.transitionPayrollRunStatus(run.id, "Reviewed", adminAccountId);
-    await payrollEngine.transitionPayrollRunStatus(run.id, "Approved", adminAccountId);
+    await payrollEngine.transitionPayrollRunStatus(run.id, "Approved", adminAccountId, undefined, undefined, {actorRole: "ADMIN"});
 
     const recomputeError = await payrollEngine
       .createOrRecomputePayrollRun(targetPeriodId, adminAccountId)
@@ -1165,7 +1165,7 @@ async function main() {
     assert.ok(recomputeError instanceof Error, "Approved run should block recompute.");
     assert.match(recomputeError.message, /recompute is only allowed/i);
 
-    await payrollEngine.transitionPayrollRunStatus(run.id, "Posted", adminAccountId);
+    await payrollEngine.transitionPayrollRunStatus(run.id, "Posted", adminAccountId, undefined, undefined, {actorRole: "ADMIN"});
 
     const [postedRun, postedInstallment, loanPayment, postedLoan] = await Promise.all([
       db.query.payrollRuns.findFirst({ where: eq(schema.payrollRuns.id, run.id) }),
