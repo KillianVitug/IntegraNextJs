@@ -1,3 +1,4 @@
+import { employeeShortfallAmounts, priorShortfallBalance, shortfallPolicyText } from "./shortfallModel";
 import { Document, Page, Text, View, renderToBuffer } from "@react-pdf/renderer";
 import type { getPayrollRegister } from "./reports";
 import { runPayrollGroup } from "./payrollGroupModel";
@@ -26,10 +27,15 @@ export async function renderPayslips(run: Register, employeeId?: string) {
       </View>)}
       <View wrap={false} style={{marginTop: 20, padding: 12, backgroundColor: "#eff4fa"}}>
         <Text>Gross: {money(employee.grossPay)}</Text>
-        <Text>Deductions: {money(employee.totalDeductions)}</Text>
+        <Text>Calculated deductions: {money(employee.totalDeductions)}</Text>
+        <Text>Deducted from current earnings: {money(employeeShortfallAmounts(employee).collected)}</Text>
+        {priorShortfallBalance(run.inputSnapshot, employee.employeeId) > 0 && <>
+          <Text>Prior shortfall recovered: {money(employeeShortfallAmounts(employee).recovered)}</Text>
+          <Text>Prior balance remaining: {money(Math.max(0, priorShortfallBalance(run.inputSnapshot, employee.employeeId) - employeeShortfallAmounts(employee).recovered))}</Text>
+        </>}
         <Text style={{fontSize: 13, marginTop: 6}}>Calculated net: {money(employee.netPay)}</Text>
         <Text>Payment amount: {money(Math.max(0, Number(employee.netPay)))}</Text>
-        {Number(employee.netPay) < 0 && <Text style={{marginTop: 8}}>Deduction shortfall: {money(-Number(employee.netPay))}. No transfer. Administrator follow-up required; no automatic future recovery.</Text>}
+        {Number(employee.netPay) < 0 && <Text style={{marginTop: 8}}>Deduction shortfall: {money(-Number(employee.netPay))}. No transfer. {shortfallPolicyText(run.inputSnapshot, run.status, run.runType)}</Text>}
         {Number(employee.grossPay) === 0 && <Text style={{marginTop: 8}}>No work / earnings recorded — zero payment.</Text>}
       </View>
       <Text style={{marginTop: 16, fontSize: 9}}>{final ? "Payroll record; not proof of a bank transfer." : "Review copy. This payroll has not been posted; amounts may change."}</Text>

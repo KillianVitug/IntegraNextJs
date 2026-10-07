@@ -1,4 +1,5 @@
 "use client";
+import { shortfallPolicyText } from "@/lib/payroll/shortfallModel";
 import { payrollRead } from "@/lib/payroll/readClient";
 
 import {
@@ -7834,7 +7835,7 @@ export function PayrollWorkspace({
     );
   }
 
-  const shortfalls = selectedRun?.employees.filter(employee => Number(employee.netPay) < 0) ?? [];
+  const shortfalls = selectedRun?.runType === "Reversal" ? [] : selectedRun?.employees.filter(employee => Number(employee.netPay) < 0) ?? [];
   const shortfallKey = `${selectedRun?.id}:${selectedRun?.computedAt}`;
   const shortfallsAcknowledged = shortfallAcknowledgment === shortfallKey;
   const canReview = selectedRun?.status === "Draft";
@@ -8194,8 +8195,8 @@ export function PayrollWorkspace({
                 {shortfalls.length > 0 && <div className="space-y-2 rounded border border-amber-400 p-3 text-sm" role="region" aria-label="Deduction shortfalls">
                   <p className="font-semibold">{shortfalls.length} employees have deductions greater than earnings</p>
                   {shortfalls.map(employee => <p key={employee.employeeId}>{employee.employeeNameSnapshot}: {formatMoney(-Number(employee.netPay))} shortfall; payment is ₱0.</p>)}
-                  <p>Calculated deductions remain unchanged. No future collection is created automatically.</p>
-                  {["Draft", "Reviewed"].includes(selectedRun?.status ?? "") && <label className="flex min-h-11 items-start gap-2 py-2"><input type="checkbox" className="mt-1 h-5 w-5 shrink-0" checked={shortfallsAcknowledged} onChange={event => setShortfallAcknowledgment(event.target.checked ? shortfallKey : null)} />I accept these deductions, zero transfers and administrator follow-up for the shortfalls.</label>}
+                  <p>{shortfallPolicyText({shortfallPolicy: selectedRun?.shortfallPolicy}, selectedRun?.status ?? "Draft", selectedRun?.runType)}</p>
+                  {["Draft", "Reviewed"].includes(selectedRun?.status ?? "") && <label className="flex min-h-11 items-start gap-2 py-2"><input type="checkbox" className="mt-1 h-5 w-5 shrink-0" checked={shortfallsAcknowledged} onChange={event => setShortfallAcknowledgment(event.target.checked ? shortfallKey : null)} />I authorize zero transfers and automatic future deduction of these shortfalls after posting.</label>}
                 </div>}
 
                 <div className="flex flex-wrap gap-2">
