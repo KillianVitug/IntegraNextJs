@@ -4,6 +4,7 @@ import { db } from "@/db";
 import { connection } from "next/server";
 import {
   attendanceImportBatches,
+  attendanceRawLogs,
   department,
   employees,
   employeesGeneralInfo,
@@ -15,6 +16,8 @@ import {
 } from "@/db/schema";
 import { and, asc, desc, eq, gte, isNull, sql } from "drizzle-orm";
 import { currentDepartmentMemberStatusCondition } from "@/lib/employmentStatus";
+import { attendanceSourceRuns } from "@/db/attendanceSourceSchema";
+import { attendanceActivityKind, attendanceActivityCounts, type AttendanceActivityKind } from "@/lib/payroll/attendanceActivity";
 
 type LeaveStatus = typeof leaveStatusEnum.enumValues[number];
 type LeaveType = string;
@@ -26,6 +29,7 @@ export type HomeDashboardData = {
   openPayrollPeriodCount: number;
   upcomingPayrollPeriods: HomeUpcomingPayrollPeriod[];
   recentAttendanceImports: HomeAttendanceImportItem[];
+  latestPhoneSyncAt: string | null;
 };
 
 export type HomeUpcomingPayrollPeriod = {
@@ -53,6 +57,10 @@ export type HomeAttendanceImportItem = {
   payrollPeriodId: string | null;
   payrollPeriodCode: string | null;
   payrollPeriodYear: number | null;
+  kind: AttendanceActivityKind;
+  description: string;
+  fromDate: string | null;
+  throughDate: string | null;
 };
 
 export type HomeLeavePageData = {
@@ -192,6 +200,8 @@ export async function getHomeDashboardData(): Promise<HomeDashboardData> {
     openPayrollPeriodCountRows,
     upcomingPayrollPeriods,
     recentAttendanceImports,
+    recentPhoneSyncs,
+    latestPhoneSyncs,
   ] = await Promise.all([
     db
       .select({ count: sql<number>`COUNT(*)` })
@@ -246,14 +256,19 @@ export async function getHomeDashboardData(): Promise<HomeDashboardData> {
         payrollPeriodId: payrollPeriods.id,
         payrollPeriodCode: payrollPeriods.code,
         payrollPeriodYear: payrollPeriods.year,
+        fromDate:sql<string|null>`(select min(l.log_date) from ${attendanceRawLogs} l where l.batch_id=${attendanceImportBatches.id})`,
+        throughDate:sql<string|null>`(select max(l.log_date) from ${attendanceRawLogs} l where l.batch_id=${attendanceImportBatches.id})`,
       })
       .from(attendanceImportBatches)
       .leftJoin(
         payrollPeriods,
         eq(attendanceImportBatches.payrollPeriodId, payrollPeriods.id)
       )
+      .where(sql`${attendanceImportBatches.sourceFileName} not like 'attendance-api:%'`)
       .orderBy(desc(attendanceImportBatches.importedAt))
       .limit(5),
+    db.select({run:attendanceSourceRuns,periodId:payrollPeriods.id,code:payrollPeriods.code,year:payrollPeriods.year}).from(attendanceSourceRuns).leftJoin(payrollPeriods,eq(payrollPeriods.id,attendanceSourceRuns.payrollPeriodId)).orderBy(desc(attendanceSourceRuns.startedAt)).limit(5),
+    db.select({completedAt:attendanceSourceRuns.completedAt}).from(attendanceSourceRuns).where(eq(attendanceSourceRuns.state,"Complete")).orderBy(desc(attendanceSourceRuns.completedAt)).limit(1),
   ]);
 
   return {
@@ -262,10 +277,14 @@ export async function getHomeDashboardData(): Promise<HomeDashboardData> {
     pendingLeaveRequestCount: toNumber(pendingLeaveCountRows[0]?.count),
     openPayrollPeriodCount: toNumber(openPayrollPeriodCountRows[0]?.count),
     upcomingPayrollPeriods,
-    recentAttendanceImports: recentAttendanceImports.map((batch) => ({
-      ...batch,
-      importedAt: batch.importedAt.toISOString(),
-    })),
+    latestPhoneSyncAt:latestPhoneSyncs[0]?.completedAt?.toISOString()??null,
+    recentAttendanceImports: [
+      ...recentAttendanceImports.map((batch) => {
+        const kind=attendanceActivityKind(batch.sourceFormat,batch.sourceFileName);
+        return {...batch,kind,description:attendanceActivityCounts(kind,batch),importedAt:batch.importedAt.toISOString()};
+      }),
+      ...recentPhoneSyncs.map(({run,periodId,code,year})=>({id:run.id,kind:"Phone sync" as const,sourceFileName:"Attendance phone connection",sourceFormat:"API",status:run.state,totalRows:0,matchedRows:0,unmatchedRows:0,duplicateRows:0,importedAt:(run.completedAt??run.startedAt).toISOString(),payrollPeriodId:periodId,payrollPeriodCode:code,payrollPeriodYear:year,fromDate:run.fromDate,throughDate:run.throughDate,description:run.state==="Complete"?attendanceActivityCounts("Phone sync",(run.counts??{}) as {received?:number;changed?:number;projected?:number}):run.state==="Running"?"Checking phone attendance; completion is pending":"Sync did not complete; open connection history"})),
+    ].sort((a,b)=>b.importedAt.localeCompare(a.importedAt)).slice(0,10),
   };
 }
 

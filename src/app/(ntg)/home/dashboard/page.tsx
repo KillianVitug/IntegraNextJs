@@ -28,6 +28,7 @@ const dateFormatter = new Intl.DateTimeFormat("en-PH", {
 const dateTimeFormatter = new Intl.DateTimeFormat("en-PH", {
   dateStyle: "medium",
   timeStyle: "short",
+  timeZone: "Asia/Manila",
 });
 
 function formatDate(value: string) {
@@ -166,74 +167,22 @@ export default async function Dashboard() {
 
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle>Recent Attendance Imports</CardTitle>
-            <CardDescription>
-              The latest attendance files imported into the payroll workspace.
-            </CardDescription>
+            <CardTitle>Attendance activity</CardTitle>
+            <CardDescription>Phone sync, uploaded files and administrator corrections are separate activities. Times are Philippine time (UTC+8).</CardDescription>
+            <p className="text-sm">Latest successful phone sync: {data.latestPhoneSyncAt?formatDateTime(data.latestPhoneSyncAt):"No successful sync recorded"}</p>
           </CardHeader>
-          <CardContent className="p-0">
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>File</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Payroll Period</TableHead>
-                    <TableHead>Imported</TableHead>
-                    <TableHead>Matched</TableHead>
-                    <TableHead>Unmatched</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {data.recentAttendanceImports.map((batch) => (
-                    <TableRow key={batch.id}>
-                      <TableCell>
-                        <div className="font-medium">{batch.sourceFileName}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {batch.sourceFormat}
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <span
-                          className={`inline-flex rounded-full px-3 py-1 text-xs font-medium ${getStatusTone(
-                            batch.status
-                          )}`}
-                        >
-                          {batch.status}
-                        </span>
-                      </TableCell>
-                      <TableCell>
-                        {batch.payrollPeriodId && batch.payrollPeriodYear ? (
-                          <Link
-                            href={`/payroll?year=${batch.payrollPeriodYear}&periodId=${batch.payrollPeriodId}`}
-                            className="text-sky-700 hover:underline dark:text-sky-300"
-                          >
-                            {batch.payrollPeriodCode}
-                          </Link>
-                        ) : (
-                          <span className="text-muted-foreground">
-                            Not linked
-                          </span>
-                        )}
-                      </TableCell>
-                      <TableCell>{formatDateTime(batch.importedAt)}</TableCell>
-                      <TableCell>{batch.matchedRows}</TableCell>
-                      <TableCell>{batch.unmatchedRows}</TableCell>
-                    </TableRow>
-                  ))}
-                  {data.recentAttendanceImports.length === 0 && (
-                    <TableRow>
-                      <TableCell
-                        colSpan={6}
-                        className="py-10 text-center text-muted-foreground"
-                      >
-                        No attendance import batches have been recorded yet.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
+          <CardContent>
+            <ul className="divide-y">
+              {data.recentAttendanceImports.map(activity=><li key={activity.id} className="min-w-0 space-y-2 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-2"><strong>{activity.kind}</strong><span className={`rounded-full px-3 py-1 text-xs ${getStatusTone(activity.status)}`}>{activity.status}</span></div>
+                {activity.kind==="Uploaded file"&&<p className="break-all text-sm">{activity.sourceFileName}</p>}
+                <p className="text-sm">{activity.description}</p>
+                {activity.fromDate&&<p className="text-sm text-muted-foreground">{activity.kind==="Phone sync"?"Checked capture dates":"Capture dates"}: {activity.fromDate}{activity.throughDate!==activity.fromDate?` to ${activity.throughDate}`:""}</p>}
+                <p className="text-sm text-muted-foreground">{activity.kind==="Admin correction"?"Approved":activity.kind==="Phone sync"?"Sync recorded":"Imported"}: {formatDateTime(activity.importedAt)}</p>
+                {activity.payrollPeriodId&&activity.payrollPeriodYear&&<Link className="inline-flex min-h-11 items-center text-sm text-sky-700 hover:underline dark:text-sky-300" href={`/payroll/attendance-source?year=${activity.payrollPeriodYear}&periodId=${activity.payrollPeriodId}`}>Affected payroll scope: {activity.payrollPeriodCode}</Link>}
+              </li>)}
+            </ul>
+            {!data.recentAttendanceImports.length&&<p className="py-6 text-muted-foreground">No attendance activity recorded yet.</p>}
           </CardContent>
         </Card>
       </div>

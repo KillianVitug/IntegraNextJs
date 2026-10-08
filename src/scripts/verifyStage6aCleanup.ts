@@ -1,0 +1,76 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
+import type { db } from "@/db";
+import { employees, employeesTimekeeping, payrollPeriods, payrollRuns } from "@/db/schema";
+import { attendanceSourceEvents } from "@/db/attendanceSourceSchema";
+import { workBatches, workHistory, workPlans } from "@/db/attendanceWorkbenchSchema";
+import { matchingDatabase } from "./attendanceTest/matchingDatabase";
+import { attendanceEvidence, historicalReceiptMatches } from "@/lib/payroll/attendanceAdminDecision";
+import { workDayRecords, isActiveWorkPlan, workPlanStateLabel, type WorkRecord, type WorkDraft } from "@/lib/payroll/attendanceWorkbenchModel";
+import { workEmployees, draftVersion, saveWorkDraft, prepareWorkApproval } from "@/lib/payroll/attendanceWorkbench";
+import { archiveWorkDraft, processWorkDelivery } from "@/lib/payroll/attendanceWorkbenchDelivery";
+import { withAttendanceFinancialRefresh } from "@/lib/payroll/attendanceFinancialRefresh";
+import { attendanceActivityCounts, attendanceActivityKind } from "@/lib/payroll/attendanceActivity";
+import type { SourcePunch } from "@/lib/payroll/attendanceSourceClient";
+
+async function main(){
+ Object.assign(process.env,{ATTENDANCE_WORKBENCH_ENABLED:"true",ATTENDANCE_SOURCE_ENABLED:"true",ATTENDANCE_SOURCE_ORIGIN:"https://fictional.invalid",ATTENDANCE_SOURCE_TOKEN:"read-only-test-token-".repeat(3)});
+ const employeeId=randomUUID(),day="2026-10-01",actor=randomUUID(),periodId=randomUUID(),priorPeriodId=randomUUID();
+ const record=(at:string,type:"IN"|"OUT",extra:Partial<WorkRecord>={}):WorkRecord=>({id:randomUUID(),employeeId,source:"API",at:new Date(at+"+08:00").toISOString(),type,status:"VALID",clockFlag:false,...extra});
+ const before=record("2026-09-30T20:00","IN"),out=record("2026-10-01T05:00","OUT"),morning=record("2026-10-01T08:00","IN"),evening=record("2026-10-01T17:00","OUT"),after=record("2026-10-02T17:00","OUT");
+ const regular={checkInTime:"08:00",checkOutTime:"17:00"},overnight={checkInTime:"20:00",checkOutTime:"05:00"};
+ assert.deepEqual(workDayRecords([before,morning,evening,after],day,regular),[morning,evening]);
+ assert.deepEqual(workDayRecords([before,morning,after],day,null),[morning],"Missing schedules do not invent an overnight pairing");
+ assert.deepEqual(workDayRecords([before,out],"2026-09-30",overnight),[before,out],"A genuine overnight OUT remains in workday context");
+ const voided={...out,status:"VOID" as const},excluded={...morning,excluded:true};
+ assert.deepEqual(attendanceEvidence([voided,excluded]),[],"History-only VOID/excluded punches do not create a payable conflict");
+ assert.notDeepEqual(attendanceEvidence([out]),attendanceEvidence([voided]),"Voiding an effective punch still needs review");
+ assert.notDeepEqual(attendanceEvidence([morning]),attendanceEvidence([excluded]),"Removing an effective punch still needs review");
+ for(const changed of [{...out,type:"IN" as const},{...out,at:evening.at},{...out,employeeId:randomUUID()}])assert.notDeepEqual(attendanceEvidence([out]),attendanceEvidence([changed]));
+ assert.equal(attendanceActivityKind("API","admin-decision:fixture"),"Admin correction");
+ assert.equal(attendanceActivityKind("CSV","upload.csv"),"Uploaded file");
+ assert.match(attendanceActivityCounts("Admin correction",{matchedRows:0}),/Approved local attendance/);
+ const {pg,database,client}=await matchingDatabase();const localDb=database as unknown as typeof db;
+ try{
+  await database.insert(employees).values({id:employeeId,employeeNo:"CLEANUP1",firstName:"Cleanup",lastName:"Fixture"});
+  await database.insert(employeesTimekeeping).values({employeeId,checkInTime:"08:00:00",checkOutTime:"17:00:00",hoursWorked:"8"});
+  for(const [id,date,code] of [[priorPeriodId,"2026-09-30","CLEANUP-09-B"],[periodId,day,"CLEANUP-10-A"]])await database.insert(payrollPeriods).values({id,code,payrollTerms:"Semi-Monthly",cycle:date===day?"A":"B",year:2026,month:date===day?10:9,startDate:date,endDate:date,nominalPayDate:date,adjustedPayDate:date});
+  await database.insert(payrollRuns).values({payrollPeriodId:priorPeriodId,runNumber:1,runType:"Regular",status:"Posted",computedByUserId:actor,inputSnapshot:{payrollGroup:"Daily"}});
+  const employee=(await workEmployees(periodId,client))[0];
+  const draft:WorkDraft={employeeId,days:[day],changes:[{id:randomUUID(),kind:"Manual",day,type:"IN",at:day+"T08:00",reason:"",evidence:"",verified:false}],reason:"",ownerId:actor,needed:"",rejected:false,version:draftVersion(employee,[day])};
+  assert.equal(workPlanStateLabel("Needs evidence",draft),"Saved draft · review current attendance","Legacy evidence state does not claim required notes are missing");
+  assert.equal(workPlanStateLabel("Needs evidence",{...draft,changes:draft.changes.map(c=>({...c,at:undefined}))}),"Missing required input");
+  const requestId=randomUUID(),saved=await database.transaction(tx=>saveWorkDraft(tx as unknown as typeof client,actor,periodId,[draft],undefined,requestId));
+  assert.deepEqual(await database.transaction(tx=>saveWorkDraft(tx as unknown as typeof client,actor,periodId,[draft],undefined,requestId)),saved);
+  assert.equal((await database.select().from(workBatches)).length,1,"Interrupted initial save replay creates no duplicate batch");
+  await assert.rejects(()=>database.transaction(tx=>saveWorkDraft(tx as unknown as typeof client,actor,periodId,[{...draft,reason:"different"}],undefined,requestId)),/different changes/);
+  const preview=await prepareWorkApproval(periodId,saved.id,saved.revision,client);
+  assert.deepEqual(preview.prepared[0].impacts,[periodId],"Ordinary first-day correction cannot create an adjustment on the prior posted period");
+  const [plan]=await database.select().from(workPlans).where(eq(workPlans.batchId,saved.id));
+  const archived=await database.transaction(tx=>archiveWorkDraft(tx as unknown as typeof client,actor,plan.id,plan.updatedAt.toISOString(),""));
+  assert.equal(archived.revision,2);const [archivedPlan]=await database.select().from(workPlans).where(eq(workPlans.id,plan.id));
+  assert.deepEqual(archivedPlan.draft,draft,"Explicit archival preserves the different intent verbatim");
+  assert.equal(archivedPlan.state,"Archived draft");
+  assert.equal(isActiveWorkPlan({...archivedPlan,draft,revision:2,updatedAt:archivedPlan.updatedAt.toISOString()}),false);
+  assert.equal((await database.select().from(workHistory)).filter(h=>h.action==="Unapproved draft archived").length,1);
+  const baseline=await database.select().from(workHistory);
+  await assert.rejects(()=>withAttendanceFinancialRefresh(localDb,periodId,async tx=>{await tx.insert(workHistory).values({actor,action:"Fixture partial write",details:{}});throw Error("Interrupted financial refresh");}),/Interrupted financial refresh/);
+  assert.deepEqual(await database.select().from(workHistory),baseline,"Interrupted financial refresh rolls back earlier writes");
+  let called=false;await assert.rejects(()=>withAttendanceFinancialRefresh(localDb,priorPeriodId,async()=>{called=true;}),/approved or posted/);assert.equal(called,false,"Posted guard runs before any calculation or writes");
+  await database.update(payrollPeriods).set({status:"Closed"}).where(eq(payrollPeriods.id,periodId));
+  await assert.rejects(()=>withAttendanceFinancialRefresh(localDb,periodId,async()=>{called=true;}),/closed/);assert.equal(called,false);
+  // Source receipt reconciliation changes only delivery history, never a punch or payroll.
+  const eventId=randomUUID(),revision=randomUUID(),source:SourcePunch={eventId,employeeId:"301",employeeName:"Cleanup",originalEmployeeId:"301",originalEmployeeName:"Cleanup",branchId:"B1",type:"IN",capturedAt:morning.at,receivedAt:morning.at,updatedAt:morning.at,status:"VALID",clockFlag:false,clockVerified:true,reviewFlags:[],reviewResolved:true,effectiveRevision:revision};
+  const receipt={state:"Applied",plan:{id:randomUUID()},changes:[{event_id:eventId,revision,after_json:JSON.stringify({employeeId:source.employeeId,type:source.type,capturedAt:source.capturedAt,status:source.status,clockVerified:true})}]};
+  assert.equal(historicalReceiptMatches(receipt,[source]),true);assert.equal(historicalReceiptMatches(receipt,[{...source,effectiveRevision:randomUUID()}]),false);
+  await database.insert(attendanceSourceEvents).values({eventId,sourceEmployeeId:"301",capturedAt:new Date(source.capturedAt),payload:source,firstPayload:source});
+  const historicalPlan=randomUUID();await database.insert(workPlans).values({id:historicalPlan,batchId:saved.id,periodId,employeeId,draft,state:"Needs fresh review",sourceRequest:{operation:"apply-plan",id:receipt.plan.id},ownerId:actor,evidenceVersion:draft.version});
+  const sourcesBefore=await database.select().from(attendanceSourceEvents),runsBefore=await database.select().from(payrollRuns);let reads=0;
+  await processWorkDelivery(actor,{database:localDb,batchId:saved.id,fetcher:async(_url,init)=>{assert.equal(init?.method,"GET");reads++;return Response.json(receipt);}});
+  assert.equal(reads,1);assert.equal((await database.select().from(workPlans).where(eq(workPlans.id,historicalPlan)))[0].state,"Resolved");
+  assert.deepEqual(await database.select().from(attendanceSourceEvents),sourcesBefore);assert.deepEqual(await database.select().from(payrollRuns),runsBefore);
+ }finally{await pg.close();}
+ console.log("PASS Stage6A effective conflict/overnight scope, first-day posted-neighbour protection, idempotent save, audited archive, refresh rollback/posted guard, read-only historical receipt and activity semantics");
+}
+main().catch(error=>{console.error(error);process.exitCode=1;});

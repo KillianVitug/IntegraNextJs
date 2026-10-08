@@ -30,7 +30,15 @@ function stableValue(value: unknown): unknown {
   return value;
 }
 export function sameSchedule(left: ScheduleSnapshot, right: ScheduleSnapshot) { return JSON.stringify(stableValue(left)) === JSON.stringify(stableValue(right)); }
-export function applyScheduleChanges(cells: ScheduleCell[], changes: Array<{employeeId:string;day:string;value:string}>, templates: Map<string,ScheduleSnapshot>) {
+export function withDateScheduleTimes(base: ScheduleSnapshot, times: {start:string;end:string}): ScheduleSnapshot {
+  if(base.kind!=="shift")throw new Error("Choose a working shift before adjusting its times. Rest and unconfigured days have no working times.");
+  const minutes=(value:string)=>{if(!/^([01]\d|2[0-3]):[0-5]\d(?::00)?$/.test(value))throw new Error("Enter valid start and end times.");return Number(value.slice(0,2))*60+Number(value.slice(3,5));};
+  const start=minutes(times.start),end=minutes(times.end),duration=(end-start+1440)%1440;
+  if(!duration||base.breakMinutes>=duration)throw new Error("The shift must have working time after its unpaid breaks.");
+  for(const slot of base.breaks){const from=(minutes(slot.fromTime)-start+1440)%1440,to=from+(minutes(slot.toTime)-minutes(slot.fromTime)+1440)%1440;if(from>=duration||to>duration||to<=from)throw new Error(`The ${slot.label} break falls outside these times. Choose a shift with the appropriate breaks.`);}
+  return {...structuredClone(base),shiftTableId:null,shiftCode:null,shiftName:"Custom date schedule",checkInTime:times.start.slice(0,5)+":00",checkOutTime:times.end.slice(0,5)+":00",hoursPerDay:Math.round((duration-base.breakMinutes)/60*100)/100,isFlexible:false};
+}
+export function applyScheduleChanges(cells: ScheduleCell[], changes: Array<{employeeId:string;day:string;value:string;customTimes?:{start:string;end:string}}>, templates: Map<string,ScheduleSnapshot>) {
   const result = structuredClone(cells);
   const byKey = new Map(result.map(cell => [`${cell.employeeId}:${cell.day}`, cell]));
   const seen = new Set<string>();
@@ -40,11 +48,12 @@ export function applyScheduleChanges(cells: ScheduleCell[], changes: Array<{empl
     seen.add(key);
     const cell = byKey.get(key);
     if (!cell) throw new Error("A selected employee or workday is outside this branch and payroll period.");
-    const snapshot = change.value === "default" ? cell.defaultSnapshot
+    let snapshot = change.value === "default" ? cell.defaultSnapshot
       : change.value === "latest-default" ? cell.latestDefaultSnapshot ?? cell.defaultSnapshot
       : change.value === "rest" || change.value === "unconfigured" ? emptySchedule(change.value)
       : change.value === "captured" ? cell.baselineSnapshot : templates.get(change.value) ?? (change.value === cell.baselineValue ? cell.baselineSnapshot : undefined);
     if (!snapshot) throw new Error("The selected shift is no longer available.");
+    if(change.customTimes)snapshot=withDateScheduleTimes(snapshot,change.customTimes);
     cell.snapshot = structuredClone(snapshot); cell.value = scheduleValue(snapshot); cell.label = scheduleLabel(snapshot); cell.source = "Period exception";
     if (change.value === "latest-default") {
       cell.defaultSnapshot = structuredClone(snapshot); cell.defaultValue = scheduleValue(snapshot); cell.defaultLabel = scheduleLabel(snapshot);

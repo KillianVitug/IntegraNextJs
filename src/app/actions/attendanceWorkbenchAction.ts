@@ -4,7 +4,7 @@ import { db } from "@/db";
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 import { saveWorkDraft, prepareWorkApproval, approveWorkBatch, loadWorkBoard } from "@/lib/payroll/attendanceWorkbench";
-import { processWorkDelivery, closeAdjustment, reopenWorkPlan, undoWorkDraft } from "@/lib/payroll/attendanceWorkbenchDelivery";
+import { processWorkDelivery, closeAdjustment, reopenWorkPlan, undoWorkDraft, archiveWorkDraft } from "@/lib/payroll/attendanceWorkbenchDelivery";
 import { payrollActionResult } from "@/lib/payroll/validation";
 import type { WorkDraft } from "@/lib/payroll/attendanceWorkbenchModel";
 import { and, eq } from "drizzle-orm";
@@ -57,6 +57,7 @@ export async function retryWorkBatchAction(batchId:string) {const actor=await re
 export async function refreshWorkBoardAction(periodId:string) {await requireAdminActor();return payrollActionResult(()=>loadWorkBoard(periodId));}
 export async function closeAttendanceAdjustmentAction(id:string,reference:string,conclusion:string,confirmed:boolean) {const actor=await requireAdminActor();return payrollActionResult(async()=>{await db.transaction(tx=>closeAdjustment(tx,actor.userId,id,reference,conclusion,confirmed));revalidatePath("/payroll/attendance-source");return "Adjustment evidence recorded. Posted payroll is unchanged.";});}
 export async function reopenWorkPlanAction(id:string) {const actor=await requireAdminActor();return payrollActionResult(()=>db.transaction(tx=>reopenWorkPlan(tx,actor.userId,id)));}
+export async function archiveWorkDraftAction(id:string,expectedUpdatedAt:string,note:string) {const actor=await requireAdminActor();return payrollActionResult(async()=>{const result=await db.transaction(tx=>archiveWorkDraft(tx,actor.userId,id,expectedUpdatedAt,note));revalidatePath("/payroll/attendance-source");return result;});}
 export async function undoWorkPlanAction(id:string) {const actor=await requireAdminActor();return payrollActionResult(()=>undoWorkDraft(db,actor.userId,id));}
 export async function keepAdminAttendanceAction(periodId:string,employeeId:string,day:string,incomingDigest:string) {
  const actor=await requireAdminActor();return payrollActionResult(()=>db.transaction(async tx=>{

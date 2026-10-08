@@ -1,4 +1,4 @@
- import { db } from "@/db";
+ import { db, type DbClient } from "@/db";
 import {
   birWithholdingTaxBrackets,
   pagibigContributionRates,
@@ -45,12 +45,12 @@ export type StatutoryCalculationRules = {
   pagibig: (typeof pagibigContributionRates.$inferSelect)[];
   tax: (typeof birWithholdingTaxBrackets.$inferSelect)[];
 };
-export async function loadStatutoryCalculationRules(versions: ActiveStatutoryRuleBundle): Promise<StatutoryCalculationRules> {
+export async function loadStatutoryCalculationRules(versions: ActiveStatutoryRuleBundle, database: DbClient = db): Promise<StatutoryCalculationRules> {
   const [sss,philhealth,pagibig,tax]=await Promise.all([
-    versions.sssVersionId ? db.select().from(sssContributionBrackets).where(eq(sssContributionBrackets.versionId,versions.sssVersionId)).orderBy(sssContributionBrackets.rangeFrom) : [],
-    versions.philhealthVersionId ? db.select().from(philhealthContributionRates).where(eq(philhealthContributionRates.versionId,versions.philhealthVersionId)).limit(1) : [],
-    versions.pagibigVersionId ? db.select().from(pagibigContributionRates).where(eq(pagibigContributionRates.versionId,versions.pagibigVersionId)).orderBy(pagibigContributionRates.rangeFrom) : [],
-    versions.taxVersionId ? db.select().from(birWithholdingTaxBrackets).where(and(eq(birWithholdingTaxBrackets.versionId,versions.taxVersionId),eq(birWithholdingTaxBrackets.payrollTerms,"Semi-Monthly"))).orderBy(birWithholdingTaxBrackets.compensationFrom) : [],
+    versions.sssVersionId ? database.select().from(sssContributionBrackets).where(eq(sssContributionBrackets.versionId,versions.sssVersionId)).orderBy(sssContributionBrackets.rangeFrom) : [],
+    versions.philhealthVersionId ? database.select().from(philhealthContributionRates).where(eq(philhealthContributionRates.versionId,versions.philhealthVersionId)).limit(1) : [],
+    versions.pagibigVersionId ? database.select().from(pagibigContributionRates).where(eq(pagibigContributionRates.versionId,versions.pagibigVersionId)).orderBy(pagibigContributionRates.rangeFrom) : [],
+    versions.taxVersionId ? database.select().from(birWithholdingTaxBrackets).where(and(eq(birWithholdingTaxBrackets.versionId,versions.taxVersionId),eq(birWithholdingTaxBrackets.payrollTerms,"Semi-Monthly"))).orderBy(birWithholdingTaxBrackets.compensationFrom) : [],
   ]);
   return {versions:{...versions},sss,philhealth,pagibig,tax};
 }
@@ -99,9 +99,10 @@ export function distributeScheduledAmount(
 export async function getActiveStatutoryVersion(
   ruleType: (typeof statutoryRuleTypeEnum.enumValues)[number],
   asOfDate: string,
-  payrollTerms: "Semi-Monthly" = "Semi-Monthly"
+  payrollTerms: "Semi-Monthly" = "Semi-Monthly",
+  database: DbClient = db
 ) {
-  const [rule] = await db
+  const [rule] = await database
     .select()
     .from(statutoryRuleVersions)
     .where(
@@ -124,13 +125,14 @@ export async function getActiveStatutoryVersion(
 
 export async function getActiveStatutoryRuleBundle(
   asOfDate: string,
-  payrollTerms: "Semi-Monthly" = "Semi-Monthly"
+  payrollTerms: "Semi-Monthly" = "Semi-Monthly",
+  database: DbClient = db
 ): Promise<ActiveStatutoryRuleBundle> {
   const [sss, philhealth, pagibig, tax] = await Promise.all([
-    getActiveStatutoryVersion("SSS", asOfDate, payrollTerms),
-    getActiveStatutoryVersion("PHILHEALTH", asOfDate, payrollTerms),
-    getActiveStatutoryVersion("PAGIBIG", asOfDate, payrollTerms),
-    getActiveStatutoryVersion("TAX", asOfDate, payrollTerms),
+    getActiveStatutoryVersion("SSS", asOfDate, payrollTerms, database),
+    getActiveStatutoryVersion("PHILHEALTH", asOfDate, payrollTerms, database),
+    getActiveStatutoryVersion("PAGIBIG", asOfDate, payrollTerms, database),
+    getActiveStatutoryVersion("TAX", asOfDate, payrollTerms, database),
   ]);
 
   return {

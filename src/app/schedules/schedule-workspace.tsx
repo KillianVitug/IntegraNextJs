@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { archiveWeeklyDefault, confirmScheduleDraft, deleteScheduleDraft, getScheduleRequestReceipt, getScheduleWorkspace, saveScheduleDraft, saveWeeklyDefaults } from "@/app/actions/scheduleWorkspaceAction";
 import type { ScheduleActionResult, ScheduleArchiveCommand, SchedulePeriodCommand, ScheduleReceipt, ScheduleWeeklyCommand, ScheduleWorkspace } from "@/lib/scheduling/workspace-types";
 import { generateUUID } from "@/lib/uuid";
@@ -9,10 +10,10 @@ import { PeriodSchedule } from "./period-schedule";
 import { WeeklyDefaults } from "./weekly-defaults";
 import { Field, inputClass, ScheduleButton, ScheduleNotice } from "./schedule-ui";
 
-type Props = { initialWorkspace: ScheduleWorkspace; initialView: "weekly" | "period"; employeeId?: string; day?: string };
+type Props = { initialWorkspace: ScheduleWorkspace; initialView: "weekly" | "period"; employeeId?: string; day?: string; canViewPayroll?: boolean };
 type PendingAction = { requestId: string; title: string; effectiveDate?: string; run: () => Promise<ScheduleActionResult> };
 
-export function ScheduleWorkspaceEditor({ initialWorkspace, initialView, employeeId, day }: Props) {
+export function ScheduleWorkspaceEditor({ initialWorkspace, initialView, employeeId, day, canViewPayroll = false }: Props) {
   const router = useRouter();
   const [workspace, setWorkspace] = useState(initialWorkspace);
   const [weeklyWorkspace, setWeeklyWorkspace] = useState(initialWorkspace);
@@ -146,6 +147,7 @@ export function ScheduleWorkspaceEditor({ initialWorkspace, initialView, employe
   }
 
   return <div className="min-w-0 space-y-4 pb-8" aria-busy={busy}>
+    {canViewPayroll&&workspace.periodId&&<Link className="inline-flex min-h-11 items-center rounded border px-3 text-sm font-semibold" href={`/payroll/provisional?${new URLSearchParams({periodId:workspace.periodId,...(workspace.departmentId?{departmentId:String(workspace.departmentId)}:{})})}`}>View provisional payroll for this period</Link>}
     <div className="flex flex-wrap items-start justify-between gap-2"><div><h1 className="text-2xl font-semibold tracking-tight">Schedules</h1><p className="mt-1 text-sm text-muted-foreground">Set the normal week. Review its dates for payroll.</p></div><div className="text-sm text-muted-foreground" aria-live="polite">{busy ? `${pending.current?.title ?? "Loading schedules"}…` : ""}</div></div>
     <div className="grid gap-3 rounded-xl border bg-muted/20 p-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_auto]">
       <Field label="Branch"><select className={inputClass} value={scope.departmentId} disabled={locked} onChange={event => setScope(previous => ({ ...previous, departmentId: event.target.value }))}>{!workspace.departments.length && <option value="">No assigned branches</option>}{workspace.departments.map(department => <option key={department.id} value={department.id}>{department.name}</option>)}</select></Field>
