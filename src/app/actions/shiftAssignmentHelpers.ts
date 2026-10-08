@@ -17,6 +17,7 @@ import {
 } from "@/db/schema";
 import { recordPayrollRunEvent } from "@/lib/admin";
 import { buildAttendanceSummaryComputations } from "@/lib/payroll/attendanceSync";
+import { loadEffectiveAttendanceCorrections, loadEffectiveAttendanceRawLogs, mapEffectiveAttendanceCorrections } from "@/lib/payroll/effectiveAttendanceInputs";
 import { buildLeaveTypeMapByCode, resolveLeavePayStatus } from "@/lib/payroll/leave";
 import { buildShiftAssignmentSnapshotFromTable } from "@/lib/shifts";
 import {
@@ -25,7 +26,7 @@ import {
 import {
   type UpsertEmployeeWeeklyShiftPatternInput,
 } from "@/zod-schemas/employeeWeeklyShiftPattern";
-import { and, asc, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, sql } from "drizzle-orm";
 
 export type EffectiveDateRangeRecord = {
   effectiveFrom: string;
@@ -330,41 +331,20 @@ export async function rebuildEmployeeAttendanceSummaries(args: {
 
   if (!employee) return 0;
 
-  const logQueryEndDate = format(
-    addDays(new Date(`${args.endDate}T00:00:00`), 1),
-    "yyyy-MM-dd"
-  );
   const assignmentQueryStartDate = format(
     addDays(new Date(`${args.startDate}T00:00:00`), -1),
     "yyyy-MM-dd"
   );
-  const rawLogs = await args.tx
-    .select({
-      employeeNo: attendanceRawLogs.employeeNo,
-      employeeId: attendanceRawLogs.employeeId,
-      batchId: attendanceRawLogs.batchId,
-      loggedAt: attendanceRawLogs.loggedAt,
-      logDate: attendanceRawLogs.logDate,
-      logTime: attendanceRawLogs.logTime,
-      direction: attendanceRawLogs.direction,
-      sourceLine: attendanceRawLogs.sourceLine,
-      rawText: attendanceRawLogs.rawText,
-      deviceId: attendanceRawLogs.deviceId,
-      siteCode: attendanceRawLogs.siteCode,
-    })
-    .from(attendanceRawLogs)
-    .where(
-      and(
-        eq(attendanceRawLogs.employeeId, args.employeeId),
-        gte(attendanceRawLogs.logDate, args.startDate),
-        lte(attendanceRawLogs.logDate, logQueryEndDate)
-      )
-    )
-    .orderBy(asc(attendanceRawLogs.loggedAt), asc(attendanceRawLogs.id));
+  const scope = { employeeIds: [args.employeeId], startDate: args.startDate, endDate: args.endDate };
+  const [rawLogs, approvedCorrections] = await Promise.all([
+    loadEffectiveAttendanceRawLogs(args.tx, { ...scope, neighborDays: "all" }),
+    loadEffectiveAttendanceCorrections(args.tx, scope),
+  ]);
   const approvedLeaves = await args.tx.query.employeesLeaveRecords.findMany({
     where: and(
       eq(employeesLeaveRecords.employeeId, args.employeeId),
-      eq(employeesLeaveRecords.leaveStatus, "Approved")
+      eq(employeesLeaveRecords.leaveStatus, "Approved"),
+      isNull(employeesLeaveRecords.deletedAt)
     ),
     with: {
       leaveTypeLookup: true,
@@ -438,6 +418,7 @@ export async function rebuildEmployeeAttendanceSummaries(args: {
       },
     ],
     logs: rawLogs.map((log: typeof rawLogs[number]) => ({
+      rawLogId: log.id,
       employeeNo: log.employeeNo,
       employeeId: log.employeeId ?? null,
       batchId: log.batchId,
@@ -460,6 +441,7 @@ export async function rebuildEmployeeAttendanceSummaries(args: {
     shiftAssignments,
     weeklyPatterns,
     shiftTableBreaksByShiftTableId: buildShiftTableBreakLookup(shiftTableBreakRows),
+    approvedCorrections: mapEffectiveAttendanceCorrections(approvedCorrections),
     allowedAttendanceDateRange: {
       startDate: args.startDate,
       endDate: args.endDate,

@@ -21,7 +21,6 @@ export function adoptIncomingDraft(employee:WorkEmployee,previous:WorkDraft|unde
 
 /** A no-work decision includes exact exclusions, including displayed overnight context. */
 export function buildNoWorkDrafts(drafts:WorkDraft[],people:WorkEmployee[],targets:DayTarget[],note:string,id:()=>string) {
- if(note.trim().length<3)throw Error("Add a reason and evidence note (at least 3 characters; approved is sufficient).");
  const next=drafts.map(d=>({...d,changes:[...d.changes],days:[...d.days]}));
  const selected=uniqueDayTargets(targets);if(!selected.length)throw Error("Select workdays first.");
  for(const target of selected){
@@ -35,9 +34,9 @@ export function buildNoWorkDrafts(drafts:WorkDraft[],people:WorkEmployee[],targe
   for(const record of day.records.filter(r=>r.status==="VALID"&&!r.excluded)){
    const targetRef=record.source==="API"?{eventId:record.id}:{rawLogId:record.rawLogId};
    if(record.source!=="API"&&record.rawLogId===undefined)throw Error("A selected capture has no stable reference; refresh before reviewing no work.");
-   if(!draft.changes.some(c=>c.kind==="Exclude"&&(targetRef.eventId?c.eventId===targetRef.eventId:c.rawLogId===targetRef.rawLogId)))draft.changes.push({id:id(),day:target.day,kind:"Exclude",...targetRef,reason:note.trim(),evidence:note.trim(),verified:false});
+   if(!draft.changes.some(c=>c.kind==="Exclude"&&(targetRef.eventId?c.eventId===targetRef.eventId:c.rawLogId===targetRef.rawLogId)))draft.changes.push({id:id(),day:target.day,kind:"Exclude",...targetRef,reason:note.trim(),evidence:"",verified:false});
   }
-  draft.changes.push({id:id(),day:target.day,kind:"NoAttendance",reason:note.trim(),evidence:note.trim(),verified:false});
+  draft.changes.push({id:id(),day:target.day,kind:"NoAttendance",reason:note.trim(),evidence:"",verified:false});
  }
  assertBatchSize(next);return next;
 }
@@ -52,15 +51,15 @@ export function appendManualDraft(drafts:WorkDraft[],employee:WorkEmployee,chang
 
 export function sourceDeliveryLabel(plan:WorkPlanView) {
  if(!plan.approved)return "Decision not approved";
- if(plan.state==="Resolved")return "Source up to date";
+ if(plan.state==="Resolved")return plan.result?.startsWith("Local")?"Local payroll override approved":plan.result?.startsWith("Source delivery retired")?"Source delivery retired":"Historical source delivery confirmed";
  if(plan.state==="Needs fresh review"||plan.state==="Source conflict")return "Source evidence needs review — approved decision retained";
  if(plan.state==="Failed")return "Source update failed — approved decision retained";
  if(plan.state==="Superseded")return "Continued in a later decision";
- return "Source update pending — approved decision retained";
+ return "Approval recovery pending — approved decision retained";
 }
 export function deliverySummary(plans:WorkPlanView[]) {
  const active=plans.filter(p=>p.approved&&!p.supersededBy?.length&&!['Resolved','Superseded','Removed from draft'].includes(p.state));
  const conflicts=active.filter(p=>['Needs fresh review','Source conflict'].includes(p.state)).length;
  const failures=active.filter(p=>p.state==='Failed').length;
- return conflicts?`${conflicts} source reviews · decisions retained`:failures?`${failures} source updates failed`:active.length?`${active.length} source updates pending`:"Up to date";
+ return conflicts?`${conflicts} incoming attendance reviews · decisions retained`:failures?`${failures} historical deliveries need reconciliation`:active.length?`${active.length} historical deliveries to reconcile`:"Local decisions retained · phone attendance unchanged";
 }

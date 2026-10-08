@@ -16,9 +16,9 @@ assert.equal(verified.flatMap(d=>d.changes).filter(c=>c.verified).length,6);
 assert.equal(verified[4].changes[1].verified,false,"Missing actual time is not verified");
 for(const kind of ["Direction","Time","Employee","Void","Restore","Manual","ConfirmSequence","NoAttendance","Exclude","Retain","UndoCapture","ReopenDay"] as WorkKind[]){
  const c=completeChange({kind,at:kind==="Time"||kind==="Manual"?"2026-09-30T07:42:31.725":undefined,targetEmployeeId:kind==="Employee"?employees[1].id:undefined});
- assert.deepEqual(verificationIssues(person,draft,c,employees),[],`${kind} complete row can be attested`);
+ assert.deepEqual(verificationIssues(person,draft,c,employees),[],`${kind} complete row can be reviewed`);
 }
-for(const patch of [{evidence:" "},{reason:"x"},{type:undefined},{kind:"Time" as const,at:undefined},{kind:"Manual" as const,at:"2026-09-31T08:00"},{kind:"Employee" as const,targetEmployeeId:"missing"},{eventId:"gone"},{day:"2026-10-01"}])assert.ok(verificationIssues(person,draft,completeChange(patch),employees).length);
+for(const patch of [{type:undefined},{kind:"Time" as const,at:undefined},{kind:"Manual" as const,at:"2026-09-31T08:00"},{kind:"Employee" as const,targetEmployeeId:"missing"},{eventId:"gone"},{day:"2026-10-01"}])assert.ok(verificationIssues(person,draft,completeChange(patch),employees).length);
 assert.ok(changeInputErrors(draft,completeChange({at:"2099-09-30T08:00"})).some(x=>x.includes("future")));
 assert.ok(changeInputErrors(draft,completeChange({kind:"Manual",at:"2026-10-03T08:00"})).some(x=>x.includes("outside")));
 assert.ok(verificationIssues(person,{...draft,rejected:true},completeChange(),employees).includes("Plan is rejected"));

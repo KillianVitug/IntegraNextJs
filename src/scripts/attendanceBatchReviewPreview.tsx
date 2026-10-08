@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { AttendanceWorkbench } from "@/app/(ntg)/payroll/attendance-source/workbench";
 import { batchReviewFixture } from "./attendanceTest/batchReviewFixture";
 export const fixture=batchReviewFixture();
+if(new URLSearchParams(location.search).get("scenario")==="posted"){fixture.board.period.posted=true;fixture.board.statuses.payroll="Posted / closed — adjustment required";}
 export const previewState={drafts:fixture.drafts,revision:0,calls:[] as string[],approved:false,interruptApproval:false};
 const storage=`integra-attendance-review:${fixture.board.period.id}`;
 if(!sessionStorage.getItem(storage))sessionStorage.setItem(storage,JSON.stringify({drafts:fixture.drafts,search:"",filter:"Needs review",employeeId:"",day:""}));

@@ -11,7 +11,7 @@ assert.deepEqual(next[0],drafts[1],"Unselected employee drafts remain intact");
 assert.equal(next[1].changes.length,3);assert.ok(next[1].changes.every(c=>!c.verified));
 assert.equal(simulateWork(person.contextRecords??[],next[1].changes,person.id).records.filter(r=>r.status==="VALID"&&!r.excluded).length,0);
 assert.throws(()=>buildNoWorkDrafts(drafts,board.employees,targets,"approved",uuid),/already has draft edits/);
-assert.throws(()=>buildNoWorkDrafts([],board.employees,targets,"",uuid),/reason/);
+assert.equal(buildNoWorkDrafts([],board.employees,targets,"",uuid)[0].reason,"","Notes are optional");
 const manual=completeChange({id:"manual",kind:"Manual",eventId:undefined,at:`${day}T08:00`,reason:"approved",evidence:"approved",verified:true});
 const withManual=appendManualDraft([drafts[1]],person,manual,"approved");
 assert.equal(appendManualDraft(withManual,person,manual,"approved")[1].changes.length,1,"Retry updates same draft row, never duplicates it");
@@ -27,8 +27,8 @@ const overnight={...person,contextRecords:[...person.contextRecords!,{...person.
 const overnightDraft=buildNoWorkDrafts([], [overnight],targets,"approved",uuid)[0];assert.ok(overnightDraft.changes.some(c=>c.eventId==="next-out"),"Displayed adjacent-date capture is explicitly selected");
 assert.equal(overnightDraft.version,draftVersion(overnight,[day]));
 const plan:WorkPlanView={id:"p",batchId:"b",revision:1,state:"Needs fresh review",draft:drafts[0],approved:true,updatedAt:"2026-10-01T00:00:00Z",result:null};
-assert.match(sourceDeliveryLabel(plan),/approved decision retained/);assert.match(deliverySummary([plan]),/1 source reviews/);assert.equal(deliverySummary([{...plan,supersededBy:["later"]}]),"Up to date");
-assert.match(deliverySummary([{...plan,state:"Failed"}]),/failed/);assert.match(deliverySummary([{...plan,state:"Applying"}]),/pending/);
+assert.match(sourceDeliveryLabel(plan),/approved decision retained/);assert.match(deliverySummary([plan]),/1 incoming attendance reviews/);assert.equal(deliverySummary([{...plan,supersededBy:["later"]}]),"Local decisions retained · phone attendance unchanged");
+assert.match(deliverySummary([{...plan,state:"Failed"}]),/reconciliation/);assert.match(deliverySummary([{...plan,state:"Applying"}]),/reconcile/);
 console.log("PASS Stage 6 draft retention, exact no-work selection, overnight context, manual retry/edit reset, stale evidence and truthful delivery counts");
 
 assert.deepEqual(affectedWorkDates({...drafts[0],changes:[completeChange({kind:"Exclude",eventId:undefined,rawLogId:42})]},[{...person.contextRecords![0],rawLogId:42,at:"2026-10-01T01:00:00Z"}]),["2026-09-30","2026-10-01"],"Adjacent raw captures participate in affected-period validation");
