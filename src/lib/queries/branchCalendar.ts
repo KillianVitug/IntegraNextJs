@@ -583,6 +583,8 @@ export async function getBranchCalendarMonth(input: unknown) {
         departmentName: employee.departmentName,
         departmentCode: employee.departmentCode,
         source: resolvedSchedule.source,
+        configured: resolvedSchedule.configured,
+        confirmed: Boolean(resolvedSchedule.overrideAssignment?.scheduleDecisionId),
         shiftName,
         shiftCode,
         checkInTime,
@@ -609,7 +611,8 @@ export async function getBranchCalendarMonth(input: unknown) {
       date,
       dayOfMonth: index + 1,
       employeeCount: employeesForDay.length,
-      workingCount: employeesForDay.filter((employee) => !employee.isRestDay).length,
+      workingCount: employeesForDay.filter((employee) => employee.configured && !employee.isRestDay).length,
+      unconfiguredCount: employeesForDay.filter((employee) => !employee.configured).length,
       restDayCount: employeesForDay.filter((employee) => employee.isRestDay).length,
       overrideCount: employeesForDay.filter(
         (employee) => employee.source === "OVERRIDE",

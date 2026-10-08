@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { revalidatePath } from "next/cache";
 import { and, asc, eq, gte, inArray, isNull, lte, or } from "drizzle-orm";
+import { assertNoConfirmedScheduleEdit } from "@/lib/scheduling/guards";
 import {
   cancelManagerScheduleChangeRequest,
   getManagerPayrollPeriodScheduleGridData,
@@ -590,6 +591,7 @@ export async function savePayrollPeriodScheduleFromRequest(request: NextRequest)
 
       for (const change of changes) {
         await lockShiftAssignmentContext(tx, change.row.id);
+        await assertNoConfirmedScheduleEdit(tx, {employeeId: change.row.id, startDate: change.cell.date, endDate: change.cell.date});
 
         const employeeLabel = `${change.row.lastName}, ${change.row.firstName}`;
         const existingAssignment = await loadCoveringAssignmentForDate({

@@ -20,7 +20,6 @@ import {
 } from "./attendanceCorrections";
 import {
   resolveEmployeeScheduleForDate,
-  hasLegacyPaySchedule,
   type ShiftAssignmentRecord,
   type WeeklyShiftPatternRecord,
 } from "./scheduleResolver";
@@ -181,8 +180,10 @@ function resolveShiftWindow(args: {
     resolvedSchedule.source === "OVERRIDE"
       ? resolvedSchedule.overrideAssignment?.shiftTableId ?? null
       : resolvedSchedule.weeklyPatternDay?.shiftTableId ?? null;
-  const regularBreakWindows =
-    resolvedShiftTableId != null
+  const confirmedBreaks = resolvedSchedule.overrideAssignment?.confirmedSchedule?.breaks;
+  const regularBreakWindows = confirmedBreaks
+    ? buildDeductibleRegularBreakWindows(confirmedBreaks)
+    : resolvedShiftTableId != null
       ? buildDeductibleRegularBreakWindows(
           args.shiftTableBreaksByShiftTableId.get(resolvedShiftTableId) ?? []
         )
@@ -201,7 +202,7 @@ function resolveShiftWindow(args: {
         : false;
 
   return {
-    scheduleMissing: resolvedSchedule.source==="LEGACY"&&!hasLegacyPaySchedule(legacyTimekeeping),
+    scheduleMissing: !resolvedSchedule.configured,
     activeShift: resolvedSchedule.overrideAssignment,
     allowSameDirectionAutoDuplicate:
       resolvedSchedule.source !== "OVERRIDE" ||

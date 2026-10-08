@@ -15,7 +15,7 @@ const managerNavItems = [
   { label: "Home", href: "/managerHome", icon: LayoutDashboardIcon },
   { label: "Calendar", href: "/managerCalendar", icon: Calendar },
   { label: "Leaves", href: "/managerLeaves", icon: ListChecks },
-  { label: "Schedules", href: "/managerSchedules", icon: FileText },
+  { label: "Schedules", href: "/schedules", icon: FileText },
   { label: "DTR", href: "/managerDtrFiles", icon: Upload },
 ];
 

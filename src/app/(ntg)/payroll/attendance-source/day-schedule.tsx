@@ -1,4 +1,5 @@
 "use client";
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { attendanceScheduleOptionsAction } from "@/app/actions/attendanceWorkbenchAction";
 import { listEmployeeShiftAssignments, saveEmployeeShiftAssignment } from "@/app/actions/shiftAssignmentAction";
@@ -18,6 +19,7 @@ export function DaySchedule({employeeId,day,onSaved}:{employeeId:string;day:stri
  return <details className="my-2 min-w-0 rounded border p-2" onToggle={event=>{if(event.currentTarget.open&&!options.length)void attendanceScheduleOptionsAction().then(setOptions).catch(()=>setMessage("Could not load schedules. Retry by reopening this section."));}}>
   <summary className="flex min-h-11 cursor-pointer items-center text-sm font-semibold">Schedule for {day}</summary>
   <p className="text-xs">Choose an existing schedule for this employee and date. Attendance facts can be approved independently.</p>
+  <Link className="my-2 inline-flex min-h-11 items-center text-sm font-semibold underline" href={`/schedules?view=period&employeeId=${employeeId}&day=${day}`}>Open period schedule and history</Link>
   <label className="block py-2 text-sm">Schedule<select aria-label={`Schedule for ${day}`} value={selected} disabled={busy} onChange={e=>{setSelected(e.target.value);setSaved(false);}} className="mt-1 min-h-11 w-full min-w-0 rounded border p-2"><option value="">Select schedule</option>{options.map(o=><option key={o.id} value={o.id}>{o.code} · {o.start}–{o.end} · {o.name}</option>)}</select></label>
   <button type="button" disabled={!selected||busy||saved} onClick={()=>void save()} className="min-h-11 rounded border px-3 text-sm font-semibold disabled:opacity-50">{busy?"Saving schedule…":saved?"Schedule saved":"Confirm this date’s schedule"}</button>
   {message&&<p role="status" className="mt-2 break-words text-sm">{message}</p>}

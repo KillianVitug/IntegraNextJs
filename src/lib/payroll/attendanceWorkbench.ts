@@ -7,7 +7,7 @@ import { employees, employeesGeneralInfo, employeesTimekeeping, employeeShiftAss
 import { attendanceSourceMappings as mappings, attendanceSourceEvents as events, attendanceSourceProjections as projections, attendanceSourceIdentities as identities } from "@/db/attendanceSourceSchema";
 import { workBatches, workPlans, workTreatments, workHistory, adjustmentCases, workRawLogs, workExclusions, workSourceExclusions } from "@/db/attendanceWorkbenchSchema";
 import { resolutionDigest, loadAttendanceReadiness, invalidateResolutionPeriod } from "./attendanceResolution";
-import { resolveEmployeeScheduleForDate, isResolvedScheduleRestDay, hasLegacyPaySchedule } from "./scheduleResolver";
+import { resolveEmployeeScheduleForDate, isResolvedScheduleRestDay, scheduleVersionRecord } from "./scheduleResolver";
 import { manilaWallTime, sourceDayOffset, type SourcePunch } from "./attendanceSourceClient";
 import { type WorkBoard, type WorkDraft, type WorkRecord, type WorkEmployee, type WorkDay, simulateWork, sequenceProblems, suggestionsForDay, dayStatus, workDate, localToInstant, draftVersion, draftRecords, workDayRecords, changeInputErrors, canCorrectRecord, dayNeedsReview } from "./attendanceWorkbenchModel";
 import { lockAttendancePayrollInput } from "./attendanceSourceGuard";
@@ -63,11 +63,11 @@ export async function workEmployees(periodId:string,database:DbClient=db,incomin
   for(let day=period.startDate;day<=period.endDate;day=sourceDayOffset(day,1)) {
    if(info?.dateHired&&day<info.dateHired||info?.separationDate&&day>info.separationDate)continue;
    const resolved=resolveEmployeeScheduleForDate({attendanceDate:day,assignments:assignments.filter(a=>a.employeeId===person.id),weeklyPatterns:patterns.filter(p=>p.employeeId===person.id).map(p=>({...p,days:patternDays.filter(d=>d.patternId===p.id)})),legacyTimekeeping:timekeeping.find(t=>t.employeeId===person.id)??null});
-   const schedule=resolved.source==="LEGACY"&&!hasLegacyPaySchedule(timekeeping.find(t=>t.employeeId===person.id)??null)?null:resolved.shiftWindow;
+   const schedule=resolved.configured?resolved.shiftWindow:null;
    const dayLeaves=leaves.filter(l=>l.employeeId===person.id&&l.leaveStartDate&&l.leaveStartDate<=day&&l.leaveEndDate&&l.leaveEndDate>=day);
    const leave=dayLeaves.reduce((n,l)=>{const detail=leaveDays.find(d=>d.leaveRecordId===l.id&&d.leaveDate===day);return n+(detail?Number(detail.quantity):0)*(schedule?.hoursPerDay??0)*60;},0);
    const own=workDayRecords(records,day),context=records.filter(r=>workDate(r.at)>=sourceDayOffset(day,-1)&&workDate(r.at)<=sourceDayOffset(day,1));
-   const configuration={schedule,source:resolved.source,assignment:resolved.overrideAssignment,pattern:resolved.weeklyPatternDay,employment:info?{hired:info.dateHired,separated:info.separationDate,status:info.employmentStatus}:null};
+   const configuration={schedule,source:resolved.source,assignment:scheduleVersionRecord(resolved.overrideAssignment),pattern:scheduleVersionRecord(resolved.weeklyPatternDay),employment:info?{hired:info.dateHired,separated:info.separationDate,status:info.employmentStatus}:null};
    const leaveEvidence=dayLeaves.map(l=>({record:l,detail:leaveDays.filter(d=>d.leaveRecordId===l.id&&d.leaveDate===day)}));
    const version=resolutionDigest([configuration,leaveEvidence,employeeLinks,identity.filter(i=>sourceIds.includes(i.sourceEmployeeId)),context]);
    const treatment=treatments.find(t=>t.employeeId===person.id&&t.day===day&&(adminDecision(t.payload)||t.version===version));

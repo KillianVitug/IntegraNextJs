@@ -53,9 +53,10 @@ export async function Header() {
 
           <NavButtonMenu
             icon={Calendar1Icon}
-            label="Leave Menu"
-            aria-label="Leave Menu"
+            label="Schedules and leave"
+            aria-label="Schedules and leave"
             choices={[
+              { title: "Schedules", href: "/schedules" },
               { title: "Used Leaves and Services", href: "/leaves" },
               { title: "Leave Encashment", href: "/leaves?tab=encashment" },
               { title: "Branch Calendar", href: "/branchCalendar" },

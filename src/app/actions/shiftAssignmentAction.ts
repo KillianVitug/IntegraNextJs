@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { assertNoConfirmedScheduleEdit } from "@/lib/scheduling/guards";
 import { db } from "@/db";
 import {
   employeeShiftAssignments,
@@ -340,6 +341,7 @@ export async function deleteEmployeeShiftAssignment(input: unknown) {
     }
 
     await lockShiftAssignmentContext(tx, existingAssignment.employeeId);
+    await assertNoConfirmedScheduleEdit(tx, {employeeId: existingAssignment.employeeId, startDate: existingAssignment.effectiveFrom, endDate: existingAssignment.effectiveTo});
 
     const staleRange = getAffectedScheduleRange({
       existingRecord: existingAssignment,

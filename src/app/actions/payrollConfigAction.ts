@@ -1,7 +1,8 @@
 "use server";
 
 import { revalidatePath, revalidateTag } from "next/cache";
-import { db } from "@/db";
+import { db, type DbClient } from "@/db";
+import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
 import {
   accountCode,
   holidayTypeAccountCodes,
@@ -25,7 +26,7 @@ import {
 } from "@/lib/shifts";
 import { actionClient } from "@/lib/safe-action";
 import { flattenValidationErrors } from "next-safe-action";
-import { and, eq, inArray, isNotNull, ne, or } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, ne, or } from "drizzle-orm";
 import {
   deleteHolidayCalendarSchema,
   deleteHolidayTemplateSchema,
@@ -258,6 +259,7 @@ function buildPersistedShiftBreakRows(
 }
 
 async function syncLinkedShiftAssignments(
+  database: DbClient,
   shiftTableId: number,
   payload: Pick<
     InsertShiftTableSchemaType,
@@ -266,7 +268,7 @@ async function syncLinkedShiftAssignments(
 ) {
   const snapshot = buildShiftAssignmentSnapshotFromTable(payload);
 
-  await db
+  await database
     .update(employeeShiftAssignments)
     .set({
       shiftName: snapshot.shiftName,
@@ -278,10 +280,11 @@ async function syncLinkedShiftAssignments(
       hoursPerDay: snapshot.hoursPerDay.toFixed(2),
       updatedAt: new Date(),
     })
-    .where(eq(employeeShiftAssignments.shiftTableId, shiftTableId));
+    .where(and(eq(employeeShiftAssignments.shiftTableId, shiftTableId), isNull(employeeShiftAssignments.scheduleDecisionId)));
 }
 
 async function syncLinkedWeeklyPatternDays(
+  database: DbClient,
   shiftTableId: number,
   payload: Pick<
     InsertShiftTableSchemaType,
@@ -290,7 +293,7 @@ async function syncLinkedWeeklyPatternDays(
 ) {
   const snapshot = buildShiftAssignmentSnapshotFromTable(payload);
 
-  await db
+  await database
     .update(employeeWeeklyShiftPatternDays)
     .set({
       shiftName: snapshot.shiftName,
@@ -943,6 +946,7 @@ export const saveShiftTableAction = actionClient
 
     if (parsedInput.id) {
       await db.transaction(async (tx) => {
+        await lockAttendancePayrollInput(tx);
         await tx
           .update(shiftTables)
           .set({
@@ -959,10 +963,9 @@ export const saveShiftTableAction = actionClient
         if (breakRows.length > 0) {
           await tx.insert(shiftTableBreaks).values(breakRows);
         }
+        await syncLinkedShiftAssignments(tx, parsedInput.id!, parsedInput);
+        await syncLinkedWeeklyPatternDays(tx, parsedInput.id!, parsedInput);
       });
-
-      await syncLinkedShiftAssignments(parsedInput.id, parsedInput);
-      await syncLinkedWeeklyPatternDays(parsedInput.id, parsedInput);
 
       await recordAdminAuditEvent({
         actorUserId: actor.userId,
@@ -980,6 +983,7 @@ export const saveShiftTableAction = actionClient
     }
 
     const created = await db.transaction(async (tx) => {
+      await lockAttendancePayrollInput(tx);
       const [createdShiftTable] = await tx
         .insert(shiftTables)
         .values(basePayload)
@@ -1014,7 +1018,10 @@ export const deleteShiftTableAction = actionClient
   .action(async ({ parsedInput }) => {
     const actor = await requireAdminActor();
 
-    await db.delete(shiftTables).where(eq(shiftTables.id, parsedInput.id));
+    await db.transaction(async tx => {
+      await lockAttendancePayrollInput(tx);
+      await tx.delete(shiftTables).where(eq(shiftTables.id, parsedInput.id));
+    });
 
     await recordAdminAuditEvent({
       actorUserId: actor.userId,

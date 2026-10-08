@@ -9,7 +9,7 @@ const sidebarItems: SidebarItem[] = [
   { label: "Dashboard", href: "/managerHome", icon: "home" },
   { label: "Calendar", href: "/managerCalendar", icon: "calendar" },
   { label: "Leave Requests", href: "/managerLeaves", icon: "calendar" },
-  { label: "Schedules", href: "/managerSchedules", icon: "file" },
+  { label: "Schedules", href: "/schedules", icon: "file" },
   { label: "DTR Files", href: "/managerDtrFiles", icon: "file" },
 ];
 

@@ -1,0 +1,25 @@
+import assert from "node:assert/strict";
+import { applyScheduleChanges, emptySchedule, sameSchedule, scheduleDateRange, scheduleLabel, shiftDate } from "@/lib/scheduling/model";
+import type { ScheduleCell, ScheduleSnapshot } from "@/lib/scheduling/workspace-types";
+import { resolveEmployeeScheduleForDate } from "@/lib/payroll/scheduleResolver";
+
+const original: ScheduleSnapshot = { ...emptySchedule("unconfigured"), kind: "shift", shiftTableId: 1, shiftName: "Night shift", shiftCode: "N", checkInTime: "22:00:00", checkOutTime: "06:00:00", hoursPerDay: 8 };
+const next = { ...original, shiftTableId: 2, shiftName: "Day", shiftCode: "D", checkInTime: "08:00:00", checkOutTime: "17:00:00", breakMinutes: 60 };
+const cell: ScheduleCell = { employeeId: "employee", day: "2026-09-30", value: "1", label: scheduleLabel(original), source: "Date exception", defaultValue: "rest", defaultLabel: "Rest day", baselineValue: "1", baselineLabel: scheduleLabel(original), snapshot: original, baselineSnapshot: original, defaultSnapshot: emptySchedule("rest"), latestDefaultSnapshot: next };
+assert.deepEqual(scheduleDateRange("2026-09-28", "2026-09-30"), ["2026-09-28", "2026-09-29", "2026-09-30"]);
+assert.equal(shiftDate("2026-10-01", -1), "2026-09-30");
+assert.ok(sameSchedule(original, Object.fromEntries(Object.entries(original).reverse()) as ScheduleSnapshot), "JSONB property order must not create false schedule changes");
+const templates = new Map([["1", original], ["2", next]]);
+assert.equal(applyScheduleChanges([cell], [{ employeeId: cell.employeeId, day: cell.day, value: "1" }], new Map([["1", { ...original, breakMinutes: 30 }]]))[0].snapshot.breakMinutes, 30, "Explicitly selecting the same template adopts its current reviewed values");
+assert.ok(sameSchedule(applyScheduleChanges([cell], [{ employeeId: cell.employeeId, day: cell.day, value: "1" }], new Map())[0].snapshot, original), "A deleted template's captured original remains selectable for undo");
+const update = applyScheduleChanges([cell], [{ employeeId: cell.employeeId, day: cell.day, value: "2" }], templates);
+assert.equal(update[0].snapshot.checkInTime, "08:00:00"); assert.equal(cell.snapshot.checkInTime, "22:00:00");
+assert.equal(applyScheduleChanges([cell], [{ employeeId: cell.employeeId, day: cell.day, value: "default" }], templates)[0].snapshot.kind, "rest", "Restore uses captured period default");
+assert.equal(applyScheduleChanges([cell], [{ employeeId: cell.employeeId, day: cell.day, value: "latest-default" }], templates)[0].snapshot.checkInTime, "08:00:00", "Latest defaults require explicit adoption");
+assert.equal(applyScheduleChanges([cell], [{ employeeId: cell.employeeId, day: cell.day, value: "unconfigured" }], templates)[0].snapshot.kind, "unconfigured");
+assert.throws(() => applyScheduleChanges([cell], [{ employeeId: cell.employeeId, day: "2026-10-01", value: "2" }], templates), /outside/);
+assert.throws(() => applyScheduleChanges([cell], [{ employeeId: cell.employeeId, day: cell.day, value: "999" }], templates), /no longer available/);
+assert.throws(() => applyScheduleChanges([cell], [{ employeeId: cell.employeeId, day: cell.day, value: "2" }, { employeeId: cell.employeeId, day: cell.day, value: "rest" }], templates), /more than once/);
+const missing = resolveEmployeeScheduleForDate({ attendanceDate: cell.day, assignments: [], weeklyPatterns: [], legacyTimekeeping: null });
+assert.equal(missing.configured, false);
+console.log("PASS schedule workspace: exact dates, immutable edits, captured/latest defaults, missing/rest distinction, JSONB equality, scope and duplicate validation");
