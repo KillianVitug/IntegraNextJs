@@ -262,7 +262,9 @@ export function getApprovedAttendanceCorrectionAnomalyFlags(
     if (!payload) continue;
 
     for (const flag of payload.proposedMetrics?.anomalyFlags ?? []) {
-      flags.add(flag);
+      // Recalculate sequence/schedule findings from today's effective inputs.
+      // Historical proposed metrics are audit evidence, not a permanent hold.
+      if(!["NO_LOGS","ODD_PUNCH_COUNT","MISSING_IN","MISSING_OUT","INCOMPLETE_SEQUENCE","PARTIAL_VALID_WORK","SCHEDULE_MISSING",ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG].includes(flag))flags.add(flag);
     }
 
     if (

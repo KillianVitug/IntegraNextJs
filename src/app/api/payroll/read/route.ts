@@ -41,7 +41,7 @@ export async function GET(request:Request) {
     result=(await workEmployees(periodId,db,undefined,undefined,employeeId))[0]??null;break;
    }
    case "readiness": result=await loadAttendanceReadiness(periodId);break;
-   case "sync-history": result=await db.select({id:attendanceSourceRuns.id,state:attendanceSourceRuns.state,startedAt:attendanceSourceRuns.startedAt,counts:attendanceSourceRuns.counts,error:attendanceSourceRuns.error}).from(attendanceSourceRuns).where(eq(attendanceSourceRuns.payrollPeriodId,periodId)).orderBy(desc(attendanceSourceRuns.startedAt)).limit(30);break;
+   case "sync-history": result=await db.select({id:attendanceSourceRuns.id,state:attendanceSourceRuns.state,startedAt:attendanceSourceRuns.startedAt,completedAt:attendanceSourceRuns.completedAt,counts:attendanceSourceRuns.counts,error:attendanceSourceRuns.error}).from(attendanceSourceRuns).where(eq(attendanceSourceRuns.payrollPeriodId,periodId)).orderBy(desc(attendanceSourceRuns.startedAt)).limit(30);break;
    case "matching": result=await loadMatchBoard(db);break;
    case "duplicates": result=await loadDuplicateBoard(periodId);break;
    case "preflight":

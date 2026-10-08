@@ -1,3 +1,5 @@
+import { freezesAttendanceInput } from "./attendanceDayInput";
+import { loadEffectiveAttendanceInputSet, attendanceInputForDay } from "./effectiveAttendanceInputs";
 import { deliverySummary, affectedWorkDates } from "./attendanceStage6Model";
 import "server-only";
 import { randomUUID } from "node:crypto";
@@ -27,7 +29,7 @@ const activeStates=["Approved","Applying","Sync pending","Failed"];
 export { draftVersion, workDayRecords } from "./attendanceWorkbenchModel";
 export async function workEmployees(periodId:string,database:DbClient=db,incoming?:SourcePunch[],now=new Date().toISOString(),employeeId?:string):Promise<WorkEmployee[]> {
  const [period]=await database.select().from(payrollPeriods).where(eq(payrollPeriods.id,periodId));if(!period)fail("Payroll period not found.");
- const [roster,links,identity,source,raw,timekeeping,assignments,patterns,patternDays,leaves,leaveDays,treatments,excluded,manualLinks,sourceExcluded,periodRuns,keptSnapshots]=await Promise.all([
+ const [roster,links,identity,source,raw,timekeeping,assignments,patterns,patternDays,leaves,leaveDays,treatments,excluded,manualLinks,sourceExcluded,periodRuns,keptSnapshots,attendanceInputs]=await Promise.all([
   database.select({person:employees,info:employeesGeneralInfo}).from(employees).leftJoin(employeesGeneralInfo,eq(employeesGeneralInfo.employeeId,employees.id)).where(and(isNull(employees.deletedAt),eq(employees.employeeType,"EMP"),employeeId?eq(employees.id,employeeId):undefined)),
   database.select().from(mappings),database.select().from(identities),incoming?Promise.resolve(incoming):database.select({payload:events.payload}).from(projections).innerJoin(events,eq(events.eventId,projections.eventId)).where(eq(projections.payrollPeriodId,periodId)).then(r=>r.map(x=>x.payload as SourcePunch)),
   database.select({log:attendanceRawLogs,format:attendanceImportBatches.sourceFormat}).from(attendanceRawLogs).innerJoin(attendanceImportBatches,eq(attendanceImportBatches.id,attendanceRawLogs.batchId)).where(eq(attendanceImportBatches.payrollPeriodId,periodId)),
@@ -35,8 +37,9 @@ export async function workEmployees(periodId:string,database:DbClient=db,incomin
   database.select().from(employeesLeaveRecords).where(and(eq(employeesLeaveRecords.leaveStatus,"Approved"),isNull(employeesLeaveRecords.deletedAt))),database.select().from(employeeLeaveRecordDays),database.select().from(workTreatments).where(and(eq(workTreatments.periodId,periodId),eq(workTreatments.active,true))),database.select().from(workExclusions).where(eq(workExclusions.active,true)),database.select().from(workRawLogs),database.select().from(workSourceExclusions).where(and(eq(workSourceExclusions.periodId,periodId),eq(workSourceExclusions.active,true))),
   database.select().from(payrollRuns).where(eq(payrollRuns.payrollPeriodId,periodId)).orderBy(desc(payrollRuns.createdAt)),
   database.select().from(workHistory).where(and(eq(workHistory.action,"Kept payroll attendance"),sql`${workHistory.details}->>'periodId'=${periodId}`)),
+  loadEffectiveAttendanceInputSet(database,{payrollPeriodId:periodId,employeeIds:employeeId?[employeeId]:undefined,startDate:period.startDate,endDate:period.endDate,neighborDays:"all"}),
  ]);
- const frozenRun=periodRuns.find(r=>r.status!=="Void"&&r.inputSnapshot?.payrollGroup!=="Monthly");
+ const frozenRun=periodRuns.find(r=>freezesAttendanceInput(r.status,r.inputSnapshot?.payrollGroup));
  return roster.filter(({info})=>!info?.dateHired||info.dateHired<=period.endDate).filter(({info})=>!info?.separationDate||info.separationDate>=period.startDate).filter(({info})=>!info||!["Resigned","Terminated","Finished Conctract"].includes(info.employmentStatus??"")||!!info.separationDate).map(({person,info})=>{
   const employeeLinks=links.filter(m=>m.employeeId===person.id&&!identity.some(i=>i.sourceEmployeeId===m.sourceEmployeeId&&i.classification==="TestOnly")),sourceIds=employeeLinks.map(m=>m.sourceEmployeeId);
   let records:WorkRecord[]=source.filter(p=>sourceIds.includes(p.employeeId)).map(p=>({id:p.eventId,source:"API",employeeId:person.id,type:p.type,at:p.capturedAt,status:p.status,clockFlag:p.clockFlag,clockVerified:p.clockVerified,originalType:p.originalType??p.type,originalAt:p.originalCapturedAt??p.capturedAt,sourceEmployeeId:p.employeeId,sourcePunch:p,excluded:sourceExcluded.some(x=>x.eventId===p.eventId&&x.version===resolutionDigest(p))}));
@@ -66,14 +69,14 @@ export async function workEmployees(periodId:string,database:DbClient=db,incomin
    const schedule=resolved.configured?resolved.shiftWindow:null;
    const dayLeaves=leaves.filter(l=>l.employeeId===person.id&&l.leaveStartDate&&l.leaveStartDate<=day&&l.leaveEndDate&&l.leaveEndDate>=day);
    const leave=dayLeaves.reduce((n,l)=>{const detail=leaveDays.find(d=>d.leaveRecordId===l.id&&d.leaveDate===day);return n+(detail?Number(detail.quantity):0)*(schedule?.hoursPerDay??0)*60;},0);
-   const own=workDayRecords(records,day,schedule),context=own;
+   const own=workDayRecords(records,day,schedule),context=own,attendance=attendanceInputForDay(attendanceInputs,person.id,day);
    const configuration={schedule,source:resolved.source,assignment:scheduleVersionRecord(resolved.overrideAssignment),pattern:scheduleVersionRecord(resolved.weeklyPatternDay),employment:info?{hired:info.dateHired,separated:info.separationDate,status:info.employmentStatus}:null};
    const leaveEvidence=dayLeaves.map(l=>({record:l,detail:leaveDays.filter(d=>d.leaveRecordId===l.id&&d.leaveDate===day)}));
-   const version=resolutionDigest([configuration,leaveEvidence,employeeLinks,identity.filter(i=>sourceIds.includes(i.sourceEmployeeId)),context]);
+   const version=resolutionDigest([configuration,leaveEvidence,employeeLinks,identity.filter(i=>sourceIds.includes(i.sourceEmployeeId)),context,attendance]);
    const treatment=treatments.find(t=>t.employeeId===person.id&&t.day===day&&(adminDecision(t.payload)||t.version===version));
    const status=dayStatus({day,schedule,rest:isResolvedScheduleRestDay(resolved),leave,records:own,now});
    const issues=status==="Future"||status==="In progress / awaiting upload"||status==="Rest day"||status==="Approved leave"?[]:sequenceProblems(own,schedule).errors;
-   for(const record of own.filter(r=>r.source==="API"&&!r.excluded&&r.status==="VALID"&&!r.sourcePunch?.reviewResolved))if(record.sourcePunch?.reviewFlags.length)issues.push("Review source warnings: "+record.sourcePunch.reviewFlags.join(", "));
+   issues.push(...attendance.issues);
    if(status==="Schedule missing"&&own.some(r=>r.status==="VALID"&&!r.excluded))issues.push("Schedule missing; uncalculable time contributes no attendance-based work");
    if(!sourceIds.length&&own.some(r=>r.source==="API"))issues.push("Verify an attendance employee mapping");
    if(own.some(r=>r.source==="API"&&r.status==="VALID"&&!r.excluded)&&own.some(r=>r.source==="File"&&r.status==="VALID"&&!r.excluded))issues.push("Choose between overlapping API and file punches");
@@ -86,7 +89,7 @@ export async function workEmployees(periodId:string,database:DbClient=db,incomin
    const lateConflict=decision?incomingDigest!==decision.keptIncomingDigest&&incomingDigest!==resolutionDigest(attendanceEvidence(decision.sourceRecords))&&incomingDigest!==resolutionDigest(attendanceEvidence(decision.records)):!!frozenRun&&!keptSnapshot&&incomingDigest!==resolutionDigest(attendanceEvidence(own));
    if(lateConflict)issues.push(decision?"Late upload differs — approved attendance retained":"Incoming attendance differs — payroll input retained");
    const decisionView:WorkDay["decision"]=decision?{planId:treatment!.planId,revision:treatment!.version,approvedAt:decision.approvedAt,reason:decision.reason,lateConflict,incomingDigest,incomingRecords:incomingForDecision}:frozenRun?{payrollRunId:frozenRun.id,approvedAt:(frozenRun.computedAt??frozenRun.createdAt).toISOString(),reason:"Attendance input retained from the payroll computation",lateConflict,incomingDigest,incomingRecords:incomingForDecision}:undefined;
-   days.push({day,schedule,rest:isResolvedScheduleRestDay(resolved),leave,leaveEvidence,configuration,records:own,status:!["Future","In progress / awaiting upload","Rest day","Approved leave"].includes(status)&&!own.some(r=>r.status==="VALID"&&!r.excluded)&&!leave?"No work recorded":status,issues:[...new Set(issues)],findings:[...new Set(issues)].map(message=>({code:message.startsWith("Late upload")||message.startsWith("Incoming attendance")?"LATE_CONFLICT":"ATTENDANCE_WARNING",severity:"warning" as const,employeeId:person.id,day,message})),suggestions:treatment||!own.length?[]:suggestionsForDay(day,own,schedule),version,resolved:!!treatment,...(decisionView?{decision:decisionView}:{})});
+   days.push({attendance,day,schedule,rest:isResolvedScheduleRestDay(resolved),leave,leaveEvidence,configuration,records:own,status:!["Future","In progress / awaiting upload","Rest day","Approved leave"].includes(status)&&!own.some(r=>r.status==="VALID"&&!r.excluded)&&!leave?"No work recorded":status,issues:[...new Set(issues)],findings:[...new Set(issues)].map(message=>({code:message.startsWith("Late upload")||message.startsWith("Incoming attendance")?"LATE_CONFLICT":"ATTENDANCE_WARNING",severity:"warning" as const,employeeId:person.id,day,message})),suggestions:treatment||!own.length?[]:suggestionsForDay(day,own,schedule),version,resolved:!!treatment,...(decisionView?{decision:decisionView}:{})});
   }
   return {id:person.id,no:person.employeeNo,name:[person.firstName,person.middleName,person.lastName].filter(Boolean).join(" "),sourceIds,mappingEvidence:employeeLinks,hired:info?.dateHired??null,separated:info?.separationDate??null,days,contextRecords:records};
  }).sort((a,b)=>a.no.localeCompare(b.no));
@@ -105,7 +108,7 @@ export function previewWork(employee:WorkEmployee,draft:WorkDraft,sharedRecords?
  for(const day of draft.days) {
   const original=employee.days.find(d=>d.day===day);if(!original){errors.push("Workday is outside employee eligibility");continue;}
   const list=workDayRecords(simulated.records,day,original.schedule),check=sequenceProblems(list,original.schedule);
-  if(draft.changes.some(c=>c.day===day&&c.kind==="ConfirmSequence")&&!list.some(r=>r.status==="VALID"&&!r.excluded))errors.push("There is no sequence to confirm. Add verified times or explicitly confirm no attendance.");
+  if(draft.changes.some(c=>c.day===day&&c.kind==="ConfirmSequence")){if(!list.some(r=>r.status==="VALID"&&!r.excluded))errors.push("There is no sequence to confirm. Add verified times or explicitly confirm no attendance.");if(list.some(r=>r.status==="VALID"&&!r.excluded&&r.clockFlag&&!r.clockVerified))errors.push("Verify the actual capture time before confirming this device-clock warning.");if(list.some(r=>r.sourcePunch&&!r.sourcePunch.reviewResolved&&r.sourcePunch.reviewFlags.some(flag=>!["CONSECUTIVE_IN","CONSECUTIVE_OUT","NO_EARLIER_IN","NO_FOLLOWING_OUT","CLOSE_PUNCHES_ACROSS_PHONES"].includes(flag))))errors.push("Investigate the additional source or identity warning before confirming this sequence.");}
   if(draft.changes.some(c=>c.day===day&&["Manual","ConfirmSequence","NoAttendance"].includes(c.kind))) {
    if(!original.schedule?.checkInTime||!original.schedule.checkOutTime)warnings.push(`${day}: schedule missing; approval records attendance facts. Uncalculable time contributes no attendance-based work.`);
    if(draft.changes.some(c=>c.day===day&&c.kind==="NoAttendance")&&list.some(r=>r.status==="VALID"&&!r.excluded))errors.push("No-attendance confirmation requires no effective punches");

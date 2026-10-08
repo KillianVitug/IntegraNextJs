@@ -2877,7 +2877,8 @@ async function getUnresolvedHeldDtrRowsForPeriod(period: {
             lte(attendanceDailySummaries.attendanceDate, period.endDate),
             or(
               sql`${attendanceDailySummaries.anomalyFlags} like '%ODD_PUNCH_COUNT%'`,
-              sql`${attendanceDailySummaries.anomalyFlags} like '%MISSING_OUT%'`
+              sql`${attendanceDailySummaries.anomalyFlags} like '%MISSING_OUT%'`,
+              sql`${attendanceDailySummaries.anomalyFlags} like '%MISSING_IN%'`
             )
           )
         ),
@@ -2907,7 +2908,7 @@ async function getUnresolvedHeldDtrRowsForPeriod(period: {
   for (const row of flaggedSummaryRows) {
     const flags = normalizeAttendanceDtrAnomalyFlags(row.anomalyFlags ?? null);
     const requiresHold =
-      flags.includes("ODD_PUNCH_COUNT") || flags.includes("MISSING_OUT");
+      flags.includes("ODD_PUNCH_COUNT") || flags.includes("MISSING_OUT") || flags.includes("MISSING_IN");
 
     if (requiresHold && !flags.includes("DOUBLE_PUNCH")) {
       heldKeys.add(`${row.employeeId}|${row.attendanceDate}`);

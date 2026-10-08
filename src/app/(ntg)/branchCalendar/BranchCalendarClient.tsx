@@ -35,7 +35,6 @@ import {
   clearBranchCalendarAccountCodeOverrideAction,
   revertBranchCalendarScheduleOverrideAction,
   revertBranchCalendarScheduleOverridesAction,
-  saveBranchCalendarScheduleOverrideAction,
   saveBranchCalendarHolidayCheckDatesAction,
   saveBranchCalendarAccountCodeOverrideAction,
 } from "./actions";
@@ -46,7 +45,6 @@ type BranchCalendarMonth = Awaited<
 type CalendarDay = BranchCalendarMonth["days"][number];
 type CalendarEmployee = CalendarDay["employees"][number];
 type CalendarHoliday = CalendarDay["holidays"][number];
-type ShiftTableOption = BranchCalendarMonth["shiftTableOptions"][number];
 
 type Props = {
   data: BranchCalendarMonth;
@@ -106,7 +104,7 @@ function formatScheduleLabel(employee: CalendarEmployee) {
   }
   if (employee.shiftCode) return employee.shiftCode;
   if (employee.shiftName) return employee.shiftName;
-  if (employee.source === "LEGACY") return "Employee default schedule";
+  if (employee.source === "LEGACY") return "Employee fallback schedule";
   return "Scheduled";
 }
 
@@ -116,7 +114,7 @@ function sourceLabel(employee: CalendarEmployee) {
   const source = employee.source;
   if (source === "OVERRIDE") return "Approved Override";
   if (source === "WEEKLY_PATTERN") return "Weekly Schedule";
-  return "Employee default";
+  return "Employee fallback";
 }
 
 function sourceClassName(source: CalendarEmployee["source"]) {
@@ -189,10 +187,6 @@ function formatAccountOptionLabel(
     option.accountType,
     option.description,
   ].filter(Boolean).join(" | ");
-}
-
-function formatShiftTableOptionLabel(option: ShiftTableOption) {
-  return `${option.code} | ${option.description}`;
 }
 
 function HolidayCheckDateEditor({
@@ -311,8 +305,6 @@ function HolidayCheckDateEditor({
 export function BranchCalendarClient({ data, initialSelectedDate }: Props) {
   const router = useRouter();
   const [isSavingAccountCodes, startAccountCodeTransition] = useTransition();
-  const [isSavingScheduleOverride, startScheduleOverrideTransition] =
-    useTransition();
   const [isRevertingScheduleOverride, startRevertScheduleOverrideTransition] =
     useTransition();
   const [
@@ -336,12 +328,6 @@ export function BranchCalendarClient({ data, initialSelectedDate }: Props) {
     : "All Departments";
 
   const [employeeQuery, setEmployeeQuery] = useState("");
-  const [selectedScheduleEmployeeIds, setSelectedScheduleEmployeeIds] =
-    useState<string[]>([]);
-  const [scheduleMode, setScheduleMode] = useState<
-    "WORKING_SHIFT" | "REST_DAY"
-  >("WORKING_SHIFT");
-  const [scheduleShiftTableId, setScheduleShiftTableId] = useState("");
   const [
     revertingScheduleOverrideItemId,
     setRevertingScheduleOverrideItemId,
@@ -349,7 +335,6 @@ export function BranchCalendarClient({ data, initialSelectedDate }: Props) {
 
   useEffect(() => {
     setEmployeeQuery("");
-    setSelectedScheduleEmployeeIds([]);
   }, [selectedDate]);
 
   const effectiveAccountCodeOverride =
@@ -446,18 +431,6 @@ export function BranchCalendarClient({ data, initialSelectedDate }: Props) {
         return haystack.includes(normalizedEmployeeQuery);
       })
     : [];
-  const selectedScheduleEmployeeIdSet = new Set(selectedScheduleEmployeeIds);
-  const allVisibleEmployeesSelected =
-    filteredEmployees.length > 0 &&
-    filteredEmployees.every((employee) =>
-      selectedScheduleEmployeeIdSet.has(employee.employeeId),
-    );
-  const selectedScheduleShiftTable =
-    scheduleShiftTableId && Number(scheduleShiftTableId) > 0
-      ? data.shiftTableOptions.find(
-          (shiftTable) => shiftTable.id === Number(scheduleShiftTableId),
-        ) ?? null
-      : null;
   const revertableDayScheduleOverrideItemIds = selectedDay
     ? selectedDay.employees
         .map((employee) => employee.revertScheduleOverrideItemId)
@@ -465,69 +438,6 @@ export function BranchCalendarClient({ data, initialSelectedDate }: Props) {
     : [];
   const revertableDayScheduleOverrideCount =
     revertableDayScheduleOverrideItemIds.length;
-
-  function toggleScheduleEmployee(employeeId: string, checked: boolean) {
-    setSelectedScheduleEmployeeIds((current) => {
-      if (checked) {
-        return current.includes(employeeId) ? current : [...current, employeeId];
-      }
-
-      return current.filter((id) => id !== employeeId);
-    });
-  }
-
-  function toggleVisibleScheduleEmployees(checked: boolean) {
-    const visibleIds = filteredEmployees.map((employee) => employee.employeeId);
-
-    setSelectedScheduleEmployeeIds((current) => {
-      if (!checked) {
-        const visibleIdSet = new Set(visibleIds);
-        return current.filter((id) => !visibleIdSet.has(id));
-      }
-
-      return [...new Set([...current, ...visibleIds])];
-    });
-  }
-
-  function handleSaveScheduleOverride() {
-    if (!selectedDay) return;
-    if (selectedScheduleEmployeeIds.length === 0) {
-      toast.error("Select at least one employee.");
-      return;
-    }
-
-    const shiftTableId = Number(scheduleShiftTableId);
-    if (
-      scheduleMode === "WORKING_SHIFT" &&
-      (!Number.isInteger(shiftTableId) || shiftTableId <= 0)
-    ) {
-      toast.error("Select a shift table.");
-      return;
-    }
-
-    startScheduleOverrideTransition(async () => {
-      try {
-        const result = await saveBranchCalendarScheduleOverrideAction({
-          attendanceDate: selectedDay.date,
-          employeeIds: selectedScheduleEmployeeIds,
-          mode: scheduleMode,
-          shiftTableId: scheduleMode === "WORKING_SHIFT" ? shiftTableId : null,
-          shiftSchedule: null,
-          graceMinutes: 0,
-          isFlexible: false,
-        });
-        toast.success(result.message);
-        setSelectedScheduleEmployeeIds([]);
-        router.refresh();
-      } catch (error) {
-        toast.error(
-          error instanceof Error
-            ? error.message
-            : "Unable to save schedule override.",
-        );
-      }
-    });
-  }
 
   function handleRevertScheduleOverride(employee: CalendarEmployee) {
     if (!selectedDay || !employee.revertScheduleOverrideItemId) return;
@@ -925,197 +835,10 @@ export function BranchCalendarClient({ data, initialSelectedDate }: Props) {
               </div>
 
               <div className="space-y-3 rounded-md border p-3">
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div>
-                    <div className="flex items-center gap-2 text-sm font-semibold">
-                      <CalendarPlus className="h-4 w-4" />
-                      Schedule Override
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      Applies to {selectedDay.date} only.
-                    </div>
-                  </div>
-                  <span className="rounded-full border bg-muted px-2.5 py-1 text-xs font-medium">
-                    {selectedScheduleEmployeeIds.length} selected
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted p-1 text-sm">
-                  <button
-                    type="button"
-                    className={cn(
-                      "rounded-sm px-2 py-1.5 font-medium transition",
-                      scheduleMode === "WORKING_SHIFT"
-                        ? "bg-background shadow-sm"
-                        : "text-muted-foreground hover:bg-background/60",
-                    )}
-                    onClick={() => setScheduleMode("WORKING_SHIFT")}
-                    disabled={isSavingScheduleOverride}
-                  >
-                    Working shift
-                  </button>
-                  <button
-                    type="button"
-                    className={cn(
-                      "rounded-sm px-2 py-1.5 font-medium transition",
-                      scheduleMode === "REST_DAY"
-                        ? "bg-background shadow-sm"
-                        : "text-muted-foreground hover:bg-background/60",
-                    )}
-                    onClick={() => setScheduleMode("REST_DAY")}
-                    disabled={isSavingScheduleOverride}
-                  >
-                    Rest / Off day
-                  </button>
-                </div>
-
-                {scheduleMode === "WORKING_SHIFT" ? (
-                  <div>
-                    <label className="space-y-1 text-xs font-medium">
-                      <span>Shift Table</span>
-                      <select
-                        className="h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm outline-none transition focus-visible:ring-1 focus-visible:ring-ring"
-                        value={scheduleShiftTableId}
-                        onChange={(event) =>
-                          setScheduleShiftTableId(event.currentTarget.value)
-                        }
-                        disabled={isSavingScheduleOverride}
-                      >
-                        <option value="">Select shift table</option>
-                        {data.shiftTableOptions.map((option) => (
-                          <option key={option.id} value={option.id}>
-                            {formatShiftTableOptionLabel(option)}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-                ) : (
-                  <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
-                    Selected employees will be marked as rest/off for this date.
-                  </div>
-                )}
-
-                {selectedScheduleShiftTable && scheduleMode === "WORKING_SHIFT" ? (
-                  <div className="grid gap-2 rounded-md bg-muted px-3 py-2 text-xs sm:grid-cols-3">
-                    <div>
-                      <div className="text-muted-foreground">Hours</div>
-                      <div className="font-medium">
-                        {selectedScheduleShiftTable.regularStartTime} -{" "}
-                        {selectedScheduleShiftTable.regularEndTime}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-muted-foreground">Break</div>
-                      <div className="font-medium">
-                        {selectedScheduleShiftTable.deductibleBreakMinutes} mins
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-muted-foreground">Day Hours</div>
-                      <div className="font-medium">
-                        {selectedScheduleShiftTable.hoursPerDay.toFixed(2)}
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2 text-sm">
-                    <label className="flex items-center gap-2 font-medium">
-                      <input
-                        type="checkbox"
-                        checked={allVisibleEmployeesSelected}
-                        onChange={(event) =>
-                          toggleVisibleScheduleEmployees(event.currentTarget.checked)
-                        }
-                        disabled={
-                          isSavingScheduleOverride ||
-                          filteredEmployees.length === 0
-                        }
-                      />
-                      Select all visible
-                    </label>
-                    <span className="text-xs text-muted-foreground">
-                      {filteredEmployees.length} visible
-                    </span>
-                  </div>
-
-                  <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border p-2">
-                    {filteredEmployees.map((employee) => (
-                      <label
-                        key={employee.employeeId}
-                        className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted"
-                      >
-                        <input
-                          type="checkbox"
-                          className="mt-1"
-                          checked={selectedScheduleEmployeeIdSet.has(
-                            employee.employeeId,
-                          )}
-                          onChange={(event) =>
-                            toggleScheduleEmployee(
-                              employee.employeeId,
-                              event.currentTarget.checked,
-                            )
-                          }
-                          disabled={isSavingScheduleOverride}
-                        />
-                        <span>
-                          <span className="block font-medium">
-                            {formatEmployeeName(employee)}
-                          </span>
-                          <span className="block text-xs text-muted-foreground">
-                            {formatEmployeeNoDisplay(employee.employeeNo)} |{" "}
-                            {employee.departmentCode ?? "-"}{" "}
-                            {employee.departmentName ?? "No department"}
-                          </span>
-                        </span>
-                      </label>
-                    ))}
-
-                    {filteredEmployees.length === 0 ? (
-                      <div className="px-2 py-4 text-center text-sm text-muted-foreground">
-                        No employees match your search.
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={handleSaveScheduleOverride}
-                    disabled={
-                      isSavingScheduleOverride ||
-                      isRevertingDayScheduleOverrides ||
-                      !selectedDay ||
-                      selectedScheduleEmployeeIds.length === 0 ||
-                      (scheduleMode === "WORKING_SHIFT" &&
-                        data.shiftTableOptions.length === 0)
-                    }
-                  >
-                    <Save className="mr-2 h-4 w-4" />
-                    {isSavingScheduleOverride ? "Saving..." : "Save Override"}
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={handleRevertDayScheduleOverrides}
-                    disabled={
-                      isRevertingDayScheduleOverrides ||
-                      isSavingScheduleOverride ||
-                      revertableDayScheduleOverrideCount === 0
-                    }
-                  >
-                    <RotateCcw className="mr-2 h-4 w-4" />
-                    {isRevertingDayScheduleOverrides
-                      ? "Reverting..."
-                      : `Revert All (${revertableDayScheduleOverrideCount})`}
-                  </Button>
-                </div>
+                <div className="flex items-center gap-2 text-sm font-semibold"><CalendarPlus className="h-4 w-4"/>Schedule changes</div>
+                <p className="text-sm text-muted-foreground">Edit weekly defaults and dated schedules in Schedules. This calendar keeps leave, holiday and day account-code controls.</p>
+                <Link className="inline-flex min-h-11 items-center rounded border px-3 text-sm font-semibold" href={`/schedules?view=period&day=${selectedDay.date}${data.selectedDepartmentId ? `&departmentId=${data.selectedDepartmentId}` : ""}`}>Change this date’s schedule</Link>
+                {revertableDayScheduleOverrideCount > 0 && <details><summary className="min-h-10 cursor-pointer py-2 text-sm">Earlier calendar overrides · {revertableDayScheduleOverrideCount}</summary><p className="my-2 text-xs text-muted-foreground">These existing overrides retain their history. Confirmed period schedules remain protected.</p><Button type="button" size="sm" variant="outline" onClick={handleRevertDayScheduleOverrides} disabled={isRevertingDayScheduleOverrides}><RotateCcw className="mr-2 h-4 w-4"/>{isRevertingDayScheduleOverrides ? "Reverting…" : "Revert earlier calendar overrides"}</Button></details>}
               </div>
               </div>
             ) : (

@@ -75,6 +75,7 @@ function formatMoney(value: string | number | null | undefined) {
 function formatDateTime(value: string | null) {
   if (!value) return "-";
   return new Intl.DateTimeFormat("en-PH", {
+    timeZone: "Asia/Manila",
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
@@ -187,8 +188,9 @@ export function PayrollOutputsPageClient({ selectedPeriod, selectedRun }: Props)
   return (
     <div className="min-w-0 w-full space-y-6 [&>*]:min-w-0">
       <PayrollPageNav
+        context={{periodId:selectedPeriod?.id,year:selectedPeriod?.startDate.slice(0,4),runId:selectedRun?.id,group:selectedRun?.payrollGroup??undefined}}
         activeSection="outputs"
-        title="Payroll Outputs"
+        title="Reports & payslips"
         description="Generate payslips, disbursement batches, accounting journals, statutory filing packages, and review output history."
         periodCode={selectedPeriod?.code}
         runLabel={selectedRun ? `#${selectedRun.runNumber} (${selectedRun.status})` : null}

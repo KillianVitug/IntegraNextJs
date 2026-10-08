@@ -1,4 +1,5 @@
 import { runPayrollGroup, type PayrollGroup } from "./payrollGroupModel";
+import { selectWorkspaceRun } from "./navigation";
 import { db } from "@/db";
 import {
   attendanceImportBatches,
@@ -258,6 +259,8 @@ export async function loadPayrollAccountCodeEmployees(): Promise<
 }
 
 export async function loadPayrollWorkspaceSnapshot(args: {
+  includeRunDetails?: boolean;
+  includeAttendanceBatches?: boolean;
   payrollGroup?: PayrollGroup;
   runId?:string;
   year: number;
@@ -280,7 +283,7 @@ export async function loadPayrollWorkspaceSnapshot(args: {
           .where(inArray(payrollRuns.payrollPeriodId, periodIds))
           .orderBy(desc(payrollRuns.createdAt))
       : Promise.resolve([]),
-    periodIds.length > 0
+    periodIds.length > 0 && args.includeAttendanceBatches !== false
       ? db
           .select()
           .from(attendanceImportBatches)
@@ -344,12 +347,12 @@ export async function loadPayrollWorkspaceSnapshot(args: {
   const selectedPeriod =
     periods.find((period) => period.id === selectedPeriodId) ?? null;
   const latestSelectedRun = selectedPeriod
-    ? runRows.find(r=>r.id===args.runId&&r.payrollPeriodId===selectedPeriod.id)??latestRunByPeriod.get(selectedPeriod.id) ?? null
+    ? selectWorkspaceRun(runRows, selectedPeriod.id, args.payrollGroup ?? "Daily", args.runId)
     : null;
 
   const [selectedRunRecord, selectedPeriodBatchRows] = await Promise.all([
-    latestSelectedRun ? getPayrollRun(latestSelectedRun.id) : Promise.resolve(null),
-    selectedPeriod
+    latestSelectedRun && args.includeRunDetails !== false ? getPayrollRun(latestSelectedRun.id) : Promise.resolve(null),
+    selectedPeriod && args.includeAttendanceBatches !== false
       ? db
           .select()
           .from(attendanceImportBatches)

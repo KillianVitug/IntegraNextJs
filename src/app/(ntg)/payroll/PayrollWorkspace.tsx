@@ -153,11 +153,11 @@ import {
   sortEmployeesByLastName,
 } from "@/utils/employeeDisplay";
 import {
-  PAYROLL_SECTION_PATHS,
   type PayrollSection,
 } from "./sections";
 
 type Props = {
+  embedded?: boolean;
   payrollGroup?: "Daily" | "Monthly";
   attendanceEnabled?: boolean;
   activeSection: PayrollSection;
@@ -476,11 +476,13 @@ const moneyFormatter = new Intl.NumberFormat("en-PH", {
 });
 
 const dateTimeFormatter = new Intl.DateTimeFormat("en-PH", {
+  timeZone: "Asia/Manila",
   dateStyle: "medium",
   timeStyle: "short",
 });
 
 const dayNameFormatter = new Intl.DateTimeFormat("en-PH", {
+  timeZone: "UTC",
   weekday: "short",
 });
 
@@ -2769,6 +2771,7 @@ function getWorkflowStepStatus(args: {
   attendanceReady: boolean;
 }): "done" | "pending" | "blocked" {
   const { step, selectedPeriod, selectedRun, readiness } = args;
+  if (selectedRun?.status === "Posted" && step !== "Outputs Published") return "done";
 
   if (step === "Period Setup") return selectedPeriod ? "done" : "pending";
   if (step === "DTR Ready") {
@@ -2981,6 +2984,7 @@ export function PayrollWorkspace({
   attendanceEnabled = false,
   payrollGroup = "Daily",
   activeSection,
+  embedded = false,
   initialYear,
   periods: initialPeriods,
   selectedPeriodId: initialSelectedPeriodId,
@@ -3019,7 +3023,7 @@ export function PayrollWorkspace({
   useEffect(()=>{if(payrollActionError){payrollErrorRef.current?.focus();payrollErrorRef.current?.scrollIntoView({block:"center"});}},[payrollActionError]);
   const [attendanceCheckError, setAttendanceCheckError] = useState<string | null>(null);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string | null>(
-    initialSelectedRun?.employees[0]?.employeeId ?? null
+    searchParams.get("employeeId") ?? initialSelectedRun?.employees[0]?.employeeId ?? null
   );
   const [selectedAttendanceFiles, setSelectedAttendanceFiles] = useState<File[]>([]);
   const [attendanceImportResult, setAttendanceImportResult] =
@@ -3092,7 +3096,7 @@ export function PayrollWorkspace({
   const [selectedManualPayrollEmployeeId, setSelectedManualPayrollEmployeeId] =
     useState<string | null>(
       () =>
-        sortEmployeesByLastName(payrollAccountCodeEmployees)[0]?.employeeId ??
+        searchParams.get("employeeId") ?? sortEmployeesByLastName(payrollAccountCodeEmployees)[0]?.employeeId ??
         null
     );
   const [manualPayrollDepartmentFilter, setManualPayrollDepartmentFilter] =
@@ -3153,6 +3157,8 @@ export function PayrollWorkspace({
     setExpandedAttendanceHoldEmployeeIds,
   ] = useState<Set<string>>(new Set());
   const [attendanceHoldSearch, setAttendanceHoldSearch] = useState("");
+  const attendanceHoldEmployeeId = activeTab === "attendanceHold" ? searchParams.get("employeeId") : null;
+  const attendanceHoldDay = activeTab === "attendanceHold" ? searchParams.get("day") : null;
   const [attendanceHoldDepartmentFilter, setAttendanceHoldDepartmentFilter] =
     useState<DepartmentFilterValue>(ALL_DEPARTMENTS_VALUE);
   const [attendanceHoldApprovalDrafts, setAttendanceHoldApprovalDrafts] =
@@ -3238,10 +3244,17 @@ export function PayrollWorkspace({
     currentAttendanceDtrHeldRowsState.data?.rows.filter(
       (row) => row.approvalStatus !== "Approved"
     ).length ?? 0;
+  const scopedAttendanceHoldRows = useMemo(
+    () => (currentAttendanceDtrHeldRowsState.data?.rows ?? []).filter(
+      row => (!attendanceHoldEmployeeId || row.employeeId === attendanceHoldEmployeeId)
+        && (!attendanceHoldDay || row.attendanceDate === attendanceHoldDay)
+    ),
+    [attendanceHoldDay, attendanceHoldEmployeeId, currentAttendanceDtrHeldRowsState.data?.rows]
+  );
   const groupedAttendanceHoldEmployees = useMemo<AttendanceHoldEmployeeGroup[]>(() => {
     const groupsByEmployeeId = new Map<string, AttendanceHoldEmployeeGroup>();
 
-    for (const row of currentAttendanceDtrHeldRowsState.data?.rows ?? []) {
+    for (const row of scopedAttendanceHoldRows) {
       const displayMinutes = getAttendanceHoldRowDisplayMinutes(row);
       const existing = groupsByEmployeeId.get(row.employeeId);
       const group =
@@ -3317,7 +3330,7 @@ export function PayrollWorkspace({
         if (byName !== 0) return byName;
         return left.employeeNo.localeCompare(right.employeeNo);
       });
-  }, [currentAttendanceDtrHeldRowsState.data?.rows]);
+  }, [scopedAttendanceHoldRows]);
   const attendanceHoldDepartmentOptions = useMemo(
     () => buildDepartmentFilterOptions(groupedAttendanceHoldEmployees),
     [groupedAttendanceHoldEmployees]
@@ -4581,11 +4594,11 @@ export function PayrollWorkspace({
   }, [activeTab, attendanceDtrReloadKey, selectedPeriodKey]);
 
   useEffect(() => {
-    setExpandedAttendanceHoldEmployeeIds(new Set());
+    setExpandedAttendanceHoldEmployeeIds(new Set(attendanceHoldEmployeeId ? [attendanceHoldEmployeeId] : []));
     setAttendanceHoldSearch("");
     setAttendanceHoldDepartmentFilter(ALL_DEPARTMENTS_VALUE);
     setAttendanceHoldApprovalDrafts({});
-  }, [attendanceDtrReloadKey, selectedPeriodKey]);
+  }, [attendanceDtrReloadKey, selectedPeriodKey, attendanceHoldEmployeeId, attendanceHoldDay]);
 
   useEffect(() => {
     const filterStillExists = attendanceHoldDepartmentOptions.some(
@@ -5060,6 +5073,7 @@ export function PayrollWorkspace({
   ]);
 
   useEffect(() => {
+    if (activeTab !== "accountCodes") return;
     if (!selectedPeriodKey) {
       setPayrollAccountCodeImportBatchState({
         status: "idle",
@@ -5071,7 +5085,13 @@ export function PayrollWorkspace({
     }
 
     void refreshPayrollAccountCodeImportBatches(selectedPeriodKey);
-  }, [selectedPeriodKey]);
+  }, [selectedPeriodKey, activeTab]);
+
+  function rememberEmployee(employeeId: string) {
+    const query = new URLSearchParams(searchParams.toString());
+    query.set("employeeId", employeeId);
+    window.history.replaceState(null, "", `${pathname}?${query}`);
+  }
 
   function replaceQueryParams(updates: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams.toString());
@@ -5093,11 +5113,6 @@ export function PayrollWorkspace({
     });
   }
 
-  function getSectionHref(section: PayrollSection) {
-    const queryString = searchParams.toString();
-    const path = PAYROLL_SECTION_PATHS[section];
-    return queryString ? `${path}?${queryString}` : path;
-  }
 
   function invalidatePayrollResourceCache(prefixes: string[]) {
     deleteCacheKeys(payrollReadinessCacheRef, prefixes);
@@ -6856,6 +6871,7 @@ export function PayrollWorkspace({
     replaceQueryParams({
       year: String(parsedYear),
       periodId: null,
+      runId: null,
     });
   }
 
@@ -7832,16 +7848,13 @@ export function PayrollWorkspace({
 
   return (
     <div className="min-w-0 space-y-6 [&_.grid>*]:min-w-0">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="space-y-2">
-          <h1 className="text-2xl font-bold">Payroll Workspace</h1>
+      {!embedded && <div className="flex flex-wrap items-start justify-between gap-4"><div className="space-y-2"><h1 className="text-2xl font-bold">{activeSection === "run" ? "Review & finalize payroll" : activeSection === "settings" ? "Payroll setup" : activeSection === "attendance" ? "Attendance details" : activeSection === "attendanceHold" ? "Held-time decisions" : activeSection === "manual" ? "Replace employee payroll" : "Add earnings or deductions"}</h1>
           <p className="max-w-3xl text-sm text-muted-foreground">
-            Compute the selected payroll group, review each employee’s earnings
-            and deductions, then approve and post when ready.
+            {activeSection === "run" ? "Review the selected payroll group, then approve and post when ready." : activeSection === "settings" ? "Manage payroll years and periods. Setup does not compute or post payroll." : "Changes are saved for the selected employee and period. Review updated estimates before finalizing payroll."}
           </p>
         </div>
 
-        <Card className="w-full max-w-md">
+        {activeSection === "settings" && <Card className="w-full max-w-md">
           <CardHeader className="pb-3">
             <CardTitle>Year Setup</CardTitle>
             <CardDescription>
@@ -7875,15 +7888,12 @@ export function PayrollWorkspace({
               {actionState === "seed-periods" ? "Seeding..." : "Seed Periods"}
             </Button>
           </CardContent>
-        </Card>
-      </div>
-
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle>Workflow</CardTitle>
+        </Card>}
+      </div>}
+      {!embedded && activeSection !== "settings" && <div className="flex flex-wrap items-end gap-3 rounded-md border p-3"><label className="text-sm">Year<Input className="mt-1 w-28" type="number" value={yearInput} onChange={event => setYearInput(event.target.value)} /></label><Button variant="outline" onClick={handleOpenYear} disabled={isNavigating}>Open year</Button><label className="min-w-0 flex-1 text-sm">Payroll period<select className="mt-1 block min-h-11 w-full rounded-md border bg-background p-2" value={selectedPeriodKey ?? ""} onChange={event => replaceQueryParams({ periodId: event.target.value, runId: null })}><option value="">Select period</option>{periods.map(period => <option key={period.id} value={period.id}>{period.code} · {period.startDate} – {period.endDate}</option>)}</select></label></div>}
+      {activeSection === "run" && <Card><CardHeader className="pb-3"><CardTitle>Run progress</CardTitle>
           <CardDescription>
-            The payroll lifecycle now follows stored transactions instead of
-            recalculating everything only in forms.
+            Completed steps reflect this run. Current attendance findings are reviewed separately.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 md:grid-cols-4 xl:grid-cols-8">
@@ -7903,10 +7913,10 @@ export function PayrollWorkspace({
             </div>
           ))}
         </CardContent>
-      </Card>
+      </Card>}
 
-      <div className="grid min-w-0 grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1.9fr)]">
-        <Card>
+      {(activeSection === "run" || activeSection === "settings") && <div className="grid min-w-0 grid-cols-1 gap-6">
+        {activeSection === "settings" && <Card>
           <CardHeader className="pb-3">
             <CardTitle>Payroll Periods</CardTitle>
             <CardDescription>
@@ -7928,7 +7938,6 @@ export function PayrollWorkspace({
                     <TableHead>Coverage</TableHead>
                     <TableHead>Pay Date</TableHead>
                     <TableHead>Run</TableHead>
-                    <TableHead>Imports</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -7980,13 +7989,12 @@ export function PayrollWorkspace({
                           </span>
                         )}
                       </TableCell>
-                      <TableCell>{period.attendanceBatchCount}</TableCell>
                     </TableRow>
                   ))}
                   {periods.length === 0 && (
                     <TableRow>
                       <TableCell
-                        colSpan={5}
+                        colSpan={4}
                         className="py-10 text-center text-muted-foreground"
                       >
                         No payroll periods yet for {initialYear}. Seed the year to
@@ -8008,9 +8016,9 @@ export function PayrollWorkspace({
               </Table>
             </div>
           </CardContent>
-        </Card>
+        </Card>}
 
-        <Card>
+        {activeSection === "run" && <Card>
           <CardHeader className="pb-3">
             <CardTitle>Selected Payroll Period</CardTitle>
             <CardDescription>
@@ -8307,39 +8315,14 @@ export function PayrollWorkspace({
               </div>
             )}
           </CardContent>
-        </Card>
-      </div>
+        </Card>}
+      </div>}
 
       <Tabs
         value={activeTab}
         className="space-y-4"
       >
-        <TabsList className="h-auto max-w-full flex-wrap justify-start gap-1">
-          <TabsTrigger value="run" asChild>
-            <Link href={getSectionHref("run")}>Payroll Run</Link>
-          </TabsTrigger>
-          <TabsTrigger value="manual" asChild>
-            <Link href={getSectionHref("manual")}>Manual Payroll</Link>
-          </TabsTrigger>
-          <TabsTrigger value="attendance" asChild>
-            <Link href={getSectionHref("attendance")}>Attendance Imports</Link>
-          </TabsTrigger>
-          <TabsTrigger value="attendanceHold" className="gap-1.5" asChild>
-            <Link href={getSectionHref("attendanceHold")}>
-              Attendance Hold
-              {attendanceHoldUnapprovedRowCount > 0 ? (
-                <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold text-white">
-                  {attendanceHoldUnapprovedRowCount}
-                </span>
-              ) : null}
-            </Link>
-          </TabsTrigger>
-          <TabsTrigger value="accountCodes" asChild>
-            <Link href={getSectionHref("accountCodes")}>
-              Payroll Account Code
-            </Link>
-          </TabsTrigger>
-        </TabsList>
+
 
         <TabsContent value="run" className="space-y-6">
           <div className="grid gap-4 md:grid-cols-5">
@@ -8736,7 +8719,7 @@ export function PayrollWorkspace({
                         </label>
                         <PayrollAccountCodeEmployeePicker
                           value={selectedManualPayrollEmployee?.employeeId ?? ""}
-                          onChange={setSelectedManualPayrollEmployeeId}
+                          onChange={employeeId => { setSelectedManualPayrollEmployeeId(employeeId); rememberEmployee(employeeId); }}
                           employees={filteredManualPayrollEmployees}
                           disabled={
                             filteredManualPayrollEmployees.length === 0 ||
@@ -9049,12 +9032,33 @@ export function PayrollWorkspace({
                 automatically held when biometric flags{" "}
                 <span className="font-medium">ODD_PUNCH_COUNT</span> or{" "}
                 <span className="font-medium">MISSING_OUT</span> are detected.
-                Rows can also be manually held from the Attendance Imports tab.
+                Rows can also be manually held from Attendance details.
                 Held rows contribute 0 Worked, 0 Late, 0 OT, and 0 UT, and are
                 excluded from Present Days.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              {(attendanceHoldEmployeeId || attendanceHoldDay) && (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm">
+                  <p>
+                    Showing {attendanceHoldEmployeeId ? groupedAttendanceHoldEmployees[0]?.employeeName ?? "the selected employee" : "all employees"}
+                    {attendanceHoldDay ? ` · ${attendanceHoldDay}` : ""}. Approval and reset apply only to the held dates shown.
+                  </p>
+                  <Button type="button" variant="outline" size="sm"
+                    disabled={savingAttendanceHoldApprovalEmployeeIds.size > 0 || resettingAttendanceHoldApprovalEmployeeIds.size > 0}
+                    onClick={() => {
+                      const params = new URLSearchParams(searchParams.toString());
+                      params.delete("employeeId");
+                      params.delete("day");
+                      setAttendanceHoldApprovalDrafts({});
+                      setAttendanceHoldSearch("");
+                      setAttendanceHoldDepartmentFilter(ALL_DEPARTMENTS_VALUE);
+                      window.history.replaceState(null, "", `${pathname}${params.size ? `?${params}` : ""}${window.location.hash}`);
+                    }}>
+                    Show all held rows
+                  </Button>
+                </div>
+              )}
               {!selectedPeriod ? (
                 <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
                   Select a payroll period first to review held DTR rows.
@@ -9071,9 +9075,9 @@ export function PayrollWorkspace({
                 <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
                   Switch to this tab to load held rows.
                 </div>
-              ) : currentAttendanceDtrHeldRowsState.data?.rows.length === 0 ? (
+              ) : scopedAttendanceHoldRows.length === 0 ? (
                 <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-                  No held DTR rows for {selectedPeriod.code}. Rows are placed on
+                  No held DTR rows {attendanceHoldEmployeeId || attendanceHoldDay ? "match this employee/date in " : "for "}{selectedPeriod.code}. Rows are placed on
                   hold when flagged with ODD_PUNCH_COUNT or MISSING_OUT (for
                   fixed-schedule employees) or when manually set to Hold.
                 </div>
@@ -9585,7 +9589,7 @@ export function PayrollWorkspace({
                           value={
                             selectedPayrollAccountCodeEmployee?.employeeId ?? ""
                           }
-                          onChange={setSelectedPayrollAccountCodeEmployeeId}
+                          onChange={employeeId => { setSelectedPayrollAccountCodeEmployeeId(employeeId); rememberEmployee(employeeId); }}
                           employees={filteredPayrollAccountCodeEmployees}
                           disabled={
                             filteredPayrollAccountCodeEmployees.length === 0
@@ -10066,7 +10070,7 @@ export function PayrollWorkspace({
           </Card>
         </TabsContent>
 
-        <TabsContent value="attendance" className="space-y-6">
+        <TabsContent value="attendanceSources" className="space-y-6">
           <Card>
             <CardHeader className="pb-3">
               <CardTitle>Import Attendance</CardTitle>
@@ -10222,7 +10226,296 @@ export function PayrollWorkspace({
 
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle>Semimonthly DTR</CardTitle>
+              <CardTitle>Recent Import Batches</CardTitle>
+              <CardDescription>
+                Uploaded files and matching results. Phone captures and administrator corrections have their own source history.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-10">
+                        <span className="sr-only">Expand batch</span>
+                      </TableHead>
+                      <TableHead>File</TableHead>
+                      <TableHead>Format</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Total</TableHead>
+                      <TableHead>Matched</TableHead>
+                      <TableHead>Unmatched</TableHead>
+                      <TableHead>Imported</TableHead>
+                      <TableHead>Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {attendanceBatches.filter(batch => batch.sourceFormat !== "API").map((batch) => {
+                      const revertActionKey = `revert-attendance-${batch.id}`;
+                      const canRevert = batch.status === "Processed" && batch.sourceFormat !== "API";
+                      const isBatchExpanded = expandedAttendanceBatchIds.has(
+                        batch.id
+                      );
+                      const diagnosticsState =
+                        attendanceBatchDiagnosticsById[batch.id];
+                      const unmatchedGroups = diagnosticsState?.data?.groups ?? [];
+                      const totalUnmatchedRows =
+                        diagnosticsState?.data?.totalUnmatchedRows ?? 0;
+                      const detailRowId = `attendance-batch-${batch.id}-diagnostics`;
+
+                      return (
+                        <Fragment key={batch.id}>
+                          <TableRow
+                            className={cn(
+                              "cursor-pointer",
+                              isBatchExpanded && "bg-muted/40 hover:bg-muted/40"
+                            )}
+                            onClick={() => handleToggleAttendanceBatch(batch.id)}
+                          >
+                            <TableCell className="w-10">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleToggleAttendanceBatch(batch.id);
+                                }}
+                                aria-label={`${
+                                  isBatchExpanded ? "Collapse" : "Expand"
+                                } unmatched rows for ${batch.sourceFileName}`}
+                                aria-expanded={isBatchExpanded}
+                                aria-controls={detailRowId}
+                                title={`${
+                                  isBatchExpanded ? "Collapse" : "Expand"
+                                } unmatched rows`}
+                              >
+                                {isBatchExpanded ? (
+                                  <ChevronDown className="h-4 w-4" aria-hidden="true" />
+                                ) : (
+                                  <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                                )}
+                              </Button>
+                            </TableCell>
+                            <TableCell className="font-medium">
+                              {batch.sourceFileName}
+                            </TableCell>
+                            <TableCell>{batch.sourceFormat}</TableCell>
+                            <TableCell>
+                              <span
+                                className={cn(
+                                  "inline-flex rounded-full px-2 py-1 text-xs font-medium",
+                                  getToneClass(batch.status)
+                                )}
+                              >
+                                {batch.status}
+                              </span>
+                            </TableCell>
+                            <TableCell>{batch.totalRows}</TableCell>
+                            <TableCell>{batch.matchedRows}</TableCell>
+                            <TableCell>{batch.unmatchedRows}</TableCell>
+                            <TableCell>{formatDateTime(batch.importedAt)}</TableCell>
+                            <TableCell>
+                              <Button
+                                type="button"
+                                variant="destructive"
+                                size="sm"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void handleRevertAttendanceBatch(batch);
+                                }}
+                                disabled={!canRevert || actionState !== null}
+                              >
+                                {actionState === revertActionKey
+                                  ? "Reverting..."
+                                  : batch.sourceFormat === "API" ? "Managed by API" : "Revert"}
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                          {isBatchExpanded && (
+                            <TableRow
+                              id={detailRowId}
+                              className="bg-muted/20 hover:bg-muted/20"
+                            >
+                              <TableCell colSpan={9} className="p-0">
+                                <div className="border-t px-4 py-4">
+                                  {diagnosticsState?.status === "error" ? (
+                                    <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                                      {diagnosticsState.error ??
+                                        "Unable to load unmatched rows."}
+                                    </div>
+                                  ) : diagnosticsState?.status === "ready" ? (
+                                    unmatchedGroups.length === 0 ? (
+                                      <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
+                                        No unmatched rows were saved for this batch.
+                                      </div>
+                                    ) : (
+                                      <div className="space-y-3">
+                                        <div className="text-sm font-medium">
+                                          Unmatched rows ({totalUnmatchedRows})
+                                        </div>
+                                        <div className="overflow-hidden rounded-md border bg-background">
+                                          {unmatchedGroups.map((group) => {
+                                            const groupKey = `${batch.id}:${group.employeeNo}`;
+                                            const isGroupExpanded =
+                                              expandedUnmatchedGroupKeys.has(groupKey);
+
+                                            return (
+                                              <div
+                                                key={groupKey}
+                                                className="border-t first:border-t-0"
+                                              >
+                                                <button
+                                                  type="button"
+                                                  className="flex w-full items-start gap-3 px-3 py-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                                  onClick={() =>
+                                                    handleToggleUnmatchedGroup(
+                                                      batch.id,
+                                                      group.employeeNo
+                                                    )
+                                                  }
+                                                  aria-expanded={isGroupExpanded}
+                                                  title={`${
+                                                    isGroupExpanded
+                                                      ? "Collapse"
+                                                      : "Expand"
+                                                  } rows for ${
+                                                    formatEmployeeNoDisplay(
+                                                      group.employeeNo
+                                                    ) || group.employeeNo
+                                                  }`}
+                                                >
+                                                  {isGroupExpanded ? (
+                                                    <ChevronDown
+                                                      className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
+                                                      aria-hidden="true"
+                                                    />
+                                                  ) : (
+                                                    <ChevronRight
+                                                      className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
+                                                      aria-hidden="true"
+                                                    />
+                                                  )}
+                                                  <span className="min-w-0 flex-1">
+                                                    <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                                                      <span className="font-medium">
+                                                        {formatEmployeeNoDisplay(
+                                                          group.employeeNo
+                                                        ) || group.employeeNo}
+                                                      </span>
+                                                      <span className="text-xs text-muted-foreground">
+                                                        {group.reason}
+                                                      </span>
+                                                      <span className="text-xs text-muted-foreground">
+                                                        {group.rowCount} row(s)
+                                                      </span>
+                                                      <span className="text-xs text-muted-foreground">
+                                                        {formatDateRange(
+                                                          group.startDate,
+                                                          group.endDate
+                                                        )}
+                                                      </span>
+                                                      <span className="text-xs text-muted-foreground">
+                                                        {formatSourceLineRange(
+                                                          group.firstSourceLine,
+                                                          group.lastSourceLine
+                                                        )}
+                                                      </span>
+                                                    </span>
+                                                    {group.sampleRawText && (
+                                                      <span className="mt-1 block whitespace-normal break-words text-xs text-muted-foreground">
+                                                        {group.sampleRawText}
+                                                      </span>
+                                                    )}
+                                                  </span>
+                                                </button>
+                                                {isGroupExpanded && (
+                                                  <div className="border-t bg-muted/20 p-3">
+                                                    <Table className="min-w-[760px] table-fixed bg-background">
+                                                      <TableHeader>
+                                                        <TableRow>
+                                                          <TableHead className="w-20">
+                                                            Line
+                                                          </TableHead>
+                                                          <TableHead className="w-28">
+                                                            Date
+                                                          </TableHead>
+                                                          <TableHead className="w-24">
+                                                            Time
+                                                          </TableHead>
+                                                          <TableHead className="w-40">
+                                                            Device / Site
+                                                          </TableHead>
+                                                          <TableHead>Raw text</TableHead>
+                                                        </TableRow>
+                                                      </TableHeader>
+                                                      <TableBody>
+                                                        {group.rows.map((row) => (
+                                                          <TableRow key={row.id}>
+                                                            <TableCell>
+                                                              {row.sourceLine ?? "-"}
+                                                            </TableCell>
+                                                            <TableCell>
+                                                              {row.logDate}
+                                                            </TableCell>
+                                                            <TableCell>
+                                                              {row.logTime}
+                                                            </TableCell>
+                                                            <TableCell className="text-xs text-muted-foreground">
+                                                              {formatDeviceSite(
+                                                                row.deviceId,
+                                                                row.siteCode
+                                                              )}
+                                                            </TableCell>
+                                                            <TableCell className="whitespace-normal break-words text-xs text-muted-foreground">
+                                                              {row.rawText ?? "-"}
+                                                            </TableCell>
+                                                          </TableRow>
+                                                        ))}
+                                                      </TableBody>
+                                                    </Table>
+                                                  </div>
+                                                )}
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+                                    )
+                                  ) : (
+                                    <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
+                                      Loading unmatched rows...
+                                    </div>
+                                  )}
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </Fragment>
+                      );
+                    })}
+                    {attendanceBatches.filter(batch => batch.sourceFormat !== "API").length === 0 && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={9}
+                          className="py-10 text-center text-muted-foreground"
+                        >
+                          No attendance import batches yet for the selected payroll
+                          period.
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="attendance" className="space-y-6">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle>Attendance details & totals</CardTitle>
             <CardDescription>
               Review one employee at a time for the selected payroll
                 period. Daily rows include punches, schedule, leave, anomalies,
@@ -10258,7 +10551,7 @@ export function PayrollWorkspace({
                         </label>
                         <EmployeeDtrPicker
                           value={selectedDtrEmployee?.employeeId ?? ""}
-                          onChange={setSelectedDtrEmployeeId}
+                          onChange={employeeId => { setSelectedDtrEmployeeId(employeeId); rememberEmployee(employeeId); }}
                           employees={filteredAttendanceDtrEmployees}
                           disabled={filteredAttendanceDtrEmployees.length === 0}
                         />
@@ -11263,295 +11556,6 @@ export function PayrollWorkspace({
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle>Recent Import Batches</CardTitle>
-              <CardDescription>
-                Imported files are persisted in attendance_import_batches, raw logs
-                in attendance_raw_logs, and summarized days in
-                attendance_daily_summaries.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="p-0">
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-10">
-                        <span className="sr-only">Expand batch</span>
-                      </TableHead>
-                      <TableHead>File</TableHead>
-                      <TableHead>Format</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Total</TableHead>
-                      <TableHead>Matched</TableHead>
-                      <TableHead>Unmatched</TableHead>
-                      <TableHead>Imported</TableHead>
-                      <TableHead>Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {attendanceBatches.map((batch) => {
-                      const revertActionKey = `revert-attendance-${batch.id}`;
-                      const canRevert = batch.status === "Processed" && batch.sourceFormat !== "API";
-                      const isBatchExpanded = expandedAttendanceBatchIds.has(
-                        batch.id
-                      );
-                      const diagnosticsState =
-                        attendanceBatchDiagnosticsById[batch.id];
-                      const unmatchedGroups = diagnosticsState?.data?.groups ?? [];
-                      const totalUnmatchedRows =
-                        diagnosticsState?.data?.totalUnmatchedRows ?? 0;
-                      const detailRowId = `attendance-batch-${batch.id}-diagnostics`;
-
-                      return (
-                        <Fragment key={batch.id}>
-                          <TableRow
-                            className={cn(
-                              "cursor-pointer",
-                              isBatchExpanded && "bg-muted/40 hover:bg-muted/40"
-                            )}
-                            onClick={() => handleToggleAttendanceBatch(batch.id)}
-                          >
-                            <TableCell className="w-10">
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  handleToggleAttendanceBatch(batch.id);
-                                }}
-                                aria-label={`${
-                                  isBatchExpanded ? "Collapse" : "Expand"
-                                } unmatched rows for ${batch.sourceFileName}`}
-                                aria-expanded={isBatchExpanded}
-                                aria-controls={detailRowId}
-                                title={`${
-                                  isBatchExpanded ? "Collapse" : "Expand"
-                                } unmatched rows`}
-                              >
-                                {isBatchExpanded ? (
-                                  <ChevronDown className="h-4 w-4" aria-hidden="true" />
-                                ) : (
-                                  <ChevronRight className="h-4 w-4" aria-hidden="true" />
-                                )}
-                              </Button>
-                            </TableCell>
-                            <TableCell className="font-medium">
-                              {batch.sourceFileName}
-                            </TableCell>
-                            <TableCell>{batch.sourceFormat}</TableCell>
-                            <TableCell>
-                              <span
-                                className={cn(
-                                  "inline-flex rounded-full px-2 py-1 text-xs font-medium",
-                                  getToneClass(batch.status)
-                                )}
-                              >
-                                {batch.status}
-                              </span>
-                            </TableCell>
-                            <TableCell>{batch.totalRows}</TableCell>
-                            <TableCell>{batch.matchedRows}</TableCell>
-                            <TableCell>{batch.unmatchedRows}</TableCell>
-                            <TableCell>{formatDateTime(batch.importedAt)}</TableCell>
-                            <TableCell>
-                              <Button
-                                type="button"
-                                variant="destructive"
-                                size="sm"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  void handleRevertAttendanceBatch(batch);
-                                }}
-                                disabled={!canRevert || actionState !== null}
-                              >
-                                {actionState === revertActionKey
-                                  ? "Reverting..."
-                                  : batch.sourceFormat === "API" ? "Managed by API" : "Revert"}
-                              </Button>
-                            </TableCell>
-                          </TableRow>
-                          {isBatchExpanded && (
-                            <TableRow
-                              id={detailRowId}
-                              className="bg-muted/20 hover:bg-muted/20"
-                            >
-                              <TableCell colSpan={9} className="p-0">
-                                <div className="border-t px-4 py-4">
-                                  {diagnosticsState?.status === "error" ? (
-                                    <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                                      {diagnosticsState.error ??
-                                        "Unable to load unmatched rows."}
-                                    </div>
-                                  ) : diagnosticsState?.status === "ready" ? (
-                                    unmatchedGroups.length === 0 ? (
-                                      <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
-                                        No unmatched rows were saved for this batch.
-                                      </div>
-                                    ) : (
-                                      <div className="space-y-3">
-                                        <div className="text-sm font-medium">
-                                          Unmatched rows ({totalUnmatchedRows})
-                                        </div>
-                                        <div className="overflow-hidden rounded-md border bg-background">
-                                          {unmatchedGroups.map((group) => {
-                                            const groupKey = `${batch.id}:${group.employeeNo}`;
-                                            const isGroupExpanded =
-                                              expandedUnmatchedGroupKeys.has(groupKey);
-
-                                            return (
-                                              <div
-                                                key={groupKey}
-                                                className="border-t first:border-t-0"
-                                              >
-                                                <button
-                                                  type="button"
-                                                  className="flex w-full items-start gap-3 px-3 py-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                                  onClick={() =>
-                                                    handleToggleUnmatchedGroup(
-                                                      batch.id,
-                                                      group.employeeNo
-                                                    )
-                                                  }
-                                                  aria-expanded={isGroupExpanded}
-                                                  title={`${
-                                                    isGroupExpanded
-                                                      ? "Collapse"
-                                                      : "Expand"
-                                                  } rows for ${
-                                                    formatEmployeeNoDisplay(
-                                                      group.employeeNo
-                                                    ) || group.employeeNo
-                                                  }`}
-                                                >
-                                                  {isGroupExpanded ? (
-                                                    <ChevronDown
-                                                      className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
-                                                      aria-hidden="true"
-                                                    />
-                                                  ) : (
-                                                    <ChevronRight
-                                                      className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
-                                                      aria-hidden="true"
-                                                    />
-                                                  )}
-                                                  <span className="min-w-0 flex-1">
-                                                    <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                                                      <span className="font-medium">
-                                                        {formatEmployeeNoDisplay(
-                                                          group.employeeNo
-                                                        ) || group.employeeNo}
-                                                      </span>
-                                                      <span className="text-xs text-muted-foreground">
-                                                        {group.reason}
-                                                      </span>
-                                                      <span className="text-xs text-muted-foreground">
-                                                        {group.rowCount} row(s)
-                                                      </span>
-                                                      <span className="text-xs text-muted-foreground">
-                                                        {formatDateRange(
-                                                          group.startDate,
-                                                          group.endDate
-                                                        )}
-                                                      </span>
-                                                      <span className="text-xs text-muted-foreground">
-                                                        {formatSourceLineRange(
-                                                          group.firstSourceLine,
-                                                          group.lastSourceLine
-                                                        )}
-                                                      </span>
-                                                    </span>
-                                                    {group.sampleRawText && (
-                                                      <span className="mt-1 block whitespace-normal break-words text-xs text-muted-foreground">
-                                                        {group.sampleRawText}
-                                                      </span>
-                                                    )}
-                                                  </span>
-                                                </button>
-                                                {isGroupExpanded && (
-                                                  <div className="border-t bg-muted/20 p-3">
-                                                    <Table className="min-w-[760px] table-fixed bg-background">
-                                                      <TableHeader>
-                                                        <TableRow>
-                                                          <TableHead className="w-20">
-                                                            Line
-                                                          </TableHead>
-                                                          <TableHead className="w-28">
-                                                            Date
-                                                          </TableHead>
-                                                          <TableHead className="w-24">
-                                                            Time
-                                                          </TableHead>
-                                                          <TableHead className="w-40">
-                                                            Device / Site
-                                                          </TableHead>
-                                                          <TableHead>Raw text</TableHead>
-                                                        </TableRow>
-                                                      </TableHeader>
-                                                      <TableBody>
-                                                        {group.rows.map((row) => (
-                                                          <TableRow key={row.id}>
-                                                            <TableCell>
-                                                              {row.sourceLine ?? "-"}
-                                                            </TableCell>
-                                                            <TableCell>
-                                                              {row.logDate}
-                                                            </TableCell>
-                                                            <TableCell>
-                                                              {row.logTime}
-                                                            </TableCell>
-                                                            <TableCell className="text-xs text-muted-foreground">
-                                                              {formatDeviceSite(
-                                                                row.deviceId,
-                                                                row.siteCode
-                                                              )}
-                                                            </TableCell>
-                                                            <TableCell className="whitespace-normal break-words text-xs text-muted-foreground">
-                                                              {row.rawText ?? "-"}
-                                                            </TableCell>
-                                                          </TableRow>
-                                                        ))}
-                                                      </TableBody>
-                                                    </Table>
-                                                  </div>
-                                                )}
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
-                                      </div>
-                                    )
-                                  ) : (
-                                    <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
-                                      Loading unmatched rows...
-                                    </div>
-                                  )}
-                                </div>
-                              </TableCell>
-                            </TableRow>
-                          )}
-                        </Fragment>
-                      );
-                    })}
-                    {attendanceBatches.length === 0 && (
-                      <TableRow>
-                        <TableCell
-                          colSpan={9}
-                          className="py-10 text-center text-muted-foreground"
-                        >
-                          No attendance import batches yet for the selected payroll
-                          period.
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </div>
-            </CardContent>
-          </Card>
         </TabsContent>
       </Tabs>
     </div>

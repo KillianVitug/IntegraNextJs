@@ -19,6 +19,8 @@ export default function TimekeepingTab({ employeeId }: { employeeId?: string }) 
 
   return (
     <div className="p-4">
+      <h3 className="font-semibold">Employee fallback schedule</h3>
+      <p className="mb-4 text-sm text-muted-foreground">These values apply when no weekly default or dated schedule is configured. Existing schedule history is retained.</p>
       <div className="grid grid-cols-2 gap-3">
         <InputWithLabel
           fieldTitle="Timekeeping ID No."
@@ -67,18 +69,17 @@ export default function TimekeepingTab({ employeeId }: { employeeId?: string }) 
       {employeeId ? (
         <div className="mt-4 space-y-3">
           <p className="text-sm text-muted-foreground">
-            Use Weekly Schedule for the employee's normal Monday-Sunday pattern. Use
-            Shift Overrides only for temporary date-based exceptions.
+            Set the normal week in Weekly defaults, then review the dates in Period schedule.
           </p>
           <div className="flex flex-wrap gap-2">
             <Button asChild type="button" variant="outline">
-              <Link href={`/weeklyShiftPatterns?employeeId=${employeeId}`}>
-                Manage Weekly Schedule
+              <Link href={`/schedules?view=weekly&employeeId=${employeeId}`}>
+                Weekly defaults
               </Link>
             </Button>
             <Button asChild type="button" variant="outline">
-              <Link href={`/shiftAssignments?employeeId=${employeeId}`}>
-                Manage Shift Overrides
+              <Link href={`/schedules?view=period&employeeId=${employeeId}`}>
+                Period schedule
               </Link>
             </Button>
           </div>

@@ -1,84 +1,54 @@
 "use client";
-
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { syncAttendanceSourceAction, updateAttendanceMatchingAction, attendanceMatchingHistoryAction, refreshAttendanceSourceSummariesAction } from "@/app/actions/attendanceSourceAction";
-import type { SourcePunch } from "@/lib/payroll/attendanceSourceClient";
-import type { MatchBoard, MatchSaveResult, MatchMutation, WorkflowResult } from "@/lib/payroll/attendanceMatching";
-import { attendancePeriodUrl, selectAttendanceSourcePeriod, type AttendanceSourcePeriod } from "@/lib/payroll/attendanceSourcePeriods";
-import type { AttendanceReadiness } from "@/lib/payroll/attendanceResolutionModel";
-import { AttendanceReview, AttendanceReadinessCard } from "./attendance-review";
-import { EmployeeMatching } from "./employee-matching";
-import { DuplicateReview } from "./duplicate-review";
+import { syncAttendanceSourceAction, updateAttendanceMatchingAction, attendanceMatchingHistoryAction } from "@/app/actions/attendanceSourceAction";
+import type { MatchBoard, MatchMutation, WorkflowResult } from "@/lib/payroll/attendanceMatching";
 import type { DuplicateBoard } from "@/lib/payroll/attendanceDuplicateModel";
-import { AttendanceWorkbench } from "./workbench";
-import type { WorkBoard } from "@/lib/payroll/attendanceWorkbenchModel";
+import type { AttendanceReadiness } from "@/lib/payroll/attendanceResolutionModel";
+import type { WorkProgress } from "@/lib/payroll/attendanceWorkbenchModel";
+import { attendancePeriodUrl, selectAttendanceSourcePeriod, type AttendanceSourcePeriod } from "@/lib/payroll/attendanceSourcePeriods";
+import { PayrollWorkspaceNav } from "../PayrollPageNav";
+import { EmployeeMatching } from "./employee-matching";
+import { LegacyAttendanceHistory } from "./legacy-history";
+import { DuplicateReview } from "./duplicate-review";
+import { AttendanceReadStatus, useAttendanceView } from "./read-view";
 
-type Props = {
-  initialYear: number; initialPeriodId: string; today: string; inbox: SourcePunch[]; matching: MatchBoard;
-  periods: AttendanceSourcePeriod[]; readiness: AttendanceReadiness | null; duplicates?: DuplicateBoard | null; workbench?:WorkBoard|null;
-  runs: { id: string; state: string; startedAt: string; counts: string; error: string | null }[];
-};
-const controlClass = "mt-1 block w-full rounded-lg border border-slate-300 bg-white p-2.5 text-sm text-slate-900 disabled:opacity-60";
-const buttonClass = "min-h-11 rounded-lg px-4 py-2.5 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50";
-
-export function AttendanceSourcePanel(props: Props) {
-  const router = useRouter();
-  const [changingPeriod, startPeriodChange] = useTransition();
-  const [refreshing, startRefresh] = useTransition();
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
-  const busy = saving || changingPeriod || refreshing;
-  const period = props.initialPeriodId, year = props.initialYear;
-  const periods = selectAttendanceSourcePeriod(props.periods, { year: String(year), periodId: period }, props.today).periods;
-  const years = [...new Set([year, ...props.periods.map(p => p.year)])].sort((a, b) => b - a);
-  function changePeriod(nextYear: number, nextPeriod: string) {
-    startPeriodChange(() => router.replace(attendancePeriodUrl("/payroll/attendance-source", nextYear, nextPeriod), { scroll: false }));
-  }
-  async function perform(fn: () => Promise<MatchSaveResult>) {
-    setSaving(true); setMessage("");
-    try { const result = await fn(); setMessage(result.ok ? result.data : result.error); startRefresh(() => router.refresh()); }
-    catch { setMessage("Unable to complete this request. Refresh the page and sign in again if needed."); }
-    finally { setSaving(false); }
-  }
-  async function saveMatch(request: MatchMutation): Promise<WorkflowResult> {
-    setSaving(true); setMessage("");
-    try {
-      const result = await updateAttendanceMatchingAction(request);
-      if (result.ok) startRefresh(() => router.refresh());
-      return result;
-    } catch { return { ok: false, error: "Unable to save the match. Your choices are still here. Try again, or sign in again if your session has expired." }; }
-    finally { setSaving(false); }
-  }
-  const syncPeriod = () => perform(() => syncAttendanceSourceAction(period));
-  return <main className="mx-auto min-w-0 max-w-6xl space-y-6 p-4 text-slate-900 sm:p-6">
-    <header><Link className="inline-flex min-h-10 items-center text-sm text-blue-700 underline" href={attendancePeriodUrl("/payroll", year, period)}>Back to payroll</Link><h1 className="mt-2 text-2xl font-semibold">Attendance & sync</h1><p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">Match attendance people to their Integra employee records, then sync the affected payroll periods and review the DTR.</p></header>
-
-    <nav aria-label="Payroll attendance" className="flex flex-wrap gap-3 text-sm font-semibold text-blue-700"><Link className="min-h-11 rounded-lg border p-3" href={attendancePeriodUrl("/payroll", year, period)}>Payroll run</Link><a className="min-h-11 rounded-lg border p-3" href="#attendance-review">Attendance review</a><a className="min-h-11 rounded-lg border p-3" href="#reconcile-title">Attendance & sync</a><a className="min-h-11 rounded-lg border p-3" href="#employee-matching">Employee matching</a></nav>
-    {props.readiness && <AttendanceReadinessCard data={props.readiness} />}
-
-
-    <section aria-labelledby="reconcile-title" className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-      <div><h2 id="reconcile-title" className="text-lg font-semibold">Attendance & sync · update this period</h2><p className="mt-1 text-sm leading-6 text-slate-600">After saving matches, sync each affected period to apply them. Sync also picks up late uploads, voids and identity corrections.</p></div>
-      <div className="grid gap-4 sm:grid-cols-[160px_1fr]">
-        <label className="block text-sm font-medium">Payroll year<select className={controlClass} value={year} disabled={busy} onChange={e => { const next = selectAttendanceSourcePeriod(props.periods, { year: e.target.value }, props.today); changePeriod(next.year, next.periodId); }}>{years.map(y => <option key={y} value={y}>{y}</option>)}</select></label>
-        <label className="block min-w-0 text-sm font-medium">Payroll period<select className={controlClass} value={period} onChange={e => changePeriod(year, e.target.value)} disabled={busy || !periods.length}>{!periods.length && <option value="">No periods for this year</option>}{periods.map(p => <option key={p.id} value={p.id}>{p.code} · {p.startDate} – {p.endDate}</option>)}</select></label>
-      </div>
-      <div className="flex flex-wrap gap-3"><button className={`${buttonClass} bg-blue-700 text-white hover:bg-blue-800`} disabled={busy || !period} onClick={syncPeriod}>1. Sync attendance now</button><button className={`${buttonClass} border border-slate-300`} disabled={busy || !period || !!props.readiness?.people.some(p => p.issues.length && !p.contextOnly) || !!props.readiness?.needsSync} onClick={() => perform(() => refreshAttendanceSourceSummariesAction(period))}>3. Refresh DTR summaries</button><Link className={`${buttonClass} inline-flex items-center text-blue-700 underline`} href={attendancePeriodUrl("/payroll", year, period)}>4. Recompute and review payroll</Link></div>
-      <p className="text-sm font-semibold">2. <a href="#attendance-review" className="text-blue-700 underline">Resolve and approve attendance cases below.</a></p>
-      <p className="text-sm leading-6 text-slate-600">Review the DTR before recomputing payroll. Unmatched people and unresolved attendance warnings remain withheld. Closed periods and posted payroll stay unchanged; late changes appear in sync history.</p>
-      <p role="status" className="break-words text-sm font-medium text-blue-800">{busy ? "Working…" : message}</p>
-    </section>
-
-    {props.duplicates && <DuplicateReview key={`${period}:${props.duplicates.policy.revision}:${props.duplicates.history.map(h=>h.id+h.state).join()}:${props.duplicates.candidates.map(c=>c.version).join()}`} periodId={period} initial={props.duplicates} refresh={() => startRefresh(() => router.refresh())} />}
-    {props.workbench ? <AttendanceWorkbench initial={props.workbench}/> : props.readiness && <AttendanceReview data={props.readiness} refresh={() => startRefresh(() => router.refresh())} />}
-    {props.workbench&&props.readiness&&<details className="rounded-xl border p-4"><summary className="cursor-pointer font-semibold">Source identities, test punches and earlier proposals</summary><AttendanceReview anchorId="attendance-review-legacy" data={props.readiness} refresh={() => startRefresh(() => router.refresh())}/></details>}
-    <section id="employee-matching"><EmployeeMatching board={props.matching} busy={busy} mutate={saveMatch} loadHistory={attendanceMatchingHistoryAction} /></section>
-    <details className="min-w-0 rounded-xl border border-slate-200 bg-white p-5 text-sm">
-      <summary className="min-h-8 cursor-pointer font-semibold">All records for this period</summary><p className="my-3 text-slate-600">All records from the selected period and its neighboring days. Employee matching includes identities across periods.</p>
-      <div className="max-h-96 overflow-auto"><table className="w-full text-left text-sm"><thead><tr><th>Captured (Manila)</th><th>Attendance person</th><th>Punch</th><th>Review</th></tr></thead><tbody>{props.inbox.map(p => <tr key={p.eventId} className="border-t"><td className="p-2">{new Date(p.capturedAt).toLocaleString("en-PH", { timeZone: "Asia/Manila" })}</td><td className="p-2">{p.employeeId} · {p.employeeName}</td><td className="p-2">{p.type} · {p.branchId} · {p.status}</td><td className="p-2">{props.matching.people.find(person => person.sourceId === p.employeeId)?.classification === "TestOnly" ? "Test only — punches still need review. " : !props.matching.people.some(person => person.sourceId === p.employeeId && props.matching.employees.some(e => e.id === person.employeeId)) ? "Employee match needed. " : ""}{p.clockFlag ? "Clock review. " : ""}{p.reviewResolved ? "Source review resolved" : p.reviewFlags.join(", ")}</td></tr>)}</tbody></table></div>
-    </details>
-    <details className="rounded-xl border border-slate-200 bg-white p-5 text-sm"><summary className="min-h-8 cursor-pointer font-semibold">Sync history</summary><ul className="mt-2 divide-y">{props.runs.map(r => <li key={r.id} className="py-3"><strong>{r.state}</strong> · {new Date(r.startedAt).toLocaleString("en-PH", { timeZone: "Asia/Manila" })}<p className="mt-1 break-words text-slate-600">{r.error ?? r.counts}</p></li>)}</ul></details>
-  </main>;
+const button="inline-flex min-h-11 items-center rounded-lg border px-3 py-2 text-sm font-semibold disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-blue-600";
+const field="mt-1 min-h-11 w-full min-w-0 rounded-lg border bg-background p-2 text-sm";
+const time=(value:string)=>new Intl.DateTimeFormat("en-PH",{timeZone:"Asia/Manila",dateStyle:"medium",timeStyle:"medium"}).format(new Date(value));
+type SyncRun={id:string;state:string;startedAt:string;completedAt?:string|null;counts:unknown;error:string|null};
+function Counts({value}:{value:unknown}) { const counts=value&&typeof value==="object"?value as Record<string,unknown>:{};return <p className="mt-1 text-xs text-muted-foreground">{["received","changed","projected","unmatched","withheld","lateChanges"].flatMap(key=>typeof counts[key]==="number"?[`${key==="lateChanges"?"incoming differences":key}: ${counts[key]}`]:[]).join(" · ")||"No reconciliation counts recorded"}</p>; }
+export function AttendanceSourcePanel({periods,year,periodId,today,files}:{periods:AttendanceSourcePeriod[];year:number;periodId:string;today:string;files:ReactNode}) {
+ const router=useRouter(),[changing,startChange]=useTransition(),[tab,setTab]=useState("Phone sync"),[open,setOpen]=useState({matching:false,duplicates:false,records:false});
+ const [saving,setSaving]=useState(false),[revision,setRevision]=useState(0),[message,setMessage]=useState(""),[error,setError]=useState("");
+ const gate=useRef(false),errorRef=useRef<HTMLDivElement>(null);
+ const history=useAttendanceView<SyncRun[]>("sync-history",periodId,!!periodId,revision);
+ const matching=useAttendanceView<MatchBoard>("matching",periodId,open.matching,revision),duplicates=useAttendanceView<DuplicateBoard>("duplicates",periodId,open.duplicates,revision),source=useAttendanceView<AttendanceReadiness>("readiness",periodId,open.records||tab==="Admin corrections",revision),progress=useAttendanceView<WorkProgress>("progress",periodId,tab==="Admin corrections",revision);
+ const selected=selectAttendanceSourcePeriod(periods,{year:String(year),periodId},today),years=[...new Set([year,...periods.map(period=>period.year)])].sort((a,b)=>b-a);
+ const latestComplete=history.data?.find(run=>run.state==="Complete"),busy=saving||changing;
+ const batchHref=attendancePeriodUrl("/payroll/attendance-batch",year,periodId),estimateHref=attendancePeriodUrl("/payroll/provisional",year,periodId);
+ useEffect(()=>{const reveal=()=>{const params=new URLSearchParams(location.search);if(params.get("view")==="files")setTab("Files");if(params.get("view")==="admin")setTab("Admin corrections");if(location.hash==="#employee-matching")setOpen(current=>({...current,matching:true}));if(["#obvious-duplicates","#duplicate-review-tools"].includes(location.hash))setOpen(current=>({...current,duplicates:true}));};reveal();window.addEventListener("hashchange",reveal);return()=>window.removeEventListener("hashchange",reveal);},[]);
+ useEffect(()=>{if(error)errorRef.current?.focus();},[error]);
+ function changePeriod(nextYear:number,nextPeriod:string){const url=new URL(location.href);url.searchParams.set("year",String(nextYear));url.searchParams.set("periodId",nextPeriod);for(const key of ["employeeId","day","runId"])url.searchParams.delete(key);startChange(()=>router.replace(url.pathname+url.search+url.hash,{scroll:false}));}
+ function selectTab(value:string){setTab(value);const url=new URL(location.href);url.searchParams.set("view",value==="Files"?"files":value==="Admin corrections"?"admin":"phone");historyReplace(url);}
+ function historyReplace(url:URL){window.history.replaceState(null,"",url.pathname+url.search+url.hash);}
+ async function sync(){if(gate.current)return;gate.current=true;setSaving(true);setError("");setMessage("");try{const result=await syncAttendanceSourceAction(periodId);if(result.ok){setMessage(result.data);setRevision(value=>value+1);}else setError(result.error);}catch{setError("The sync response was interrupted. Check the latest sync history below before retrying. Approved attendance and posted payroll remain protected.");history.retry();}finally{gate.current=false;setSaving(false);}}
+ async function saveMatch(request:MatchMutation):Promise<WorkflowResult>{if(gate.current)return {ok:false,error:"Wait for the current request."};gate.current=true;setSaving(true);try{const result=await updateAttendanceMatchingAction(request);if(result.ok)setRevision(value=>value+1);return result;}catch{return {ok:false,error:"The match response was interrupted. Your choices are retained; check matching history before retrying."};}finally{gate.current=false;setSaving(false);}}
+ return <main className="mx-auto min-w-0 max-w-6xl space-y-4 p-3 sm:p-6">
+  <PayrollWorkspaceNav activeSection="attendanceSources" context={{periodId,year:String(year)}}/>
+  <header><h1 className="text-2xl font-semibold">Attendance sources</h1><p className="mt-2 text-sm text-muted-foreground">Phone imports, uploaded files and Integra administrator corrections have separate histories. Phone attendance is read-only; payroll corrections stay in Integra.</p></header>
+  <div className="grid gap-3 sm:grid-cols-[140px_1fr]"><label className="text-sm">Payroll year<select className={field} value={year} disabled={busy} onChange={event=>{const next=selectAttendanceSourcePeriod(periods,{year:event.target.value},today);changePeriod(next.year,next.periodId);}}>{years.map(value=><option key={value}>{value}</option>)}</select></label><label className="min-w-0 text-sm">Payroll period<select className={field} value={periodId} disabled={busy} onChange={event=>changePeriod(year,event.target.value)}>{selected.periods.map(period=><option key={period.id} value={period.id}>{period.code} · {period.startDate} – {period.endDate}</option>)}</select></label></div>
+  <nav aria-label="Attendance source type" className="flex flex-wrap gap-2">{["Phone sync","Files","Admin corrections"].map(value=><button key={value} aria-pressed={tab===value} className={`${button} ${tab===value?"bg-blue-700 text-white":""}`} onClick={()=>selectTab(value)}>{value}</button>)}</nav>
+  {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="rounded-lg border border-red-400 p-3 text-sm">{error}</div>}{message&&<p role="status" className="rounded-lg border border-blue-300 p-3 text-sm">{message}</p>}
+  {tab==="Phone sync"&&<section className="space-y-4" aria-label="Phone attendance imports">
+   <div id="reconcile-title" className="rounded-xl border p-4"><h2 className="font-semibold">Phone attendance</h2><p className="mt-1 text-sm">{latestComplete?`Last successful pull: ${time(latestComplete.completedAt??latestComplete.startedAt)} Philippine time`:"No successful pull is listed for this period."}</p><p className="mt-2 text-sm text-muted-foreground">Pulls read source captures for this period and needed neighboring context. A sync timestamp is not a work date or proof that every phone has uploaded.</p><div className="mt-3 flex flex-wrap gap-2"><button className={`${button} bg-blue-700 text-white`} disabled={busy||!periodId} onClick={()=>void sync()}>{saving?"Checking phone attendance…":"Sync phone attendance"}</button><Link className={button} href={estimateHref}>Review employee attendance</Link></div></div>
+   <details id="employee-matching" open={open.matching} onToggle={event=>{const expanded=event.currentTarget.open;setOpen(current=>({...current,matching:expanded}));}} className="rounded-xl border p-3"><summary className="min-h-11 cursor-pointer font-semibold">Employee matching</summary><AttendanceReadStatus {...matching}/>{matching.data&&<EmployeeMatching board={matching.data} busy={busy} mutate={saveMatch} loadHistory={attendanceMatchingHistoryAction}/>}</details>
+   <details id="duplicate-review-tools" open={open.duplicates} onToggle={event=>{const expanded=event.currentTarget.open;setOpen(current=>({...current,duplicates:expanded}));}} className="rounded-xl border p-3"><summary className="min-h-11 cursor-pointer font-semibold">Duplicate review</summary><AttendanceReadStatus {...duplicates}/>{duplicates.data&&<DuplicateReview key={revision} periodId={periodId} initial={duplicates.data} refresh={()=>setRevision(value=>value+1)}/>}</details>
+   <details open={open.records} onToggle={event=>{const expanded=event.currentTarget.open;setOpen(current=>({...current,records:expanded}));}} className="rounded-xl border p-3"><summary className="min-h-11 cursor-pointer font-semibold">Source records & warnings</summary><AttendanceReadStatus {...source}/><p className="text-sm text-muted-foreground">Original source facts can differ from the approved attendance used by payroll. Records can include neighboring days for overnight context.</p><div className="mt-2 max-h-[36rem] space-y-2 overflow-y-auto">{source.data?.people.map(person=><details key={person.sourceId} className="rounded border p-3"><summary className="min-h-11 cursor-pointer text-sm font-semibold">{person.name} · {person.records.length} captures</summary>{person.records.map(record=><article key={record.eventId} className="border-t py-2 text-sm"><p>{time(record.capturedAt)} · {record.type} · {record.status}</p><p className="break-words text-xs">{record.clockFlag&&!record.clockVerified?"Device clock needs review. ":""}{record.reviewResolved?"Source review resolved":record.reviewFlags.join(" · ")||"No source review flags"}</p></article>)}<Link className={button} href={`${batchHref}&sourceId=${encodeURIComponent(person.sourceId)}&view=add`}>Review in a batch</Link></details>)}</div></details>
+   <section id="sync-history" className="rounded-xl border p-3"><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">Phone sync history</h2><button className={button} disabled={history.loading} onClick={history.retry}>Reload sync history</button></div><AttendanceReadStatus {...history}/><ul className="divide-y">{history.data?.map(run=><li key={run.id} className="py-3 text-sm"><strong>{run.state}</strong> · {time(run.startedAt)} Philippine time{run.error?<p className="mt-1 break-words text-red-700">{run.error}</p>:<Counts value={run.counts}/>}</li>)}</ul>{history.data?.length===0&&<p className="py-3 text-sm">No phone sync has been recorded for this period.</p>}</section>
+  </section>}
+  {tab==="Files"&&<section aria-label="Uploaded attendance files" className="min-w-0 space-y-3"><h2 className="font-semibold">File imports</h2><p className="text-sm text-muted-foreground">Upload CSV or TXT attendance, inspect unmatched rows, or revert an eligible file import. Phone sync and administrator corrections are listed separately.</p>{files}</section>}
+  {tab==="Admin corrections"&&<section className="space-y-3 rounded-xl border p-4" aria-label="Integra administrator corrections"><h2 className="font-semibold">Admin corrections</h2><p className="text-sm">These are reviewed decisions saved in Integra, not files imported from phones. Original captures and approval history are retained.</p><AttendanceReadStatus {...progress}/>{progress.data&&<p className="text-sm">{progress.data.plans.filter(plan=>plan.approved).length} approved employee plans · {progress.data.plans.filter(plan=>!plan.approved&&plan.state!=="Archived draft").length} saved proposals · {progress.data.adjustments.filter(item=>item.state==="Open").length} open adjustment reviews</p>}<div className="flex flex-wrap gap-2"><Link className={button} href={`${batchHref}&view=history`}>Open correction history</Link><Link className={button} href={`${batchHref}&view=drafts`}>Saved drafts</Link><Link className={button} href={attendancePeriodUrl("/payroll/attendance-hold",year,periodId)}>Held-time decisions</Link></div><AttendanceReadStatus {...source}/>{source.data&&<LegacyAttendanceHistory key={periodId+":"+revision} data={source.data}/>}<p className="text-xs text-muted-foreground">Historical source receipts and safe retry controls remain available with each saved plan.</p></section>}
+ </main>;
 }

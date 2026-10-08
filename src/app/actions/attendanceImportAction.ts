@@ -356,7 +356,7 @@ function mapAttendanceRawRowsToParsedLogs(
   rows: AttendanceRawLogComputationRow[]
 ): ParsedAttendanceLog[] {
   return rows.map((row) => ({
-    rawLogId: row.id,
+    rawLogId: row.id > 0 ? row.id : null,
     employeeNo: row.employeeNo,
     employeeId: row.employeeId ?? null,
     batchId: row.batchId,
@@ -1868,7 +1868,7 @@ async function importAttendanceLogsForScope(
     });
 
     const summaryParsedLogs = summaryRawRows.map((row) => ({
-      rawLogId: "id" in row ? row.id : null,
+      rawLogId: "id" in row && row.id > 0 ? row.id : null,
       employeeNo: row.employeeNo,
       employeeId: row.employeeId ?? null,
       batchId: row.batchId,

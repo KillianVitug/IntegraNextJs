@@ -67,6 +67,7 @@ export function PayrollSpecialRunPageClient({ selectedPeriod, selectedRun }: Pro
   return (
     <div className="space-y-6">
       <PayrollPageNav
+        context={{periodId:selectedPeriod?.id,year:selectedPeriod?.startDate.slice(0,4),runId:selectedRun?.id,group:selectedRun?.payrollGroup??undefined}}
         activeSection="specialRun"
         title="Special Run"
         description="Prepare non-standard payroll scenarios such as 13th month, final pay, and supplemental or off-cycle runs."

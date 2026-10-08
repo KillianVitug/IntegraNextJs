@@ -418,7 +418,7 @@ export async function rebuildEmployeeAttendanceSummaries(args: {
       },
     ],
     logs: rawLogs.map((log: typeof rawLogs[number]) => ({
-      rawLogId: log.id,
+      rawLogId: log.id > 0 ? log.id : null,
       employeeNo: log.employeeNo,
       employeeId: log.employeeId ?? null,
       batchId: log.batchId,

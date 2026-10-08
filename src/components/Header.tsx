@@ -1,6 +1,5 @@
 import {
   HomeIcon,
-  File,
   UsersRound,
   LogOut,
   Settings,
@@ -17,6 +16,7 @@ import { ModeToggle } from "@/components/ModeToggle";
 import { NavButtonMenu } from "./NavButtonMenu";
 import { getCurrentAuthContext, hasPermission } from "@/lib/auth/server";
 import { AUTH_PERMISSIONS } from "@/lib/auth/permissions";
+import { PayrollHeaderMenu } from "./PayrollHeaderMenu";
 
 export async function Header() {
   const auth = await getCurrentAuthContext();
@@ -75,18 +75,7 @@ export async function Header() {
             ]}
           />
 
-          <NavButtonMenu
-            icon={File}
-            label="Payroll Menu"
-            aria-label="Payroll Menu"
-            choices={[
-              { title: "Payroll Workspace", href: "/payroll" },
-              ...(process.env.ATTENDANCE_SOURCE_ENABLED === "true" ? [{ title: "Attendance review & sync", href: "/payroll/attendance-source" }] : []),
-              { title: "Payroll Report", href: "/payroll/report" },
-              { title: "Payroll Outputs", href: "/payroll/outputs" },
-              { title: "Special Run", href: "/payroll/special-run" },
-            ]}
-          />
+          <PayrollHeaderMenu attendanceEnabled={process.env.ATTENDANCE_SOURCE_ENABLED === "true"}/>
 
           <NavButtonMenu
             icon={HandCoins}
