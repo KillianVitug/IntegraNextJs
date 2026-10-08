@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { renderPayrollWorkspacePage } from "../page-loader";
 import { PAYROLL_ROUTE_SECTIONS } from "../sections";
 
@@ -14,6 +14,11 @@ export default async function PayrollSectionPage({
   searchParams: Promise<{ [key: string]: string | undefined }>;
 }) {
   const { section } = await params;
+  if (section === "attendance-imports") {
+    const search = await searchParams;
+    const query = new URLSearchParams(Object.entries(search).filter((entry): entry is [string, string] => entry[1] !== undefined));
+    redirect(`/payroll/attendance-details?${query}`);
+  }
   const activeSection = PAYROLL_ROUTE_SECTIONS[section];
 
   if (!activeSection) {

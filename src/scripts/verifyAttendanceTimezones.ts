@@ -34,7 +34,7 @@ async function verify() {
     try {
       const database = drizzle(pg, { schema }), dialect = new PgDialect(), enums = new Set<string>();
       // Same selected-column base fixture as verifyAttendanceSource; no persistent database.
-      for (const table of [schema.employees, schema.payrollPeriods, schema.payrollRuns, schema.attendanceImportBatches, schema.attendanceRawLogs, schema.attendanceDailySummaries, schema.adminAuditEvents, schema.payrollRunEvents]) {
+      for (const table of [schema.employeesTimekeeping, schema.employeeShiftAssignments, schema.employeeWeeklyShiftPatterns, schema.employeeWeeklyShiftPatternDays, schema.employees, schema.payrollPeriods, schema.payrollRuns, schema.attendanceImportBatches, schema.attendanceRawLogs, schema.attendanceDailySummaries, schema.adminAuditEvents, schema.payrollRunEvents]) {
         const config = getTableConfig(table), columns: string[] = [];
         for (const col of config.columns) {
           const type = col.getSQLType();

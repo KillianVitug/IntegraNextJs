@@ -1,6 +1,4 @@
-import Link from "next/link";
 import { requireAdminActor } from "@/lib/admin";
-import { attendancePeriodUrl } from "@/lib/payroll/attendanceSourcePeriods";
 import {
   isValidPayrollYear,
   loadPayrollAccountCodeEmployees,
@@ -8,14 +6,17 @@ import {
 } from "@/lib/payroll/workspaceSnapshot";
 import { PayrollGroups } from "./PayrollGroups";
 import { PayrollWorkspace } from "./PayrollWorkspace";
+import { PayrollWorkspaceNav } from "./PayrollPageNav";
 import type { PayrollSection } from "./sections";
 
 type PayrollSearchParams = { [key: string]: string | undefined };
 
 export async function loadPayrollPageContext({
   searchParams,
+  activeSection = "run",
 }: {
   searchParams: Promise<PayrollSearchParams>;
+  activeSection?: PayrollSection;
 }) {
   await requireAdminActor();
   const params = await searchParams;
@@ -29,8 +30,10 @@ export async function loadPayrollPageContext({
       periodId: params.periodId,
       runId:params.runId,
       payrollGroup:params.group==="Monthly"?"Monthly":"Daily",
+      includeRunDetails: ["run", "report", "specialRun"].includes(activeSection),
+      includeAttendanceBatches: activeSection === "attendanceSources",
     }),
-    loadPayrollAccountCodeEmployees(),
+    ["manual", "accountCodes", "attendance"].includes(activeSection) ? loadPayrollAccountCodeEmployees() : Promise.resolve([]),
   ]);
 
   return {
@@ -44,34 +47,25 @@ export async function loadPayrollPageContext({
 export async function renderPayrollWorkspacePage({
   activeSection,
   searchParams,
+  embedded = false,
 }: {
   activeSection: PayrollSection;
   searchParams: Promise<PayrollSearchParams>;
+  embedded?: boolean;
 }) {
   const { selectedYear, payrollGroup, snapshot, payrollAccountCodeEmployees } =
-    await loadPayrollPageContext({ searchParams });
+    await loadPayrollPageContext({ searchParams, activeSection });
 
   return (
     <>
-        <nav aria-label="Payroll workspaces" className="flex flex-wrap gap-3 px-6 pt-4">
-          <Link className="inline-flex min-h-11 items-center rounded-lg border px-3 py-2 text-sm font-semibold" href={`/payroll/provisional?${new URLSearchParams({year:String(selectedYear),group:payrollGroup,...(snapshot.selectedPeriodId?{periodId:snapshot.selectedPeriodId}:{})})}`}>Provisional payroll</Link>
-          {process.env.ATTENDANCE_SOURCE_ENABLED === "true" && <Link
-            className="inline-flex min-h-11 items-center rounded-lg border px-3 py-2 text-sm font-semibold"
-            href={attendancePeriodUrl(
-              "/payroll/attendance-source",
-              selectedYear,
-              snapshot.selectedPeriodId ?? ""
-            )}
-          >
-            Attendance review & sync
-          </Link>}
-        </nav>
-      {snapshot.selectedPeriodId&&<PayrollGroups periodId={snapshot.selectedPeriodId} year={selectedYear} group={payrollGroup}/>}
+      {!embedded && <PayrollWorkspaceNav activeSection={activeSection} context={{year:String(selectedYear),periodId:snapshot.selectedPeriodId??undefined,group:payrollGroup,runId:snapshot.selectedRun?.id}}/>}
+      {!embedded && activeSection === "run" && snapshot.selectedPeriodId&&<PayrollGroups periodId={snapshot.selectedPeriodId} year={selectedYear} group={payrollGroup}/>}
       <PayrollWorkspace
         key={payrollGroup}
         payrollGroup={payrollGroup}
         attendanceEnabled={process.env.ATTENDANCE_SOURCE_ENABLED === "true"}
         activeSection={activeSection}
+        embedded={embedded}
         initialYear={selectedYear}
         periods={snapshot.periods}
         selectedPeriodId={snapshot.selectedPeriodId}

@@ -1,3 +1,4 @@
+import type { AttendanceDayInput } from "./attendanceDayInput";
 import { manilaWallTime, sourceDayOffset, type SourcePunch } from "./attendanceSourceClient";
 import type { ShiftWindow } from "./attendance";
 
@@ -6,7 +7,7 @@ export type WorkChange={id:string;day:string;kind:WorkKind;eventId?:string;rawLo
 export type WorkDraft={employeeId:string;days:string[];changes:WorkChange[];reason:string;ownerId:string;needed:string;rejected:boolean;version:string;undoOf?:string;replaces?:string;incomingVersions?:Record<string,string>};
 export type WorkRecord={id:string;source:"API"|"Manual"|"File";rawLogId?:number;employeeId:string;type:"IN"|"OUT"|"UNSPECIFIED";at:string;status:"VALID"|"VOID";clockFlag:boolean;clockVerified?:boolean;originalType?:string;originalAt?:string;sourceEmployeeId?:string;sourcePunch?:SourcePunch;excluded?:boolean};
 export type WorkFinding={code:string;severity:"error"|"warning";employeeId:string;day:string;message:string};
-export type WorkDay={findings?:WorkFinding[];day:string;schedule:ShiftWindow|null;rest:boolean;leave:number;leaveEvidence:unknown;configuration:unknown;records:WorkRecord[];status:string;issues:string[];suggestions:{label:string;explanation:string;changes:Partial<WorkChange>[]}[];version:string;resolved:boolean;decision?:{planId?:string;payrollRunId?:string;revision?:string;approvedAt:string;reason:string;lateConflict:boolean;incomingDigest:string;incomingRecords:WorkRecord[]}};
+export type WorkDay={attendance?:AttendanceDayInput;findings?:WorkFinding[];day:string;schedule:ShiftWindow|null;rest:boolean;leave:number;leaveEvidence:unknown;configuration:unknown;records:WorkRecord[];status:string;issues:string[];suggestions:{label:string;explanation:string;changes:Partial<WorkChange>[]}[];version:string;resolved:boolean;decision?:{planId?:string;payrollRunId?:string;revision?:string;approvedAt:string;reason:string;lateConflict:boolean;incomingDigest:string;incomingRecords:WorkRecord[]}};
 export type WorkEmployee={id:string;no:string;name:string;sourceIds:string[];mappingEvidence:unknown;hired:string|null;separated:string|null;days:WorkDay[];contextRecords?:WorkRecord[]};
 export type WorkPlanView={id:string;batchId:string;revision:number;state:string;draft:WorkDraft;result:string|null;approved?:boolean;approvedAt?:string;historicalDeliveryPending?:boolean;supersededBy?:string[];updatedAt:string};
 export type WorkProgress=Pick<WorkBoard,"plans"|"history"|"adjustments"|"owners">;

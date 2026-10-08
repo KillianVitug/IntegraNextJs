@@ -412,10 +412,13 @@ function getGroupedEmployeeLogs(
 
 function normalizeSourceBatchId(value: string | null | undefined) {
   const trimmed = value?.trim();
-  return trimmed && trimmed.length > 0 ? trimmed : null;
+  return trimmed && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed) ? trimmed : null;
 }
 
 function getSingleSourceBatchId(logs: ParsedAttendanceLog[]) {
+  // Cached source facts and forecasts are calculation inputs, not import batches.
+  // Never persist their read-only identifiers as a source_batch_id foreign key.
+  if(logs.some(log=>log.batchId&&!normalizeSourceBatchId(log.batchId)))return null;
   const sourceBatchIds = [
     ...new Set(
       logs

@@ -22,7 +22,7 @@ async function main() {
     const engineDb = database as unknown as Parameters<typeof transitionPayrollRunStatus>[4];
     const dialect = new PgDialect(), enums = new Set<string>();
     // Real column definitions and real connector migration, isolated in memory.
-    for (const table of [schema.employees, schema.payrollPeriods, schema.payrollRuns, schema.payrollRunEmployees, schema.payrollRunLines, schema.employeesLoans, schema.loanInstallments, schema.loanPayments, schema.attendanceImportBatches, schema.attendanceRawLogs, schema.attendanceDailySummaries, schema.adminAuditEvents, schema.payrollRunEvents, schema.employeeAttendanceDayStatusOverrides, schema.attendanceDtrHoldApprovals]) {
+    for (const table of [schema.employeesTimekeeping, schema.employeeShiftAssignments, schema.employeeWeeklyShiftPatterns, schema.employeeWeeklyShiftPatternDays, schema.employees, schema.payrollPeriods, schema.payrollRuns, schema.payrollRunEmployees, schema.payrollRunLines, schema.employeesLoans, schema.loanInstallments, schema.loanPayments, schema.attendanceImportBatches, schema.attendanceRawLogs, schema.attendanceDailySummaries, schema.adminAuditEvents, schema.payrollRunEvents, schema.employeeAttendanceDayStatusOverrides, schema.attendanceDtrHoldApprovals]) {
       const config = getTableConfig(table), columns: string[] = [];
       for (const col of config.columns) {
         const type = col.getSQLType();

@@ -1453,7 +1453,7 @@ export function summarizeEmployeeDay(
 
   if (orderedLogs.length % 2 !== 0) {
     anomalyFlags.push("ODD_PUNCH_COUNT");
-    anomalyFlags.push("MISSING_OUT");
+    if(orderedLogs.every(log=>log.direction==="UNSPECIFIED"))anomalyFlags.push("MISSING_OUT");
   }
 
   if (
@@ -1464,11 +1464,17 @@ export function summarizeEmployeeDay(
     hasInvalidSplitPunchSequence(orderedLogs)
   ) {
     anomalyFlags.push(ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG);
-    anomalyFlags.push("MISSING_OUT");
   }
 
-  if(orderedLogs.some(log=>log.direction!=="UNSPECIFIED")&&workedSegments.length*2!==orderedLogs.length){if(!anomalyFlags.includes("MISSING_OUT"))anomalyFlags.push("MISSING_OUT");anomalyFlags.push("INCOMPLETE_SEQUENCE");}
-  if(anomalyFlags.includes("MISSING_OUT")&&workedSegments.length>0)anomalyFlags.push("PARTIAL_VALID_WORK");
+  if(orderedLogs.some(log=>log.direction!=="UNSPECIFIED")&&workedSegments.length*2!==orderedLogs.length){
+    let opened=false,missingIn=false,missingOut=false;
+    for(const log of orderedLogs){if(log.direction==="IN"){if(opened)missingOut=true;opened=true;}else if(log.direction==="OUT"){if(!opened)missingIn=true;opened=false;}}
+    if(opened)missingOut=true;
+    if(missingIn)anomalyFlags.push("MISSING_IN");
+    if(missingOut)anomalyFlags.push("MISSING_OUT");
+    anomalyFlags.push("INCOMPLETE_SEQUENCE");
+  }
+  if(anomalyFlags.some(flag=>["MISSING_IN","MISSING_OUT","INCOMPLETE_SEQUENCE"].includes(flag))&&workedSegments.length>0)anomalyFlags.push("PARTIAL_VALID_WORK");
 
   const actualInMinutes =
     firstInAt != null

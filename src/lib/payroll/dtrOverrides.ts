@@ -252,6 +252,7 @@ export function hasUnresolvedAttendanceDtrHoldFlag(
   const normalized = normalizeAttendanceDtrAnomalyFlags(flags);
   return (
     normalized.includes("ODD_PUNCH_COUNT") ||
+    normalized.includes("MISSING_IN") ||
     normalized.includes("MISSING_OUT") ||
     normalized.includes("SCHEDULE_MISSING") ||
     normalized.includes(ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG)

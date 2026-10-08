@@ -1,3 +1,5 @@
+import { freezesAttendanceInput } from "./attendanceDayInput";
+import { loadSourceDayEligibility } from "./effectiveAttendanceInputs";
 import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
@@ -72,12 +74,13 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
     if (!period || sourceDayOffset(period.startDate,-1) !== run.fromDate || sourceDayOffset(period.endDate,1) !== run.throughDate) throw Error("Payroll period changed during sync");
     const periodRuns = await tx.select().from(payrollRuns).where(eq(payrollRuns.payrollPeriodId, periodId)).for("update");
     const protectedPeriod = period.status !== "Open" || periodRuns.some(r => r.status === "Posted"&&r.inputSnapshot?.payrollGroup!=="Monthly");
-    const frozenRun=process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"&&periodRuns.some(r=>r.status!=="Void"&&r.inputSnapshot?.payrollGroup!=="Monthly");
+    const frozenRun=process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"&&periodRuns.some(r=>freezesAttendanceInput(r.status,r.inputSnapshot?.payrollGroup));
     const decisionsForPeriod=process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"?await tx.select().from(workTreatments).where(and(eq(workTreatments.periodId,periodId),eq(workTreatments.active,true))):[];
     const protectedEvents=new Set(decisionsForPeriod.flatMap(t=>{const d=adminDecision(t.payload);return d?[...d.records,...d.sourceRecords].map(r=>r.id):[];}));
     const protectedDays=new Set(decisionsForPeriod.filter(t=>adminDecision(t.payload)).flatMap(t=>adminDecision(t.payload)!.days.map(day=>`${t.employeeId}|${day}`)));
     const roster = await tx.select({ sourceId: mappings.sourceEmployeeId, employeeId: employees.id, employeeNo: employees.employeeNo, deletedAt: employees.deletedAt }).from(mappings).innerJoin(employees, eq(employees.id, mappings.employeeId));
     const mapping = new Map(roster.filter(r => !r.deletedAt && r.employeeNo).map(r => [r.sourceId, r]));
+    const {eligibility:dayEligibility}=await loadSourceDayEligibility(tx,records,mapping);
     const oldProjections = await tx.select().from(projections).where(eq(projections.payrollPeriodId, periodId));
     const oldById = new Map(oldProjections.map(r => [r.eventId, r]));
     const projectedRawIds=oldProjections.flatMap(p=>p.rawLogId?[p.rawLogId]:[]);
@@ -136,10 +139,10 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
       const person = mapping.get(punch.employeeId); if (!person && relevant && punch.status === "VALID") counts.unmatched++;
       const boundary = boundaryIds.has(punch.eventId)&&!accepted(punch)&&!workbench.excluded.has(punch.eventId);
       if (boundary) counts.boundaryReview++;
-      if (relevant && !workbench.excluded.has(punch.eventId) && punch.status === "VALID" && (!person || clockIssue(punch) || !decision && !accepted(punch) && !punch.reviewResolved && punch.reviewFlags.length > 0)) counts.withheld++;
+      if (relevant && !workbench.excluded.has(punch.eventId) && punch.status === "VALID" && (!person || clockIssue(punch) || !decision && !accepted(punch) && !punch.reviewResolved && !dayEligibility.get(punch.eventId)?.eligible && punch.reviewFlags.length > 0)) counts.withheld++;
       const fileOverlap = !!person && fileDays.has(`${person.employeeId}|${manilaWallTime(punch.capturedAt).date}`);
       if (process.env.ATTENDANCE_WORKBENCH_ENABLED === "true" && fileOverlap && relevant && !workbench.excluded.has(punch.eventId) && punch.status === "VALID") counts.withheld++;
-      const prior = oldById.get(punch.eventId); const base = decision ? [payablePunch(punch), person?.employeeId ?? null, relevant, decision.id] : relevant ? [payablePunch(punch), person?.employeeId ?? null] : [payablePunch(punch), person?.employeeId ?? null, false];const fingerprint=hash(workbench.excluded.has(punch.eventId)?[base,"excluded-workbench"]:process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"&&fileOverlap?[base,"file-overlap"]:accepted(punch)?[base,"verified-workbench"]:base);
+      const prior = oldById.get(punch.eventId); const base = decision ? [payablePunch(punch), person?.employeeId ?? null, relevant, decision.id] : relevant ? [payablePunch(punch), person?.employeeId ?? null] : [payablePunch(punch), person?.employeeId ?? null, false];const fingerprintBase=dayEligibility.get(punch.eventId)?.contextualFlagsResolved?[base,"complete-workday-v1"]:base;const fingerprint=hash(workbench.excluded.has(punch.eventId)?[fingerprintBase,"excluded-workbench"]:process.env.ATTENDANCE_WORKBENCH_ENABLED==="true"&&fileOverlap?[fingerprintBase,"file-overlap"]:accepted(punch)?[fingerprintBase,"verified-workbench"]:fingerprintBase);
       if (prior?.payloadHash === fingerprint) continue;
       const decided=protectedEvents.has(punch.eventId)||protectedDays.has(`${person?.employeeId}|${manilaWallTime(punch.capturedAt).date}`)||!!prior?.employeeId&&protectedDays.has(`${prior.employeeId}|${manilaWallTime((storedEvents.get(punch.eventId)?.payload as SourcePunch|undefined)?.capturedAt??punch.capturedAt).date}`);
       if (protectedPeriod||frozenRun||decided) {
@@ -152,7 +155,7 @@ export async function reconcileAttendanceSource(database: typeof db, periodId: s
         continue;
       }
       // Unresolved source review flags stay in the source inbox, never silently paid.
-      const eligible = relevant && !workbench.excluded.has(punch.eventId) && person && punch.status === "VALID" && !clockIssue(punch) && (process.env.ATTENDANCE_WORKBENCH_ENABLED !== "true" || !fileOverlap) && (decision?.kind === "Manual" || accepted(punch) || punch.reviewResolved || punch.reviewFlags.length === 0);
+      const eligible = relevant && !workbench.excluded.has(punch.eventId) && person && punch.status === "VALID" && !clockIssue(punch) && (process.env.ATTENDANCE_WORKBENCH_ENABLED !== "true" || !fileOverlap) && (decision?.kind === "Manual" || accepted(punch) || punch.reviewResolved || dayEligibility.get(punch.eventId)?.eligible === true);
       if (prior?.employeeId) touched.add(prior.employeeId); if (person) touched.add(person.employeeId);
       if (prior?.rawLogId) {
         await tx.update(projections).set({ rawLogId: null }).where(and(eq(projections.payrollPeriodId, periodId), eq(projections.eventId, punch.eventId)));

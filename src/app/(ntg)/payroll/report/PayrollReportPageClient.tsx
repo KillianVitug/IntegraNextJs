@@ -129,6 +129,7 @@ function formatMoney(value: string | number | null | undefined) {
 function formatDateTime(value: string | null) {
   if (!value) return "-";
   return new Intl.DateTimeFormat("en-PH", {
+    timeZone: "Asia/Manila",
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
@@ -516,6 +517,7 @@ export function PayrollReportPageClient({
   return (
     <div className="space-y-6">
       <PayrollPageNav
+        context={{periodId:selectedPeriod?.id,year:selectedPeriod?.startDate.slice(0,4),runId:selectedRun?.id,group:selectedRun?.payrollGroup??undefined}}
         activeSection="report"
         title="Payroll Report"
         description="Review selected-run department, net pay, allowance, deduction, contribution, account-code, and agency reports."

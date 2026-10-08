@@ -32,7 +32,7 @@ async function main() {
   let requests = 0; await assert.rejects(() => pullAttendanceSource({ ...options, fetcher: async () => ++requests === 1 ? page([event], event.eventId) : new Response("offline", { status: 503 }) }), /503/);
   const pg = new PGlite(); const database = drizzle(pg, { schema }); const dialect = new PgDialect(); const enums = new Set<string>();
   // Build the relevant existing tables from the actual Drizzle columns, then apply the real additive migration.
-  const existing = [schema.employees, schema.payrollPeriods, schema.payrollRuns, schema.attendanceImportBatches, schema.attendanceRawLogs, schema.attendanceDailySummaries, schema.adminAuditEvents, schema.payrollRunEvents];
+  const existing = [schema.employeesTimekeeping, schema.employeeShiftAssignments, schema.employeeWeeklyShiftPatterns, schema.employeeWeeklyShiftPatternDays, schema.employees, schema.payrollPeriods, schema.payrollRuns, schema.attendanceImportBatches, schema.attendanceRawLogs, schema.attendanceDailySummaries, schema.adminAuditEvents, schema.payrollRunEvents];
   for (const table of existing) {
     const config = getTableConfig(table); const columns: string[] = [];
     for (const col of config.columns) {
