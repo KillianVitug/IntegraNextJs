@@ -67,7 +67,7 @@ async function main() {
     const calls: { url: string; method: string; auth: string }[] = [];
     const receiptFetch: typeof fetch = async (input, init) => {
       const url = new URL(String(input)); calls.push({ url: url.pathname, method: init?.method ?? "GET", auth: new Headers(init?.headers).get("Authorization") ?? "" });
-      assert.equal(url.pathname, "/v1/integra/receipts");
+      assert.equal(url.pathname, "/v1/integra/corrections");
       assert.equal(init?.method, "GET");
       return Response.json({ state: "Not found", id: url.searchParams.get("id"), plan: null, changes: [] });
     };

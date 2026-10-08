@@ -70,7 +70,7 @@ async function main() {
   const sourceVoid=randomUUID(),requests=[{id:randomUUID(),eventId:records[0].eventId,action:"VOID"},{id:randomUUID(),eventId:records[2].eventId,action:"VOID"}];
   await database.insert(resolutions).values({id:sourceVoid,payrollPeriodId:periodId,sourceEmployeeId:"552",employeeId,kind:"SourceVoid",state:"Failed",sourceVersion:"historical",reason:"Historical fixture",evidence:"Historical fixture",manualPunches:[],eventIds:requests.map(r=>r.eventId),sourceRequests:requests,actorUserId:actor,reviewerUserId:actor});
   let attempts=0;const dbForDelivery=database as unknown as Parameters<typeof applySourceResolution>[3];
-  const retired=await applySourceResolution(sourceVoid,actor,false,dbForDelivery,async(input,init)=>{attempts++;assert.equal(init?.method,"GET");assert.equal(new URL(String(input)).pathname,"/v1/integra/receipts");return Response.json({state:attempts===1?"Applied":"Not found",id:new URL(String(input)).searchParams.get("id")});});
+  const retired=await applySourceResolution(sourceVoid,actor,false,dbForDelivery,async(input,init)=>{attempts++;assert.equal(init?.method,"GET");assert.equal(new URL(String(input)).pathname,"/v1/integra/corrections");return Response.json({state:attempts===1?"Applied":"Not found",id:new URL(String(input)).searchParams.get("id")});});
   assert.match(retired,/1 of 2 historical applications confirmed/);assert.equal(attempts,2);
   assert.equal((await database.select().from(resolutions).where(eq(resolutions.id,sourceVoid)))[0].state,"Expired");
   assert.equal(await applySourceResolution(sourceVoid,actor,false,dbForDelivery,async()=>{throw Error("Retirement must not repeat source requests");}),retired);

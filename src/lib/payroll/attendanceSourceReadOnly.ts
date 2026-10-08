@@ -16,7 +16,7 @@ export async function readAttendanceSourceReceipt(kind: "plan" | "correction", i
   if (origin.protocol !== "https:" || origin.pathname !== "/" || origin.username || origin.password || origin.search || origin.hash || token.length < 32) {
     throw new PayrollValidationError("The read-only attendance connection is not configured.");
   }
-  const url = new URL("/v1/integra/receipts", origin);
+  const url = new URL("/v1/integra/corrections", origin);
   url.search = new URLSearchParams({ kind, id }).toString();
   const response = await fetcher(url, { method: "GET", headers: { Authorization: `Bearer ${token}` }, redirect: "error", cache: "no-store", signal: AbortSignal.timeout(8000) });
   if (!response.ok) throw new PayrollValidationError("Historical source receipt is unavailable. No attendance source update was sent.");
