@@ -53,10 +53,16 @@ export type SchedulePeriodCommand = {
   requestId: string; departmentId: number; periodId: string; sourceDigest: string; expectedDraftRevision: number | null; expectedDraftId: string | null;
   changes: Array<{ employeeId: string; day: string; value: string }>;
 };
+export type ScheduleDayRepair = {
+  departmentId: number; periodId: string; sourceDigest: string;
+  expectedDraftId: string | null; expectedDraftRevision: number | null;
+  cell: ScheduleCell; pendingDraftCell: ScheduleCell | null;
+  shifts: ScheduleWorkspace["shifts"];
+};
 export type ScheduleWeeklyCommand = {
   requestId: string; departmentId: number; sourceDigest: string; effectiveFrom: string; effectiveTo: string | null;
   employeeIds: string[]; days: Array<{ weekday: ScheduleWeekday; value: string }>;
 };
 export type ScheduleArchiveCommand = { requestId: string; departmentId: number; sourceDigest: string; employeeId: string; patternId: number; endDate: string };
-export type ScheduleReceipt = { requestId: string; action: "draft_saved" | "confirmed" | "draft_deleted" | "weekly_saved" | "weekly_archived"; message: string; changedCount: number; draftRevision?: number };
+export type ScheduleReceipt = { requestId: string; action: "draft_saved" | "confirmed" | "days_confirmed" | "draft_deleted" | "weekly_saved" | "weekly_archived"; message: string; changedCount: number; draftRevision?: number; affectedTargets?: Array<{employeeId:string;day:string}>; affectedPeriodIds?: string[]; summariesRebuilt?: number };
 export type ScheduleActionResult = { ok: true; receipt: ScheduleReceipt } | { ok: false; error: string };

@@ -1,7 +1,8 @@
 "use server";
 import { workTreatments } from "@/db/attendanceWorkbenchSchema";
 import { assertFileAttendanceBatch } from "@/lib/payroll/validation";
-import { attendanceSourceVersion, confirmAttendanceSourceSummaryRefresh, attendanceSourceDateFilter } from "@/lib/payroll/attendanceSourceGuard";
+import { loadEffectiveAttendanceRawLogs, loadEffectiveAttendanceCorrections } from "@/lib/payroll/effectiveAttendanceInputs";
+import { attendanceSourceVersion, confirmAttendanceSourceSummaryRefresh } from "@/lib/payroll/attendanceSourceGuard";
 
 import { revalidatePath } from "next/cache";
 import { createHash } from "crypto";
@@ -713,41 +714,11 @@ async function loadAttendancePeriodSourceData(
     };
   }
 
-  const rawLogs: AttendancePeriodRawLogRow[] = await database
-    .select({
-      id: attendanceRawLogs.id,
-      employeeId: attendanceRawLogs.employeeId,
-      employeeNo: attendanceRawLogs.employeeNo,
-      batchId: attendanceRawLogs.batchId,
-      sourceFileName: attendanceImportBatches.sourceFileName,
-      loggedAt: attendanceRawLogs.loggedAt,
-      logDate: attendanceRawLogs.logDate,
-      logTime: attendanceRawLogs.logTime,
-      direction: attendanceRawLogs.direction,
-      sourceLine: attendanceRawLogs.sourceLine,
-      rawText: attendanceRawLogs.rawText,
-      deviceId: attendanceRawLogs.deviceId,
-      siteCode: attendanceRawLogs.siteCode,
-    })
-    .from(attendanceRawLogs)
-    .innerJoin(attendanceImportBatches, eq(attendanceRawLogs.batchId, attendanceImportBatches.id))
-    .where(
-      and(
-        eq(attendanceImportBatches.payrollPeriodId, payrollPeriodId),
-        isNotNull(attendanceRawLogs.employeeId),
-        employeeId
-          ? eq(attendanceRawLogs.employeeId, employeeId)
-          : scopedEmployeeIds
-            ? inArray(attendanceRawLogs.employeeId, scopedEmployeeIds)
-            : sql`TRUE`,
-        attendanceSourceDateFilter(payrollPeriod.startDate, payrollPeriod.endDate)
-      )
-    )
-    .orderBy(
-      asc(attendanceRawLogs.employeeId),
-      asc(attendanceRawLogs.loggedAt),
-      asc(attendanceRawLogs.id)
-    );
+  const rawLogs: AttendancePeriodRawLogRow[] = await loadEffectiveAttendanceRawLogs(database, {
+    payrollPeriodId, employeeIds: employeeId ? [employeeId] : scopedEmployeeIds,
+    startDate: payrollPeriod.startDate, endDate: payrollPeriod.endDate,
+    neighborDays: process.env.ATTENDANCE_SOURCE_ENABLED === "true" ? "api" : "none",
+  });
 
   const rawEmployeeIds: string[] = [
     ...new Set(
@@ -914,21 +885,9 @@ async function loadAttendancePeriodSourceData(
               lte(employeeAttendanceDayMetricOverrides.attendanceDate, payrollPeriod.endDate)
             )
           );
-  const approvedCorrections: Array<typeof attendanceDtrCorrections.$inferSelect> =
-    employeeIds.length === 0
-      ? []
-      : await database
-          .select()
-          .from(attendanceDtrCorrections)
-          .where(
-            and(
-              eq(attendanceDtrCorrections.payrollPeriodId, payrollPeriodId),
-              inArray(attendanceDtrCorrections.employeeId, employeeIds),
-              eq(attendanceDtrCorrections.status, "Approved"),
-              gte(attendanceDtrCorrections.attendanceDate, payrollPeriod.startDate),
-              lte(attendanceDtrCorrections.attendanceDate, payrollPeriod.endDate)
-            )
-          );
+  const approvedCorrections = await loadEffectiveAttendanceCorrections(database, {
+    payrollPeriodId, employeeIds, startDate: payrollPeriod.startDate, endDate: payrollPeriod.endDate,
+  });
   const holidayRows = await fetchConfirmedHolidayRowsForRange(
     payrollPeriod.startDate,
     payrollPeriod.endDate
@@ -2115,38 +2074,10 @@ async function importAttendanceLogsForScope(
             },
           });
     const resolvedApprovedLeaves = await resolveApprovedLeaveFlags(approvedLeaves, tx);
-    const summaryRawRows =
-      matchedEmployeeIds.length === 0 || !summaryCoverageRange
-        ? rawRows
-        : await tx
-            .select({
-              id: attendanceRawLogs.id,
-              employeeId: attendanceRawLogs.employeeId,
-              employeeNo: attendanceRawLogs.employeeNo,
-              batchId: attendanceRawLogs.batchId,
-              loggedAt: attendanceRawLogs.loggedAt,
-              logDate: attendanceRawLogs.logDate,
-              logTime: attendanceRawLogs.logTime,
-              direction: attendanceRawLogs.direction,
-              sourceLine: attendanceRawLogs.sourceLine,
-              rawText: attendanceRawLogs.rawText,
-              deviceId: attendanceRawLogs.deviceId,
-              siteCode: attendanceRawLogs.siteCode,
-            })
-            .from(attendanceRawLogs)
-            .where(
-              and(
-                isNotNull(attendanceRawLogs.employeeId),
-                inArray(attendanceRawLogs.employeeId, matchedEmployeeIds),
-                gte(attendanceRawLogs.logDate, summaryCoverageRange.startDate),
-                lte(attendanceRawLogs.logDate, summaryCoverageRange.endDate)
-              )
-            )
-            .orderBy(
-              asc(attendanceRawLogs.employeeId),
-              asc(attendanceRawLogs.loggedAt),
-              asc(attendanceRawLogs.id)
-            );
+    const summaryRawRows = !summaryCoverageRange ? [] : await loadEffectiveAttendanceRawLogs(tx, {
+      employeeIds: matchedEmployeeIds, startDate: summaryCoverageRange.startDate,
+      endDate: summaryCoverageRange.endDate, neighborDays: "all",
+    });
 
     const summaryParsedLogs = summaryRawRows.map((row) => ({
       rawLogId: "id" in row ? row.id : null,
@@ -2199,27 +2130,10 @@ async function importAttendanceLogsForScope(
         : { pendingSuggestionCount: 0 };
 
     // Reload approved corrections after sync so newly auto-approved ones are included.
-    const approvedCorrectionsAfterSync =
-      matchedEmployeeIds.length === 0 || !summaryCoverageRange || !selectedPayrollPeriod
-        ? []
-        : await tx
-            .select()
-            .from(attendanceDtrCorrections)
-            .where(
-              and(
-                eq(attendanceDtrCorrections.payrollPeriodId, selectedPayrollPeriod.id),
-                inArray(attendanceDtrCorrections.employeeId, matchedEmployeeIds),
-                eq(attendanceDtrCorrections.status, "Approved"),
-                gte(
-                  attendanceDtrCorrections.attendanceDate,
-                  summaryCoverageRange.startDate
-                ),
-                lte(
-                  attendanceDtrCorrections.attendanceDate,
-                  summaryCoverageRange.endDate
-                )
-              )
-            );
+    const approvedCorrectionsAfterSync = !summaryCoverageRange || !selectedPayrollPeriod ? [] : await loadEffectiveAttendanceCorrections(tx, {
+      employeeIds: matchedEmployeeIds, payrollPeriodId: selectedPayrollPeriod.id,
+      startDate: summaryCoverageRange.startDate, endDate: summaryCoverageRange.endDate,
+    });
 
     const summaryComputations = buildAttendanceSummaryComputations({
       employees: matchedEmployees.map((employee) => ({
@@ -3855,24 +3769,10 @@ async function refreshAttendancePeriodSummariesForScope(args: {
     });
 
     // Reload approved corrections to include any that were just auto-approved.
-    const approvedCorrectionsAfterSync = await tx
-      .select()
-      .from(attendanceDtrCorrections)
-      .where(
-        and(
-          eq(attendanceDtrCorrections.payrollPeriodId, sourceData.payrollPeriod.id),
-          inArray(attendanceDtrCorrections.employeeId, matchedEmployeeIds),
-          eq(attendanceDtrCorrections.status, "Approved"),
-          gte(
-            attendanceDtrCorrections.attendanceDate,
-            sourceData.payrollPeriod.startDate
-          ),
-          lte(
-            attendanceDtrCorrections.attendanceDate,
-            sourceData.payrollPeriod.endDate
-          )
-        )
-      );
+    const approvedCorrectionsAfterSync = await loadEffectiveAttendanceCorrections(tx, {
+      payrollPeriodId: sourceData.payrollPeriod.id, employeeIds: matchedEmployeeIds,
+      startDate: sourceData.payrollPeriod.startDate, endDate: sourceData.payrollPeriod.endDate,
+    });
 
     const summaryComputations = buildAttendanceSummaryComputations({
       employees: sourceData.employeeRecords.map((employee) => ({

@@ -8,6 +8,7 @@ import { assertAttendanceSourceReady, lockAttendancePayrollInput, AttendanceSour
 import { chronological, periodAttendanceScope, validateManualSequence, type AttendanceReadiness, type ManualPunch, type ResolutionPerson, type ResolutionRequest } from "./attendanceResolutionModel";
 import { type SourcePunch } from "./attendanceSourceClient";
 import { PayrollValidationError } from "./validation";
+import { readAttendanceSourceReceipt, rejectAttendanceSourceMutation } from "./attendanceSourceReadOnly";
 
 function fail(message: string): never { throw new PayrollValidationError(message); }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -58,7 +59,7 @@ export async function loadAttendanceReadiness(periodId: string, database: DbClie
   try { await assertAttendanceSourceReady(periodId, database); } catch (error) { if(error instanceof AttendanceSourceIssue)needsSync ||= error.needsSync; if (error instanceof PayrollValidationError) blockers.push(error.message); else throw error; }
   if (!run&&process.env.ATTENDANCE_WORKBENCH_ENABLED!=="true") blockers.push("Sync attendance for this period before continuing.");
   const counts = (run?.counts ?? {}) as Record<string, number>;
-  return { periodId, code: period.code, startDate: period.startDate, endDate: period.endDate, periodOpen: period.status === "Open" && !posted.length, runState: run?.state ?? null, syncedAt: run?.completedAt?.toISOString() ?? null, needsSync, summariesOutdated: !!state && state.inputRunId !== state.summariesRunId || blockers.some(b=>/DTR refresh|Refresh attendance summaries/.test(b)), ready: !blockers.length, blockers, counts, people, history: history.slice(0, 50).map(h => ({ id: h.id, sourceId: h.sourceEmployeeId, kind: h.kind, state: h.state, reason: h.reason, evidence: h.evidence, createdAt: h.createdAt.toISOString(), updatedAt: h.updatedAt.toISOString(), actor: h.actorUserId, reviewer: h.reviewerUserId, manualPunches: h.manualPunches as ManualPunch[], eventIds: h.eventIds as string[], result: h.result })), historyHasMore: history.length > 50, sourceCorrectionsEnabled: (process.env.ATTENDANCE_CORRECTION_TOKEN?.length ?? 0) >= 32 };
+  return { periodId, code: period.code, startDate: period.startDate, endDate: period.endDate, periodOpen: period.status === "Open" && !posted.length, runState: run?.state ?? null, syncedAt: run?.completedAt?.toISOString() ?? null, needsSync, summariesOutdated: !!state && state.inputRunId !== state.summariesRunId || blockers.some(b=>/DTR refresh|Refresh attendance summaries/.test(b)), ready: !blockers.length, blockers, counts, people, history: history.slice(0, 50).map(h => ({ id: h.id, sourceId: h.sourceEmployeeId, kind: h.kind, state: h.state, reason: h.reason, evidence: h.evidence, createdAt: h.createdAt.toISOString(), updatedAt: h.updatedAt.toISOString(), actor: h.actorUserId, reviewer: h.reviewerUserId, manualPunches: h.manualPunches as ManualPunch[], eventIds: h.eventIds as string[], result: h.result })), historyHasMore: history.length > 50, sourceCorrectionsEnabled: false };
 }
 
 async function openPeriod(tx: DbClient, id: string) {
@@ -80,6 +81,7 @@ export type SourceCorrectionRequest = { id: string; eventId: string; action: "VO
 
 /** The caller supplies a transaction and a server-authenticated administrator. */
 export async function proposeAttendanceResolution(tx: DbClient, actor: string, request: ResolutionRequest, allowAdjacentSourceRecords = false) {
+  if(request?.kind==="SourceVoid"||request?.kind==="SourceRestore")rejectAttendanceSourceMutation();
   enabled(); if (!request || !uuid.test(request.periodId) || request.confirmed !== true || !["Manual", "NoAttendance", "SourceVoid", "SourceRestore"].includes(request.kind)) fail("Review and confirm the proposed treatment before saving.");
   for (const value of [request.reason, request.evidence]) if (typeof value !== "string" || value.trim().length < 3 || value.length > 500) fail("Enter the verification evidence and reason (3–500 characters each).");
   await lockAttendancePayrollInput(tx);
@@ -90,23 +92,14 @@ export async function proposeAttendanceResolution(tx: DbClient, actor: string, r
   if (person.contextOnly) fail("These records are adjacent-day context. Open the period containing the work date to correct them.");
   if (person.resolution && ["Pending", "Approved", "Sending", "Failed"].includes(person.resolution.state)) fail("Review, reverse or reject the existing proposal before creating another.");
   if (!Array.isArray(request.manualPunches) || !Array.isArray(request.eventIds)) fail("Invalid proposal. Refresh the review screen.");
-  const id = randomUUID(); let sourceRequests: SourceCorrectionRequest[] = [];
+  void allowAdjacentSourceRecords;
+  const id = randomUUID(); const sourceRequests: SourceCorrectionRequest[] = [];
   if (["Manual", "NoAttendance"].includes(request.kind)) {
     if (!person.employeeId || person.classification === "TestOnly") fail("Verify the real employee match before proposing payable attendance.");
     if (request.eventIds.length) fail("Manual DTR proposals cannot void source records.");
     if (request.kind === "Manual") {
       const problem = validateManualSequence(person.records, request.manualPunches, period.startDate, period.endDate); if (problem) fail(problem);
     } else if (request.manualPunches.length || person.records.some(p => person.relevantIds.includes(p.eventId) && p.status === "VALID")) fail("No-attendance approval requires all period source punches to be voided with evidence. It does not create leave or paid hours.");
-  } else {
-    if ((process.env.ATTENDANCE_CORRECTION_TOKEN?.length ?? 0) < 32) fail("The source correction connection is not configured. Contact the administrator.");
-    if (request.manualPunches.length || !request.eventIds.length || request.eventIds.length > 50 || new Set(request.eventIds).size !== request.eventIds.length) fail("Select 1–50 specific source records to correct.");
-    const impacted = await tx.selectDistinct({ periodId: projections.payrollPeriodId }).from(projections).where(inArray(projections.eventId, request.eventIds));
-    for (const p of impacted.sort((a, b) => a.periodId.localeCompare(b.periodId))) await openPeriod(tx, p.periodId);
-    sourceRequests = request.eventIds.map(eventId => {
-      const punch = person.records.find(p => p.eventId === eventId && (person.relevantIds.includes(eventId) || allowAdjacentSourceRecords));
-      if (!punch || punch.status !== (request.kind === "SourceVoid" ? "VALID" : "VOID") || punch.correctionVersion === undefined) fail("A selected source record changed or needs a fresh sync. Review it again.");
-      return { id: randomUUID(), eventId, action: request.kind === "SourceVoid" ? "VOID" : "RESTORE", reason: `Integra ${id}: ${request.reason.trim()} | Evidence: ${request.evidence.trim()}`.replace(/\s+/g, " "), actor, expectedVersion: punch.correctionVersion!, expectedEmployeeId: punch.employeeId, expectedUpdatedAt: punch.updatedAt };
-    });
   }
   await tx.insert(resolutions).values({ id, payrollPeriodId: period.id, sourceEmployeeId: person.sourceId, kind: request.kind, state: "Pending", sourceVersion: person.version, employeeId: person.employeeId, reason: request.reason.trim(), evidence: request.evidence.trim(), manualPunches: request.manualPunches, eventIds: request.eventIds, sourceRequests, actorUserId: actor });
   await audit(tx, actor, id, "attendance.resolution_proposed", request);
@@ -119,6 +112,7 @@ export async function reviewAttendanceResolution(tx: DbClient, actor: string, id
   await tx.select({ id: employees.id }).from(employees).for("share");
   const [row] = await tx.select().from(resolutions).where(eq(resolutions.id, id)).for("update");
   if (!row) fail("Proposal not found.");
+  if(action==="Approve"&&row.kind.startsWith("Source"))rejectAttendanceSourceMutation();
   const { period } = await openPeriod(tx, row.payrollPeriodId);
   if (action === "Approve") {
     if (row.state !== "Pending") fail("This proposal has already changed. Refresh the review screen.");
@@ -139,46 +133,28 @@ export async function reviewAttendanceResolution(tx: DbClient, actor: string, id
   return { periodId: row.payrollPeriodId, source };
 }
 
-/** Idempotent outbox: never erase a source success when reconciliation fails. */
+/** Retire a legacy delivery after read-only receipt checks; never replay its writes. */
 export async function applySourceResolution(id: string, actor: string, justApproved = false, database = db, fetcher: typeof fetch = fetch) {
-  const row = await database.transaction(async tx => {
-    await lockAttendancePayrollInput(tx);
-    const [current] = await tx.select().from(resolutions).where(eq(resolutions.id, id)).for("update");
-    if (!current || !["Sending", "Failed"].includes(current.state) || !current.reviewerUserId) fail("This correction is not approved for delivery.");
-    if (!justApproved && current.state === "Sending" && Date.now() - current.updatedAt.getTime() < 90000) fail("Source delivery is still being confirmed. Check history and retry after 90 seconds if it remains unfinished.");
-    await tx.update(resolutions).set({ state: "Sending", updatedAt: sql`clock_timestamp()` }).where(eq(resolutions.id, id));
-    return current;
-  });
-  const origin = new URL(process.env.ATTENDANCE_SOURCE_ORIGIN ?? "");
-  if (origin.protocol !== "https:" || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) fail("Invalid attendance connection configuration.");
-  await database.transaction(async tx => {
-    await lockAttendancePayrollInput(tx);
-    const impacted = await tx.selectDistinct({ periodId: projections.payrollPeriodId }).from(projections).where(inArray(projections.eventId, row.eventIds as string[]));
-    const duplicatePeriods=(row.duplicateMetadata as {impactedPeriodIds?:string[]}|null)?.impactedPeriodIds??[];
-    for (const periodId of [...new Set([row.payrollPeriodId,...impacted.map(p=>p.periodId),...duplicatePeriods])].sort()) await openPeriod(tx, periodId);
-  });
-  let succeeded = 0;
-  let sourceConflict = false;
-  const deliveryDeadline = Date.now() + 35000;
-  for (const request of row.sourceRequests as SourceCorrectionRequest[]) {
-    if (request.confirmed) { succeeded++; continue; }
-    if (Date.now() > deliveryDeadline) break;
-    try {
-      const response = await fetcher(new URL("/v1/integra/corrections", origin), { method: "POST", redirect: "error", cache: "no-store", signal: AbortSignal.timeout(8000), headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.ATTENDANCE_CORRECTION_TOKEN ?? ""}` }, body: JSON.stringify(request) });
-      if(response.status===409 && request.duplicate) { sourceConflict=true; break; }
-      if (!response.ok) throw Error("Not confirmed");
-      const result = await response.json(); if (result.accepted !== true || result.id !== request.id) throw Error("Not confirmed");
-      request.confirmed = true;
-      await database.update(resolutions).set({ sourceRequests: row.sourceRequests }).where(and(eq(resolutions.id, id), eq(resolutions.state, "Sending")));
-      succeeded++;
-    } catch { break; }
+  void justApproved;
+  const [row]=await database.select().from(resolutions).where(eq(resolutions.id,id));
+  if(!row)fail("Correction history was not found.");
+  if(row.result?.startsWith("Source delivery retired —"))return row.result;
+  if(!["Sending","Failed"].includes(row.state)||!row.reviewerUserId)fail("This historical correction is not awaiting delivery review.");
+  const requests=(row.sourceRequests??[]) as SourceCorrectionRequest[];
+  const receipts:{id:string;state:string;receipt?:Record<string,unknown>}[]=[];
+  for(const request of requests){
+    try{const receipt=await readAttendanceSourceReceipt("correction",request.id,fetcher);receipts.push({id:request.id,state:String(receipt.state),receipt});}
+    catch{receipts.push({id:request.id,state:"Unverified"});}
   }
-  const total = (row.sourceRequests as SourceCorrectionRequest[]).length, complete = succeeded === total;
-  const message = sourceConflict ? "Source evidence changed and the duplicate request was rejected. Sync, review the current records and create a fresh proposal. Earlier confirmed corrections are retained." : complete ? `Source confirmed ${total} correction(s). Sync every affected period to confirm payroll input.` : `${succeeded} of ${total} source corrections confirmed in this attempt. Sync to inspect current records, then retry delivery with the same request IDs. No confirmed correction is repeated.`;
-  await database.transaction(async tx => {
+  const confirmed=receipts.filter(r=>r.state==="Applied").length;
+  const message=`Source delivery retired — ${confirmed} of ${requests.length} historical applications confirmed; ${receipts.filter(r=>r.state==="Unverified").length} receipts unavailable. Existing source history and payroll are preserved. Use Attendance review for any local payroll override. No source change was sent.`;
+  return database.transaction(async tx=>{
     await lockAttendancePayrollInput(tx);
-    await tx.update(resolutions).set({ state: sourceConflict ? "Expired" : complete ? "Applied" : "Failed", result: message, updatedAt: sql`clock_timestamp()` }).where(and(eq(resolutions.id, id), inArray(resolutions.state, ["Sending", "Failed"])));
-    await audit(tx, actor, id, "attendance.source_delivery", { succeeded, total, complete });
+    const [current]=await tx.select().from(resolutions).where(eq(resolutions.id,id)).for("update");
+    if(current?.result?.startsWith("Source delivery retired —"))return current.result;
+    if(!current||current.updatedAt.getTime()!==row.updatedAt.getTime()||!["Sending","Failed"].includes(current.state))fail("Correction history changed. Reload before retiring its delivery.");
+    await tx.update(resolutions).set({state:requests.length>0&&confirmed===requests.length?"Applied":"Expired",result:message,updatedAt:sql`clock_timestamp()`}).where(eq(resolutions.id,id));
+    await audit(tx,actor,id,"attendance.source_delivery_retired",{previousState:row.state,sourceRequests:row.sourceRequests,previousResult:row.result,receipts,sourceMutationSent:false});
+    return message;
   });
-  return message;
 }

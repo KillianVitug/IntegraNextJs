@@ -1,11 +1,11 @@
 import "server-only";
 import { and, eq, inArray, sql, asc } from "drizzle-orm";
 import { db, type DbClient } from "@/db";
-import { attendanceRawLogs, attendanceImportBatches, payrollPeriods, payrollRuns } from "@/db/schema";
+
 import { workPlans, workTreatments, workHistory, workRawLogs, workExclusions, workSourceExclusions, adjustmentCases, workBatches } from "@/db/attendanceWorkbenchSchema";
-import { attendanceSourcePeriods } from "@/db/attendanceSourceSchema";
-import { workbenchEnabled, workEmployees, draftVersion, workSource, impactSummary } from "./attendanceWorkbench";
-import { type WorkDraft, type WorkDay, localToInstant, sequenceProblems, workDate } from "./attendanceWorkbenchModel";
+
+import { workbenchEnabled, workEmployees, draftVersion, workSource } from "./attendanceWorkbench";
+import { type WorkDraft, workDate } from "./attendanceWorkbenchModel";
 import { manilaWallTime, type SourcePunch } from "./attendanceSourceClient";
 import { lockAttendancePayrollInput } from "./attendanceSourceGuard";
 import { PayrollValidationError } from "./validation";
@@ -23,129 +23,46 @@ export async function assertWorkbenchReady(periodId:string,database:DbClient=db)
 export async function reconcileWorkbenchInputs(tx:DbClient,periodId:string,records:SourcePunch[],runId:string) {
  if(!workbenchEnabled())return {touched:new Set<string>(),accepted:new Set<string>(),excluded:new Set<string>()};
  const touched=new Set<string>();
- const [period]=await tx.select().from(payrollPeriods).where(eq(payrollPeriods.id,periodId));
- const payroll=await tx.select().from(payrollRuns).where(eq(payrollRuns.payrollPeriodId,periodId));
- const protectedPeriod=period.status!=="Open"||payroll.some(r=>r.status==="Posted"&&r.inputSnapshot?.payrollGroup!=="Monthly");
- const candidates=await tx.select().from(workPlans).where(and(eq(workPlans.state,"Sync pending"),sql`(${workPlans.periodId}=${periodId}::uuid or ${workPlans.impactedPeriodIds} @> jsonb_build_array(${periodId}::text))`));
- for(const plan of candidates) {
-  const localDecisions=await tx.select().from(workTreatments).where(and(eq(workTreatments.planId,plan.id),eq(workTreatments.periodId,periodId),eq(workTreatments.active,true)));
-  if(localDecisions.some(t=>adminDecision(t.payload)))continue;
-  const draft=plan.draft as WorkDraft;
-  const request=plan.sourceRequest as {operation:string;employeeIds:string[];from:string;through:string;reviewDays?:string[];_context:{eventId:string;type:string;capturedAt:string;employeeId:string;status:string}[];changes:{eventId:string;type?:string;capturedAt?:string;employeeId?:string;status?:string}[]}|null;
-  const result=plan.sourceResult as {changes?:{event_id:string;after_json:string;revision:string}[]}|null;
-  if(request&&(!result?.changes||request.changes.some(c=>!result.changes!.some(r=>r.event_id===c.eventId))))continue;
-  if(request) {
-   const expected=request._context.map(r=>{const changed=result!.changes!.find(c=>c.event_id===r.eventId);return changed?{...r,...JSON.parse(changed.after_json)}:r;});
-   const observed=records.filter(r=>request.employeeIds.includes(r.employeeId)&&workDate(r.capturedAt)>=request.from&&workDate(r.capturedAt)<=request.through&&(!request.reviewDays||request.reviewDays.some(day=>Math.abs(Date.parse(workDate(r.capturedAt))-Date.parse(day))<=86400000)));
-   const inPeriod=(r:{capturedAt:string})=>workDate(r.capturedAt)>=period.startDate&&workDate(r.capturedAt)<=period.endDate;
-   const stale=expected.filter(inPeriod).some(e=>!observed.some(p=>p.eventId===e.eventId&&p.type===e.type&&p.capturedAt===e.capturedAt&&p.employeeId===e.employeeId&&p.status===e.status))||observed.filter(inPeriod).some(o=>!expected.some(e=>e.eventId===o.eventId))||result!.changes!.some(change=>{const p=records.find(r=>r.eventId===change.event_id);if(!p)return false;const after=JSON.parse(change.after_json);return p.type!==after.type||p.capturedAt!==after.capturedAt||p.employeeId!==after.employeeId||p.status!==after.status||p.effectiveRevision!==change.revision;});
-   if(stale){await tx.update(workPlans).set({state:"Needs fresh review",result:"A source correction was applied, then relevant evidence changed. Review the preserved draft and delivery result before proceeding.",updatedAt:new Date()}).where(eq(workPlans.id,plan.id));continue;}
-  }
-  const people=await workEmployees(periodId,tx,records),person=people.find(p=>p.id===plan.employeeId);if(!person)continue;
-  const local=(plan.sourceRequest as {_localEvidence?:Record<string,string>}|null)?._localEvidence?.[person.id];
-  if(periodId===plan.periodId&&local&&local!==resolutionDigest([person.mappingEvidence,person.days.filter(d=>draft.days.includes(d.day)).map(d=>[d.day,d.configuration,d.leaveEvidence])])){await tx.update(workPlans).set({state:"Needs fresh review",result:"The schedule, leave or identity mapping changed after approval. Review the saved evidence before continuing.",updatedAt:new Date()}).where(eq(workPlans.id,plan.id));continue;}
-  const changedDates=[...draft.days,...(result?.changes??[]).flatMap(c=>{const before=JSON.parse((c as {before_json?:string}).before_json??"null"),after=JSON.parse(c.after_json);return [before,after].filter(p=>p&&person.sourceIds.includes(p.employeeId)).map(p=>workDate(p.capturedAt));})];
-  const changedDays=[...new Set(changedDates)].filter(d=>person.days.some(day=>day.day===d));
-  if(protectedPeriod) {
-   const [adjustment]=await tx.select().from(adjustmentCases).where(and(eq(adjustmentCases.planId,plan.id),eq(adjustmentCases.periodId,periodId)));
-   const before=(adjustment?.beforeEvidence as {days?:WorkDay[]})?.days??[];
-   const original=impactSummary({...person,days:before},{...draft,changes:[],days:changedDays.filter(d=>before.some(day=>day.day===d))});
-   const calculated=impactSummary(person,{...draft,changes:draft.changes.filter(c=>!c.eventId||["Exclude","Retain"].includes(c.kind)),days:changedDays});
-   const impact=calculated.map(row=>({...row,before:original.find(r=>r.day===row.day)?.before??row.before}));
-   await tx.update(adjustmentCases).set({afterEvidence:person.days.filter(d=>changedDays.includes(d.day)),impact,updatedAt:new Date()}).where(and(eq(adjustmentCases.planId,plan.id),eq(adjustmentCases.periodId,periodId)));
-   continue;
-  }
-  let batchId:string|undefined;
-  const batch=async()=>{if(batchId)return batchId;const name=`attendance-api:${periodId}`;const [found]=await tx.select().from(attendanceImportBatches).where(and(eq(attendanceImportBatches.payrollPeriodId,periodId),eq(attendanceImportBatches.sourceFileName,name),eq(attendanceImportBatches.sourceFormat,"API")));if(found)batchId=found.id;else {const [created]=await tx.insert(attendanceImportBatches).values({payrollPeriodId:periodId,sourceFileName:name,sourceFormat:"API",status:"Processed",notes:"Managed source attendance and verified manual evidence"}).returning();batchId=created.id;}return batchId!;};
-  for(const change of draft.changes.filter(c=>changedDays.includes(c.day))) {
-   if(change.kind==="ReopenDay") {
-    await tx.update(workTreatments).set({active:false}).where(and(eq(workTreatments.periodId,periodId),eq(workTreatments.employeeId,person.id),eq(workTreatments.day,change.day)));touched.add(person.id);
-   }
-   if((change.kind==="Exclude"||change.kind==="Retain")&&change.eventId) {
-    if(!person.days.flatMap(d=>d.records).some(r=>r.id===change.eventId))fail("The selected source entry changed scope.");
-    const version=resolutionDigest(records.find(p=>p.eventId===change.eventId));
-    await tx.insert(workSourceExclusions).values({periodId,eventId:change.eventId,planId:plan.id,reason:change.reason||draft.reason,version,active:change.kind==="Exclude"}).onConflictDoUpdate({target:[workSourceExclusions.periodId,workSourceExclusions.eventId],set:{planId:plan.id,reason:change.reason||draft.reason,version,active:change.kind==="Exclude"}});touched.add(person.id);
-   }
-   if(change.kind==="Manual") {
-    const at=localToInstant(change.at??"");if(!at||!change.type)fail("Stored manual evidence is incomplete.");
-    const [existing]=await tx.select().from(workRawLogs).where(and(eq(workRawLogs.planId,plan.id),eq(workRawLogs.changeId,change.id)));if(existing)continue;
-    const wall=manilaWallTime(at);const [inserted]=await tx.insert(attendanceRawLogs).values({batchId:await batch(),employeeId:person.id,employeeNo:person.no,direction:change.type,loggedAt:sql`${wall.timestamp}::timestamp`,logDate:wall.date,logTime:wall.time,rawText:JSON.stringify({source:"MANUAL_DTR",planId:plan.id,changeId:change.id,reason:change.reason||draft.reason,evidence:change.evidence}),normalizedHash:resolutionDigest(["workbench",plan.id,change.id])}).returning({id:attendanceRawLogs.id});
-    await tx.insert(workRawLogs).values({planId:plan.id,changeId:change.id,rawLogId:inserted.id});touched.add(person.id);
-   }
-   if((change.kind==="Exclude"||change.kind==="Retain")&&change.rawLogId!==undefined) {
-    const [target]=await tx.select().from(attendanceRawLogs).innerJoin(attendanceImportBatches,eq(attendanceImportBatches.id,attendanceRawLogs.batchId)).where(eq(attendanceRawLogs.id,change.rawLogId));
-    if(!target||target.attendance_raw_logs.employeeId!==person.id||target.attendance_import_batches.payrollPeriodId!==periodId)fail("The competing record no longer belongs to this employee and period.");
-    await tx.insert(workExclusions).values({rawLogId:change.rawLogId,planId:plan.id,reason:change.reason||draft.reason,active:change.kind==="Exclude"}).onConflictDoUpdate({target:workExclusions.rawLogId,set:{planId:plan.id,reason:change.reason||draft.reason,active:change.kind==="Exclude"}});touched.add(person.id);
-   }
-  }
-  const after=(await workEmployees(periodId,tx,records)).find(p=>p.id===person.id)!;
-  for(const day of changedDays){const d=after.days.find(d=>d.day===day)!;const check=sequenceProblems(d.records,d.schedule);
-   if(draft.changes.some(c=>c.day===day&&c.kind==="ReopenDay"))continue;
-   if(!d.records.some(r=>r.status==="VALID"&&!r.excluded)&&!draft.changes.some(c=>c.day===day&&c.kind==="NoAttendance"))continue;
-   // Partial source repairs stay visible. Only a fully verified effective sequence is accepted.
-   if(check.errors.length)continue;
-   if(!draft.changes.some(c=>c.day===day&&["Manual","ConfirmSequence","NoAttendance","Exclude","Retain"].includes(c.kind)))continue;
-   if(!d.schedule?.checkInTime||!d.schedule.checkOutTime||!after.sourceIds.length)continue;
-   await tx.update(workTreatments).set({active:false}).where(and(eq(workTreatments.periodId,periodId),eq(workTreatments.employeeId,person.id),eq(workTreatments.day,day)));
-   await tx.insert(workTreatments).values({planId:plan.id,periodId,employeeId:person.id,day,version:d.version,payload:{reason:draft.reason,evidence:draft.changes.filter(c=>c.day===day),kind:draft.changes.some(c=>c.day===day&&c.kind==="NoAttendance")?"NoAttendance":"Sequence"}});touched.add(person.id);
-  }
- }
+ // Source pulls never replay retired outbox plans. Existing approved local decisions remain authoritative.
+ void runId;
  const people=await workEmployees(periodId,tx,records),accepted=new Set<string>();
  for(const person of people)for(const day of person.days.filter(d=>d.resolved))accepted.add(`${person.id}|${day.day}`);
- if(touched.size)await tx.insert(attendanceSourcePeriods).values({payrollPeriodId:periodId,inputRunId:runId}).onConflictDoUpdate({target:attendanceSourcePeriods.payrollPeriodId,set:{inputRunId:runId,summariesRunId:null}});
+
  const excluded=new Set((await tx.select().from(workSourceExclusions).where(and(eq(workSourceExclusions.periodId,periodId),eq(workSourceExclusions.active,true)))).filter(x=>x.version===resolutionDigest(records.find(p=>p.eventId===x.eventId))).map(x=>x.eventId));
  return {touched,accepted,excluded};
 }
 
-/** Bounded outbox processing. A lost response is recovered by the durable source ID. */
+/** Retire the former source outbox using receipt reads only. Never replay a request. */
 export async function processWorkDelivery(actor:string,options:{batchId?:string;database?:typeof db;fetcher?:typeof fetch;sync?:(id:string,actor:string)=>Promise<unknown>;budgetMs?:number}={}) {
- if(!workbenchEnabled())return {completed:0,remaining:0};
  const database=options.database??db,deadline=Date.now()+(options.budgetMs??35000);
- const plans=await database.select().from(workPlans).where(and(inArray(workPlans.state,["Approved","Applying","Failed","Sync pending"]),options.batchId?eq(workPlans.batchId,options.batchId):undefined)).orderBy(asc(workPlans.updatedAt)).limit(20);
- const pendingPeriods=new Set<string>();let completed=0;
+ const plans=await database.select().from(workPlans).where(and(inArray(workPlans.state,["Approved","Applying","Failed","Sync pending","Source conflict","Needs fresh review"]),sql`${workPlans.sourceResult}->'readOnlyCutover' is null`,sql`(${workPlans.sourceRequest} is not null or ${workPlans.state} in ('Approved','Applying','Failed','Sync pending'))`,options.batchId?eq(workPlans.batchId,options.batchId):undefined)).orderBy(asc(workPlans.updatedAt)).limit(20);
+ let completed=0;
  for(const plan of plans) {
   if(Date.now()>deadline-9000)break;
   if(plan.leaseUntil&&plan.leaseUntil.getTime()>Date.now())continue;
-  const claimed=await database.transaction(async tx=>{await lockAttendancePayrollInput(tx);const [p]=await tx.select().from(workPlans).where(eq(workPlans.id,plan.id)).for("update");if(!p||!["Approved","Applying","Failed","Sync pending"].includes(p.state)||p.leaseUntil&&p.leaseUntil.getTime()>Date.now())return null;const [saved]=await tx.update(workPlans).set({state:p.state==="Sync pending"?p.state:"Applying",leaseUntil:new Date(Date.now()+60000),attempts:p.attempts+1,updatedAt:new Date()}).where(eq(workPlans.id,p.id)).returning();return saved;});
-  if(!claimed)continue;
-  try {
-   if(claimed.sourceRequest&&!claimed.sourceResult){
-    const request={...claimed.sourceRequest as Record<string,unknown>};
-    const known=request.operation==="apply-plan"?await workSource({operation:"plan-status",version:1,id:request.id},options.fetcher):null;
-    if(request._deferredContext&&known?.state!=="Applied"){
-     const context=await workSource({operation:"context",version:1,employeeIds:request.employeeIds,from:request.from,through:request.through,reviewDays:request.reviewDays},options.fetcher) as {contextToken:string;records:{eventId:string;type:string;capturedAt:string;employeeId:string;status:string}[]};
-     const expected=request._context as typeof context.records;
-     const changes=request.changes as {eventId:string}[];
-     for(const change of changes){const before=expected.find(r=>r.eventId===change.eventId),live=context.records.find(r=>r.eventId===change.eventId);if(!before||!live||["type","capturedAt","employeeId","status"].some(k=>before[k as keyof typeof before]!==live[k as keyof typeof live]))fail("Source evidence changed. Payroll decision retained; review the incoming capture before retrying source delivery.");}
-     request.contextToken=context.contextToken;
-    }
-    if(request.operation==="verify-context") {
-     const context=await workSource({operation:"context",version:1,employeeIds:request.employeeIds,from:request.from,through:request.through,reviewDays:request.reviewDays},options.fetcher);
-     if(context.contextToken!==request.contextToken)fail("Source evidence changed. Review changed evidence before applying this plan.");
-     await database.update(workPlans).set({sourceResult:{state:"Verified",changes:[]}}).where(eq(workPlans.id,claimed.id));
-    } else {
-    let status=known??await workSource({operation:"plan-status",version:1,id:request.id},options.fetcher);
-    if(status.state!=="Applied") {const {_context,_localEvidence,_deferredContext,...wire}=request;void _context;void _localEvidence;void _deferredContext;await workSource(wire,options.fetcher);status=await workSource({operation:"plan-status",version:1,id:request.id},options.fetcher);}
-    if(status.state!=="Applied")fail("The source has not confirmed this plan yet.");
-    await database.update(workPlans).set({sourceResult:status}).where(eq(workPlans.id,claimed.id));
-    }
-   }
-   await database.update(workPlans).set({state:"Sync pending",result:"Correction delivery confirmed. Reconciliation is pending; payroll has not been recomputed.",leaseUntil:null,updatedAt:new Date()}).where(eq(workPlans.id,claimed.id));
-   (claimed.impactedPeriodIds as string[]).filter(id=>!((claimed.sourceResult as {syncedPeriodIds?:string[]}|null)?.syncedPeriodIds??[]).includes(id)).forEach(id=>pendingPeriods.add(id));
-  }catch(error){const message=error instanceof PayrollValidationError?error.message:"Delivery confirmation was interrupted. Retry unfinished work; the source may already have applied this plan.";await database.update(workPlans).set({state:message.includes("Source evidence changed")?"Source conflict":"Failed",leaseUntil:null,result:message,updatedAt:new Date()}).where(eq(workPlans.id,claimed.id));await database.insert(workHistory).values({planId:claimed.id,actor,action:"Delivery interrupted",details:{message}});}
+  if(!plan.sourceRequest&&["Needs fresh review","Source conflict"].includes(plan.state))continue;
+  const previous=(plan.sourceResult??{}) as Record<string,unknown>;
+  if(previous.readOnlyCutover)continue;
+  let receipt:Record<string,unknown>|null=null,receiptState="Not requested";
+  const request=plan.sourceRequest as {operation?:string;id?:string}|null;
+  if(request?.operation==="apply-plan"&&request.id){
+   try{receipt=await workSource({operation:"plan-status",id:request.id},options.fetcher);receiptState=String(receipt.state);}
+   catch{receiptState="Unverified";}
+  }
+  const retired=await database.transaction(async tx=>{
+   await lockAttendancePayrollInput(tx);
+   const [current]=await tx.select().from(workPlans).where(eq(workPlans.id,plan.id)).for("update");
+   if(!current||current.updatedAt.getTime()!==plan.updatedAt.getTime()||(current.sourceResult as Record<string,unknown>|null)?.readOnlyCutover||current.leaseUntil&&current.leaseUntil.getTime()>Date.now())return false;
+   const decisions=await tx.select().from(workTreatments).where(eq(workTreatments.planId,plan.id));
+   const localApproved=decisions.some(t=>adminDecision(t.payload));
+   const message=`Source delivery retired — ${receiptState==="Applied"?"historical application confirmed":receiptState==="Not found"?"no applied source receipt":receiptState==="Unverified"?"historical receipt unavailable; application remains unverified":"no source update requested"}. ${localApproved?"Approved local payroll attendance is retained.":"Saved evidence is retained; review a local payroll override if needed."} Phone attendance was not changed.`;
+   await tx.update(workPlans).set({state:localApproved?"Resolved":"Needs fresh review",leaseUntil:null,sourceResult:{...previous,...(receipt?.state==="Applied"?receipt:{}),readOnlyCutover:{at:new Date().toISOString(),actor,receiptState,receipt,localApproved,previousResult:current.sourceResult}},result:message,updatedAt:new Date()}).where(eq(workPlans.id,plan.id));
+   await tx.insert(workHistory).values({planId:plan.id,actor,action:"Source delivery retired",details:{previousState:current.state,sourceRequest:current.sourceRequest,previousResult:current.sourceResult,receiptState,receipt,localApproved,sourceMutationSent:false}});
+   return true;
+  });
+  if(retired)completed++;
  }
- const synced=new Set<string>();
- for(const period of pendingPeriods){if(Date.now()>deadline-9000)break;try{const sync=options.sync??(await import("./attendanceSourceSync")).syncAttendanceSourcePeriod;await sync(period,actor);synced.add(period);}catch(error){const message=error instanceof PayrollValidationError?error.message:"Period reconciliation was interrupted. Retry unfinished work; delivered corrections remain recorded.";for(const plan of plans.filter(p=>(p.impactedPeriodIds as string[]).includes(period)))await database.update(workPlans).set({result:message,updatedAt:new Date()}).where(and(eq(workPlans.id,plan.id),eq(workPlans.state,"Sync pending")));}}
- for(const plan of plans){const [current]=await database.select().from(workPlans).where(eq(workPlans.id,plan.id));if(current.state!=="Sync pending")continue;
-  const result=(current.sourceResult??{}) as Record<string,unknown>;
-  const already=(result.syncedPeriodIds??[]) as string[];
-  const confirmed=[...new Set([...already,...synced])].filter(id=>(current.impactedPeriodIds as string[]).includes(id));
-  await database.update(workPlans).set({sourceResult:{...result,syncedPeriodIds:confirmed}}).where(eq(workPlans.id,plan.id));
-  const remaining=(current.impactedPeriodIds as string[]).filter(id=>!confirmed.includes(id));
-  if(remaining.length)continue;
-  await database.update(workPlans).set({state:"Resolved",result:"Delivered and synced. Inspect remaining cases and DTR. Payroll has not been recomputed.",updatedAt:new Date()}).where(eq(workPlans.id,plan.id));await database.insert(workHistory).values({planId:plan.id,actor,action:"Reconciled",details:{periodIds:current.impactedPeriodIds}});completed++;
- }
- return {completed,remaining:plans.length-completed};
+ return {completed,remaining:plans.filter(p=>!(p.sourceResult as Record<string,unknown>|null)?.readOnlyCutover&&(p.sourceRequest||!["Needs fresh review","Source conflict"].includes(p.state))).length-completed};
 }
 export async function closeAdjustment(tx:DbClient,actor:string,id:string,reference:string,conclusion:string,confirmed:boolean) {
  if(!confirmed||conclusion.trim().length<10)fail("Review the impact and record evidence for the adjustment or no-impact conclusion.");await lockAttendancePayrollInput(tx);
@@ -170,13 +87,39 @@ export async function reopenWorkPlan(tx:DbClient,actor:string,id:string) {
 export async function undoWorkDraft(database:DbClient,actor:string,id:string) {
  const [plan]=await database.select().from(workPlans).where(eq(workPlans.id,id));if(!plan||plan.state!=="Resolved")fail("Finish reconciliation before preparing Undo.");
  const people=await workEmployees(plan.periodId,database),person=people.find(p=>p.id===plan.employeeId);if(!person)fail("Employee no longer eligible; review the identity first.");
- const old=plan.draft as WorkDraft,result=plan.sourceResult as {changes?:{event_id:string;before_json:string;after_json:string;revision:string}[]}|null;
+ const old=plan.draft as WorkDraft,result=plan.sourceResult as {state?:string;changes?:{event_id:string;before_json:string;after_json:string;revision:string}[]}|null;
  const requestId=(plan.sourceRequest as {id?:string}|null)?.id;
- const related=requestId?(await database.select().from(workPlans).where(eq(workPlans.batchId,plan.batchId))).filter(p=>(p.sourceRequest as {id?:string}|null)?.id===requestId):[plan];
+ const batchPlans=await database.select().from(workPlans).where(eq(workPlans.batchId,plan.batchId));
+ let related=requestId?batchPlans.filter(p=>(p.sourceRequest as {id?:string}|null)?.id===requestId):[plan];
+ if(result?.state==="LocalOnly"){
+  const employees=new Set([plan.employeeId]);let grew=true;
+  while(grew){grew=false;for(const candidate of batchPlans){const draft=candidate.draft as WorkDraft,owners=[candidate.employeeId,...draft.changes.flatMap(c=>c.targetEmployeeId?[c.targetEmployeeId]:[])];if(owners.some(id=>employees.has(id)))for(const id of owners)if(!employees.has(id)){employees.add(id);grew=true;}}}
+  related=batchPlans.filter(p=>employees.has(p.employeeId));
+ }
  if(related.some(p=>p.state!=="Resolved"))fail("Finish every related employee plan before preparing Undo.");
  const later=await database.select().from(workPlans).where(inArray(workPlans.state,["Approved","Applying","Sync pending","Failed","Needs fresh review","Resolved"]));
  for(const prior of related)if(later.some(p=>!related.some(r=>r.id===p.id)&&p.employeeId===prior.employeeId&&p.updatedAt>prior.updatedAt&&(p.draft as WorkDraft).days.some(d=>(prior.draft as WorkDraft).days.includes(d))))fail("Later attendance decisions depend on this plan. Review their history before making a new correction.");
  const changes:WorkDraft["changes"]=[];
+ if(result?.state==="LocalOnly"){
+  const snapshots=await database.select().from(workTreatments).where(inArray(workTreatments.planId,related.map(p=>p.id)));
+  const afterRecords=snapshots.flatMap(t=>adminDecision(t.payload)?.records??[]);
+  const handled=new Set<string>();
+  for(const snapshot of snapshots){const decision=adminDecision(snapshot.payload);if(!decision)continue;
+   for(const before of decision.sourceRecords){
+    const after=afterRecords.find(r=>r.id===before.id);if(!after||handled.has(before.id))continue;
+    if(["type","at","status","employeeId","clockVerified"].every(k=>before[k as keyof typeof before]===after[k as keyof typeof after]))continue;
+    handled.add(before.id);
+    const current=people.flatMap(p=>p.contextRecords??p.days.flatMap(d=>d.records)).find(r=>r.id===before.id&&r.employeeId===after.employeeId);
+    if(!current||["type","at","status","employeeId","clockVerified"].some(k=>current[k as keyof typeof current]!==after[k as keyof typeof after]))fail("A later local attendance decision prevents Undo. Review the current history.");
+    const day=old.days.includes(workDate(before.at))?workDate(before.at):old.days[0];
+    if(current.source==="API")changes.push({id:crypto.randomUUID(),day,kind:"UndoCapture",employeeId:current.employeeId,eventId:current.id,type:before.type as "IN"|"OUT",at:manilaWallTime(before.at).timestamp.replace(" ","T"),targetEmployeeId:before.employeeId,status:before.status,clockVerified:before.clockVerified,reason:"Undo local payroll override",evidence:"",verified:false});
+    else if(current.source==="Manual"&&current.rawLogId!==undefined){
+     if(before.at!==after.at)changes.push({id:crypto.randomUUID(),day,kind:"Time",employeeId:current.employeeId,rawLogId:current.rawLogId,at:manilaWallTime(before.at).timestamp.replace(" ","T"),reason:"Undo local payroll time",evidence:"",verified:false});
+     if(before.type!==after.type)changes.push({id:crypto.randomUUID(),day,kind:"Direction",employeeId:current.employeeId,rawLogId:current.rawLogId,type:before.type as "IN"|"OUT",reason:"Undo local payroll direction",evidence:"",verified:false});
+    }
+   }
+  }
+ }
  for(const item of result?.changes??[]) {
   const before=JSON.parse(item.before_json),record=people.flatMap(p=>[...p.days.flatMap(d=>d.decision?.incomingRecords??[]),...(p.contextRecords??p.days.flatMap(d=>d.records))]).find(r=>r.id===item.event_id);
   if(!record||record.sourcePunch?.effectiveRevision!==item.revision)fail("A later source correction prevents Undo. Review its history before making a new correction.");

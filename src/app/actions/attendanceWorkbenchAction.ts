@@ -13,6 +13,8 @@ import { shiftTables } from "@/db/schema";
 import { adminDecision } from "@/lib/payroll/attendanceAdminDecision";
 import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
 import { PayrollValidationError } from "@/lib/payroll/validation";
+import { attendanceBatchCompletion, type AttendanceCompletion } from "@/lib/payroll/attendanceCompletion";
+import { refreshAttendanceDecisionDtr } from "@/lib/payroll/attendanceCompletionRefresh";
 export async function saveWorkDraftAction(periodId:string,drafts:WorkDraft[],existing?:{id:string;revision:number}) {const actor=await requireAdminActor();return payrollActionResult(()=>db.transaction(tx=>saveWorkDraft(tx,actor.userId,periodId,drafts.map(d=>({...d,ownerId:d.ownerId||actor.userId})),existing)));}
 export async function previewWorkBatchAction(periodId:string,batchId:string,revision:number,planIds?:string[]) {await requireAdminActor();return payrollActionResult(()=>prepareWorkApproval(periodId,batchId,revision,db,fetch,planIds));}
 /** One bounded request saves the entire batch, then previews the explicitly chosen employees. */
@@ -28,8 +30,27 @@ export async function saveAndPreviewWorkBatchAction(periodId:string,drafts:WorkD
 export async function approveWorkBatchAction(periodId:string,batchId:string,revision:number,digest:string,planIds?:string[]) {
  const actor=await requireAdminActor();return payrollActionResult(async()=>{
   await approveWorkBatch(actor.userId,periodId,batchId,revision,digest,db,fetch,planIds);
-  after(async()=>{try{await processWorkDelivery(actor.userId,{batchId});}catch{/* Durable jobs remain available to scheduler and retry. */}});
-  revalidatePath("/payroll/attendance-source");return {approved:true,batchId,completed:0,remaining:0};
+  // The transaction has committed. A failed display/status read must not turn its receipt into an approval error.
+  let completion:AttendanceCompletion={decision:"approved",attendance:"pending",payroll:"unchanged",message:"Decision saved. Check attendance update status; payroll has not been recalculated.",affectedPeriodIds:[],pendingPeriodIds:[],adjustmentPeriodIds:[]};
+  try{
+   const approvedPlanIds=planIds??(await db.select({id:workPlans.id}).from(workPlans).where(eq(workPlans.batchId,batchId))).map(p=>p.id);
+   completion=await attendanceBatchCompletion(periodId,batchId,approvedPlanIds);
+   revalidatePath("/payroll/attendance-source");
+  }catch{/* The exact plan IDs allow a later read-only status check and safe DTR retry. */}
+  return {approved:true,batchId,completed:0,remaining:0,completion};
+ });
+}
+export async function getWorkBatchCompletionAction(periodId:string,batchId:string,planIds:string[]) {
+ await requireAdminActor();return payrollActionResult(()=>attendanceBatchCompletion(periodId,batchId,planIds));
+}
+/** A retry checks the durable result first, and can only update local attendance summaries. */
+export async function refreshWorkBatchAttendanceAction(periodId:string,batchId:string,planIds:string[]) {
+ const actor=await requireAdminActor();return payrollActionResult(async()=>{
+  const saved=await attendanceBatchCompletion(periodId,batchId,planIds);
+  if(saved.attendance!=="pending")return saved;
+  for(const affected of saved.pendingPeriodIds)await refreshAttendanceDecisionDtr({actor:actor.userId,periodId:affected,batchId,planIds});
+  revalidatePath("/payroll/attendance-source");
+  return attendanceBatchCompletion(periodId,batchId,planIds);
  });
 }
 export async function retryWorkBatchAction(batchId:string) {const actor=await requireAdminActor();return payrollActionResult(async()=>{after(async()=>{try{await processWorkDelivery(actor.userId,{batchId});}catch{/* Retain durable delivery for status check and retry. */}});revalidatePath("/payroll/attendance-source");return {completed:0,remaining:0,queued:true};});}

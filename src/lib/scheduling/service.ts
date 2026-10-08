@@ -12,7 +12,7 @@ import { getActiveShiftAssignmentForDate, getActiveWeeklyShiftPatternForDate, ha
 import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
 import { lockShiftAssignmentContext, markAffectedShiftRunsStale, rebuildEmployeeAttendanceSummaries, getLatestImportedAttendanceDate, getRebuildRange } from "@/app/actions/shiftAssignmentHelpers";
 import { applyScheduleChanges, emptySchedule, sameSchedule, scheduleDateRange, scheduleLabel, scheduleValue, shiftDate } from "./model";
-import { scheduleWeekdays, type ScheduleCell, type ScheduleSnapshot, type ScheduleWorkspace, type ScheduleWorkspaceQuery, type ScheduleReceipt, type SchedulePeriodCommand, type ScheduleWeeklyCommand, type ScheduleArchiveCommand, type ScheduleWeekday } from "./workspace-types";
+import { scheduleWeekdays, type ScheduleCell, type ScheduleSnapshot, type ScheduleWorkspace, type ScheduleWorkspaceQuery, type ScheduleReceipt, type SchedulePeriodCommand, type ScheduleWeeklyCommand, type ScheduleArchiveCommand, type ScheduleWeekday, type ScheduleDayRepair } from "./workspace-types";
 
 export type ScheduleActor = { userId: string; role: "ADMIN" | "MANAGER" };
 export async function requireScheduleActor(): Promise<ScheduleActor> {
@@ -121,6 +121,16 @@ export async function readScheduleWorkspace(actor: ScheduleActor, query: Schedul
   };
 }
 
+export async function readScheduleDayRepair(actor: ScheduleActor, query: { employeeId: string; day: string; periodId?: string }, database: DbClient = db): Promise<ScheduleDayRepair> {
+  const employeeId = z.string().uuid().parse(query.employeeId), day = date.parse(query.day);
+  const workspace = await readScheduleWorkspace(actor, { ...query, employeeId, day }, database);
+  const cell = workspace.cells.find(row => row.employeeId === employeeId && row.day === day);
+  if (!cell || !workspace.departmentId || !workspace.periodId) throw new Error("This employee-day is outside the available branch and payroll period.");
+  return { departmentId: workspace.departmentId, periodId: workspace.periodId, sourceDigest: workspace.sourceDigest,
+    expectedDraftId: workspace.draft?.id ?? null, expectedDraftRevision: workspace.draft?.revision ?? null,
+    cell, pendingDraftCell: workspace.draft?.cells.find(row => row.employeeId === employeeId && row.day === day) ?? null, shifts: workspace.shifts };
+}
+
 async function receiptFor(tx: DbClient, actor: ScheduleActor, requestId: string, requestDigest?: string) {
   const [row] = await tx.select().from(scheduleRequestReceipts).where(eq(scheduleRequestReceipts.requestId, requestId));
   if (!row) return null;
@@ -178,6 +188,56 @@ export async function mutatePeriodSchedule(actor: ScheduleActor, raw: SchedulePe
     }
     if (source.draft) await tx.delete(scheduleWorkspaceDrafts).where(eq(scheduleWorkspaceDrafts.id, source.draft.id));
     return recordReceipt(tx, actor, request, { requestId: input.requestId, action, message: `${toConfirm.length} employee-days confirmed; ${changed.length} effective changes. Payroll was not posted.`, changedCount: toConfirm.length });
+  });
+}
+
+/** Approve only explicitly reviewed employee-days, leaving the branch review draft intact. */
+export async function confirmScopedScheduleDays(actor: ScheduleActor, raw: SchedulePeriodCommand, database: typeof db = db) {
+  const input = periodCommand.extend({ changes: periodCommand.shape.changes.min(1).max(100) }).parse(raw);
+  return database.transaction(async tx => {
+    await lockAttendancePayrollInput(tx); await lockRequest(tx, input.requestId); await lockScope(tx, input.departmentId, input.periodId);
+    const request = { ...input, action: "days_confirmed" }, prior = await receiptFor(tx, actor, input.requestId, digest(request));
+    if (prior) return prior;
+    for (const employeeId of [...new Set(input.changes.map(row => row.employeeId))].sort()) await lockShiftAssignmentContext(tx, employeeId);
+    const source = await loadSources(actor, { departmentId: input.departmentId, periodId: input.periodId }, tx);
+    if (source.sourceDigest !== input.sourceDigest) throw new Error("Schedules or employee details changed. Reload this day before confirming; no changes were applied.");
+    if ((source.draft?.id ?? null) !== input.expectedDraftId || (source.draft?.revision ?? null) !== input.expectedDraftRevision) throw new Error("Another administrator changed the branch draft. Reload this day before confirming; no changes were applied.");
+    if (source.selected?.status !== "Open") throw new Error("This payroll period is closed. Use the adjustment workflow for a posted period.");
+    const keys = new Set(input.changes.map(row => `${row.employeeId}|${row.day}`));
+    const cells = applyScheduleChanges(cellsFor(source), input.changes, source.templates).filter(row => keys.has(`${row.employeeId}|${row.day}`));
+    const changed = cells.filter(row => !sameSchedule(row.snapshot, row.baselineSnapshot));
+    const toConfirm = cells.filter(cell => !getActiveShiftAssignmentForDate(source.assignments.filter(row => row.employeeId === cell.employeeId), cell.day)?.scheduleDecisionId || !sameSchedule(cell.snapshot, cell.baselineSnapshot));
+    const affected = new Map<string, {employeeId:string;day:string}>();
+    const overnight = (snapshot: ScheduleSnapshot) => snapshot.kind === "shift" && snapshot.checkInTime && snapshot.checkOutTime && snapshot.checkOutTime <= snapshot.checkInTime;
+    for (const cell of changed) {
+      affected.set(`${cell.employeeId}|${cell.day}`, { employeeId: cell.employeeId, day: cell.day });
+      if (overnight(cell.snapshot) || overnight(cell.baselineSnapshot)) { const day = shiftDate(cell.day, 1); affected.set(`${cell.employeeId}|${day}`, { employeeId: cell.employeeId, day }); }
+    }
+    // Even freezing an unchanged day must not rewrite posted/approved provenance.
+    const protectedTargets = [...toConfirm.map(({employeeId,day}) => ({employeeId,day})), ...affected.values()];
+    if (protectedTargets.length) {
+      if (protectedTargets.some(target => source.periods.some(period => period.status !== "Open" && period.startDate <= target.day && period.endDate >= target.day))) throw new Error("A closed payroll period includes this employee-day or its overnight neighbor. Use the adjustment workflow; no schedule was changed.");
+      const protectedRuns = await tx.select({ employeeId: payrollRunEmployees.employeeId, startDate: payrollPeriods.startDate, endDate: payrollPeriods.endDate }).from(payrollRuns)
+        .innerJoin(payrollPeriods, eq(payrollRuns.payrollPeriodId, payrollPeriods.id)).innerJoin(payrollRunEmployees, eq(payrollRunEmployees.payrollRunId, payrollRuns.id))
+        .where(and(inArray(payrollRuns.status, ["Approved", "Posted"]), inArray(payrollRunEmployees.employeeId, [...new Set(protectedTargets.map(row => row.employeeId))])));
+      if (protectedTargets.some(target => protectedRuns.some(run => run.employeeId === target.employeeId && run.startDate <= target.day && run.endDate >= target.day))) throw new Error("An approved or posted payroll includes this employee-day or its overnight neighbor. Use the adjustment workflow; no schedule was changed.");
+    }
+    for (const target of affected.values()) await markAffectedShiftRunsStale({ tx, ...target, startDate: target.day, endDate: target.day, actorUserId: actor.userId });
+    for (const employeeId of [...new Set(toConfirm.map(row => row.employeeId))]) await projectConfirmedDays(tx, actor, input, toConfirm.filter(row => row.employeeId === employeeId), source);
+    let summariesRebuilt = 0;
+    for (const target of affected.values()) summariesRebuilt += await rebuildEmployeeAttendanceSummaries({ tx, employeeId: target.employeeId, startDate: target.day, endDate: target.day });
+    let draftRevision: number | undefined;
+    if (source.draft && source.draft.sourceDigest === source.sourceDigest) {
+      const fresh = await loadSources(actor, { departmentId: input.departmentId, periodId: input.periodId }, tx), freshCells = cellsFor(fresh);
+      const byKey = new Map(freshCells.map(cell => [`${cell.employeeId}|${cell.day}`, cell]));
+      const retained = source.draft.cells.map(cell => keys.has(`${cell.employeeId}|${cell.day}`) ? byKey.get(`${cell.employeeId}|${cell.day}`)! : cell);
+      draftRevision = source.draft.revision + 1;
+      await tx.update(scheduleWorkspaceDrafts).set({ cells: retained, sourceDigest: fresh.sourceDigest, revision: draftRevision, updatedByUserId: actor.userId, updatedAt: new Date() }).where(eq(scheduleWorkspaceDrafts.id, source.draft.id));
+    }
+    const affectedTargets = [...new Map([...cells.map(({employeeId,day}) => ({employeeId,day})), ...affected.values()].map(target => [`${target.employeeId}|${target.day}`, target])).values()];
+    return recordReceipt(tx, actor, request, { requestId: input.requestId, action: "days_confirmed", changedCount: toConfirm.length,
+      message: `${cells.length} selected employee-day${cells.length === 1 ? "" : "s"} confirmed. ${summariesRebuilt} DTR day${summariesRebuilt === 1 ? "" : "s"} refreshed; other draft changes retained. Payroll was not recomputed.`,
+      draftRevision, affectedTargets, affectedPeriodIds: source.periods.filter(period => affectedTargets.some(target => period.startDate <= target.day && period.endDate >= target.day)).map(period => period.id), summariesRebuilt });
   });
 }
 

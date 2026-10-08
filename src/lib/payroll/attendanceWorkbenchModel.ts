@@ -67,11 +67,9 @@ export function canCorrectRecord(record:WorkRecord,kind:WorkKind) {
 export function dayNeedsReview(day:WorkDay) {
  return !day.resolved&&day.issues.length>0;
 }
-/** Input checks shared by draft verification and authoritative server preview. */
+/** Required correction values only. Notes/evidence and legacy checkbox flags are not prerequisites; final approval attests the reviewed values. */
 export function changeInputErrors(draft:WorkDraft,c:WorkChange,now=Date.now()) {
  const errors:string[]=[];
- if(c.evidence.trim().length<3)errors.push("Add verification evidence (at least 3 characters)");
- if((c.reason.trim()||draft.reason.trim()).length<3)errors.push("Add a reason (at least 3 characters)");
  if((c.kind==="Direction"||c.kind==="Manual")&&c.type!=="IN"&&c.type!=="OUT")errors.push("Select the verified direction");
  if((c.kind==="Time"||c.kind==="Manual")&&!c.at)errors.push("Actual time required");
  if(c.kind==="Employee"&&!c.targetEmployeeId)errors.push("Select a verified employee identity");
@@ -104,6 +102,9 @@ export function reconcileDraftVerification(previous:WorkDraft[],next:WorkDraft[]
   const changed=before&&(content(before)!==content(c)||(before.reason.trim()||old!.reason.trim())!==(c.reason.trim()||d.reason.trim()));
   return {...c,verified:c.verified&&!changed&&!verificationIssues(employees.find(p=>p.id===d.employeeId),d,c,employees).length};
  })};});
+}
+export function applyBatchNote(drafts:WorkDraft[],note:string) {
+ return drafts.map(d=>({...d,reason:d.reason.trim()?d.reason:note.trim()}));
 }
 export function applyBatchEvidence(drafts:WorkDraft[],evidence:string) {
  return drafts.map(d=>({...d,changes:d.changes.map(c=>c.evidence.trim()?c:{...c,evidence:evidence.trim(),verified:false})}));
