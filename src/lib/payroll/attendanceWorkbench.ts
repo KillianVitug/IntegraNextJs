@@ -22,7 +22,7 @@ import { readAttendanceSourceReceipt, rejectAttendanceSourceMutation } from "./a
 export const workbenchEnabled=()=>process.env.ATTENDANCE_WORKBENCH_ENABLED==="true";
 function fail(message:string):never {throw new PayrollValidationError(message);}
 function enabled(){if(!workbenchEnabled())fail("The new attendance workflow is not activated.");}
-const idPattern=/^[0-9a-f-]{36}$/i;
+const idPattern=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const activeStates=["Approved","Applying","Sync pending","Failed"];
 export { draftVersion, workDayRecords } from "./attendanceWorkbenchModel";
 export async function workEmployees(periodId:string,database:DbClient=db,incoming?:SourcePunch[],now=new Date().toISOString(),employeeId?:string):Promise<WorkEmployee[]> {
@@ -66,7 +66,7 @@ export async function workEmployees(periodId:string,database:DbClient=db,incomin
    const schedule=resolved.configured?resolved.shiftWindow:null;
    const dayLeaves=leaves.filter(l=>l.employeeId===person.id&&l.leaveStartDate&&l.leaveStartDate<=day&&l.leaveEndDate&&l.leaveEndDate>=day);
    const leave=dayLeaves.reduce((n,l)=>{const detail=leaveDays.find(d=>d.leaveRecordId===l.id&&d.leaveDate===day);return n+(detail?Number(detail.quantity):0)*(schedule?.hoursPerDay??0)*60;},0);
-   const own=workDayRecords(records,day),context=records.filter(r=>workDate(r.at)>=sourceDayOffset(day,-1)&&workDate(r.at)<=sourceDayOffset(day,1));
+   const own=workDayRecords(records,day,schedule),context=own;
    const configuration={schedule,source:resolved.source,assignment:scheduleVersionRecord(resolved.overrideAssignment),pattern:scheduleVersionRecord(resolved.weeklyPatternDay),employment:info?{hired:info.dateHired,separated:info.separationDate,status:info.employmentStatus}:null};
    const leaveEvidence=dayLeaves.map(l=>({record:l,detail:leaveDays.filter(d=>d.leaveRecordId===l.id&&d.leaveDate===day)}));
    const version=resolutionDigest([configuration,leaveEvidence,employeeLinks,identity.filter(i=>sourceIds.includes(i.sourceEmployeeId)),context]);
@@ -74,13 +74,13 @@ export async function workEmployees(periodId:string,database:DbClient=db,incomin
    const status=dayStatus({day,schedule,rest:isResolvedScheduleRestDay(resolved),leave,records:own,now});
    const issues=status==="Future"||status==="In progress / awaiting upload"||status==="Rest day"||status==="Approved leave"?[]:sequenceProblems(own,schedule).errors;
    for(const record of own.filter(r=>r.source==="API"&&!r.excluded&&r.status==="VALID"&&!r.sourcePunch?.reviewResolved))if(record.sourcePunch?.reviewFlags.length)issues.push("Review source warnings: "+record.sourcePunch.reviewFlags.join(", "));
-   if(status==="Schedule missing"&&own.length)issues.push("Schedule missing; uncalculable time contributes no attendance-based work");
+   if(status==="Schedule missing"&&own.some(r=>r.status==="VALID"&&!r.excluded))issues.push("Schedule missing; uncalculable time contributes no attendance-based work");
    if(!sourceIds.length&&own.some(r=>r.source==="API"))issues.push("Verify an attendance employee mapping");
-   if(own.some(r=>r.source==="API")&&own.some(r=>r.source==="File"&&!r.excluded))issues.push("Choose between overlapping API and file punches");
-   if(own.some(r=>r.source==="API")&&own.some(r=>r.source==="Manual"&&!r.excluded))issues.push("Compare original and manual evidence; prevent duplicate time");
+   if(own.some(r=>r.source==="API"&&r.status==="VALID"&&!r.excluded)&&own.some(r=>r.source==="File"&&r.status==="VALID"&&!r.excluded))issues.push("Choose between overlapping API and file punches");
+   if(own.some(r=>r.source==="API"&&r.status==="VALID"&&!r.excluded)&&own.some(r=>r.source==="Manual"&&r.status==="VALID"&&!r.excluded))issues.push("Compare original and manual evidence; prevent duplicate time");
    if(dayLeaves.some(l=>!leaveDays.some(d=>d.leaveRecordId===l.id&&d.leaveDate===day)))issues.push("Review missing leave day details in Leave");
    if(treatment)issues.length=0;
-   const decision=adminDecision(treatment?.payload),incomingForDecision=decision?decisionIncomingRecords(incomingRecords,decision):frozenRun?workDayRecords(incomingRecords,day):[];
+   const decision=adminDecision(treatment?.payload),incomingForDecision=decision?decisionIncomingRecords(incomingRecords,decision):frozenRun?workDayRecords(incomingRecords,day,schedule):[];
    const incomingDigest=resolutionDigest(attendanceEvidence(incomingForDecision));
    const keptSnapshot=keptSnapshots.some(h=>{const d=h.details as Record<string,unknown>;return d.employeeId===person.id&&d.day===day&&d.payrollRunId===frozenRun?.id&&d.incomingDigest===incomingDigest;});
    const lateConflict=decision?incomingDigest!==decision.keptIncomingDigest&&incomingDigest!==resolutionDigest(attendanceEvidence(decision.sourceRecords))&&incomingDigest!==resolutionDigest(attendanceEvidence(decision.records)):!!frozenRun&&!keptSnapshot&&incomingDigest!==resolutionDigest(attendanceEvidence(own));
@@ -104,7 +104,7 @@ export function previewWork(employee:WorkEmployee,draft:WorkDraft,sharedRecords?
  }
  for(const day of draft.days) {
   const original=employee.days.find(d=>d.day===day);if(!original){errors.push("Workday is outside employee eligibility");continue;}
-  const list=workDayRecords(simulated.records,day),check=sequenceProblems(list,original.schedule);
+  const list=workDayRecords(simulated.records,day,original.schedule),check=sequenceProblems(list,original.schedule);
   if(draft.changes.some(c=>c.day===day&&c.kind==="ConfirmSequence")&&!list.some(r=>r.status==="VALID"&&!r.excluded))errors.push("There is no sequence to confirm. Add verified times or explicitly confirm no attendance.");
   if(draft.changes.some(c=>c.day===day&&["Manual","ConfirmSequence","NoAttendance"].includes(c.kind))) {
    if(!original.schedule?.checkInTime||!original.schedule.checkOutTime)warnings.push(`${day}: schedule missing; approval records attendance facts. Uncalculable time contributes no attendance-based work.`);
@@ -119,16 +119,26 @@ export async function loadWorkBoard(periodId:string,database:DbClient=db):Promis
  const [people,progress,readiness]=await Promise.all([workEmployees(periodId,database),loadWorkProgress(periodId,database),loadAttendanceReadiness(periodId,database,0,false)]);
  const {plans}=progress;
  for(const plan of plans.filter(p=>p.state==="Rejected")){const draft=plan.draft as WorkDraft,person=people.find(p=>p.id===draft.employeeId);if(person&&draft.version===draftVersion(person,draft.days))for(const day of person.days.filter(d=>draft.days.includes(d.day)))day.suggestions=[];}
- return {period:{id:period.id,code:period.code,startDate:period.startDate,endDate:period.endDate,posted:!readiness.periodOpen},employees:people,...progress,statuses:{sync:readiness.needsSync?"Sync required":"Up to date",review:people.some(e=>e.days.some(dayNeedsReview))?"Needs review":"Ready",delivery:deliverySummary(plans),dtr:readiness.summariesOutdated?"Refresh needed":"Up to date",payroll:readiness.periodOpen?"Recompute and review explicitly":"Posted / closed — adjustment required"},enabled:true};
+ return {period:{id:period.id,code:period.code,startDate:period.startDate,endDate:period.endDate,posted:!readiness.periodOpen},employees:people,...progress,statuses:{sync:readiness.needsSync?"Sync required":"Up to date",review:people.some(e=>e.days.some(dayNeedsReview))?"Needs review":"Ready",delivery:deliverySummary(plans),dtr:readiness.summariesOutdated?"Refresh needed":"Up to date",payroll:readiness.periodOpen?"Open payroll":progress.adjustments.some(a=>a.state==="Open")?"Posted / closed · open adjustment review":"Posted / closed · no open adjustment"},enabled:true};
 }
 async function history(database:DbClient,actor:string,planId:string|null,action:string,details:unknown){await database.insert(workHistory).values({actor,planId,action,details});}
-export async function saveWorkDraft(database:DbClient,actor:string,periodId:string,drafts:WorkDraft[],existing?:{id:string;revision:number}) {
+export async function saveWorkDraft(database:DbClient,actor:string,periodId:string,drafts:WorkDraft[],existing?:{id:string;revision:number},requestId?:string) {
  enabled();if(!idPattern.test(periodId)||!Array.isArray(drafts)||!drafts.length||drafts.length>20||drafts.reduce((n,d)=>n+d.changes.length,0)>200||new Set(drafts.map(d=>d.employeeId)).size!==drafts.length)fail("Select 1–20 distinct employee plans and no more than 200 changes. Divide larger selections explicitly.");
  await lockAttendancePayrollInput(database);
+ if(requestId&&!idPattern.test(requestId))fail("Invalid draft request ID.");
+ if(requestId&&!existing){
+  const [replay]=await database.select().from(workBatches).where(eq(workBatches.id,requestId));
+  if(replay){
+   const [receipt]=await database.select().from(workHistory).where(and(eq(workHistory.action,"Draft request saved"),sql`${workHistory.details}->>'requestId'=${requestId}`));
+   const details=receipt?.details as {digest?:string}|undefined;
+   if(replay.actor!==actor||replay.periodId!==periodId||details?.digest!==resolutionDigest(drafts))fail("This draft request was already used for different changes. Reload its receipt before retrying.");
+   return {id:replay.id,revision:replay.revision};
+  }
+ }
  const people=await workEmployees(periodId,database);
  const sharedRecords=Array.from(new Map(drafts.flatMap(d=>{const p=people.find(p=>p.id===d.employeeId);return p?draftRecords(p,d):[];}).map(r=>[r.id,r])).values());
  const sharedChanges=drafts.flatMap(d=>d.changes.map(c=>({...c,employeeId:d.employeeId})));
- const id=existing?.id??randomUUID();
+ const id=existing?.id??requestId??randomUUID();
  if(existing){const [batch]=await database.select().from(workBatches).where(eq(workBatches.id,id)).for("update");if(!batch||batch.periodId!==periodId||batch.revision!==existing.revision||batch.state!=="Draft")fail("The saved batch changed. Reopen it before saving; your unsaved selections remain on screen.");await database.update(workBatches).set({revision:batch.revision+1,updatedAt:new Date()}).where(eq(workBatches.id,id));}
  else await database.insert(workBatches).values({id,periodId,actor});
  const old=await database.select().from(workPlans).where(eq(workPlans.batchId,id));
@@ -145,6 +155,7 @@ export async function saveWorkDraft(database:DbClient,actor:string,periodId:stri
   await history(database,actor,planId,"Draft saved",draft);
  }
  for(const removed of old.filter(p=>["Ready for approval","Needs evidence","Rejected","Needs fresh review"].includes(p.state)&&!drafts.some(d=>d.employeeId===p.employeeId)))await database.update(workPlans).set({state:"Removed from draft",updatedAt:new Date()}).where(eq(workPlans.id,removed.id));
+ if(requestId&&!existing)await history(database,actor,null,"Draft request saved",{requestId,digest:resolutionDigest(drafts)});
  return {id,revision:(existing?.revision??0)+1};
 }
 export async function workSource(request:unknown,fetcher:typeof fetch=fetch):Promise<Record<string,unknown>> {
@@ -178,14 +189,16 @@ export async function prepareWorkApproval(periodId:string,batchId:string,revisio
     continue; // Neighbor context alone does not extend employment eligibility.
    }
    for(const date of draft.changes.filter(c=>c.at).map(c=>c.at!.slice(0,10)))if(date>=period.startDate&&date<=period.endDate&&!scoped.days.some(d=>d.day===date))fail(`The corrected date ${date} is outside this employee's employment dates.`);
-   const days=scoped.days.filter(d=>affectedDates.some(day=>Math.abs(Date.parse(d.day)-Date.parse(day))<=86400000));
+   const targetIds=new Set(sharedRecords.filter(r=>draft.days.some(day=>person.days.find(d=>d.day===day)?.records.some(p=>p.id===r.id))||draft.changes.some(c=>c.eventId===r.id||c.rawLogId!==undefined&&c.rawLogId===r.rawLogId)).map(r=>r.id));
+   const days=scoped.days.filter(d=>affectedDates.includes(d.day)||d.records.some(r=>targetIds.has(r.id)));
+   if(!days.length)continue;
    const runs=await database.select().from(payrollRuns).where(eq(payrollRuns.payrollPeriodId,period.id));
    const posted=period.status!=="Open"||runs.some(r=>r.status==="Posted"&&r.inputSnapshot?.payrollGroup!=="Monthly");
    periodEvidence.push({id:period.id,code:period.code,posted,days,version:resolutionDigest([scoped.mappingEvidence,days])});
    if(posted)preview.warnings.push(`${period.code}: posted payroll remains unchanged; a linked adjustment case is required.`);
    if(period.id!==periodId){
     const simulated=simulateWork(scoped.contextRecords??scoped.days.flatMap(d=>d.records),sharedChanges,scoped.id);
-    for(const day of days){const check=sequenceProblems(workDayRecords(simulated.records,day.day),day.schedule);preview.warnings.push(...[...check.errors,...check.warnings].map(w=>`${period.code} / ${day.day}: ${w}`));}
+    for(const day of days){const check=sequenceProblems(workDayRecords(simulated.records,day.day,day.schedule),day.schedule);preview.warnings.push(...[...check.errors,...check.warnings].map(w=>`${period.code} / ${day.day}: ${w}`));}
    }
   }
   const impacts=periodEvidence.map(p=>p.id);prepared.push({id:plan.id,draft,version:draft.version,preview,sourceRequest,impacts,periodEvidence});
@@ -213,11 +226,11 @@ export async function approveWorkBatch(actor:string,periodId:string,batchId:stri
     if(!scoped||resolutionDigest([scoped.mappingEvidence,days])!==evidence.version)fail("Evidence in an affected payroll period changed. Review the whole batch again.");
     const [period]=await tx.select().from(payrollPeriods).where(eq(payrollPeriods.id,evidence.id));const runs=await tx.select().from(payrollRuns).where(eq(payrollRuns.payrollPeriodId,evidence.id));
     const posted=period.status!=="Open"||runs.some(r=>r.status==="Posted"&&r.inputSnapshot?.payrollGroup!=="Monthly");if(posted!==evidence.posted)fail("An affected payroll period changed status. Review the adjustment warning again.");
-    if(posted)await tx.insert(adjustmentCases).values({planId:plan.id,periodId:evidence.id,employeeId:person.id,beforeEvidence:{runs:runs.filter(r=>r.status==="Posted"),days,draft:plan.draft},afterEvidence:days.map(day=>({...day,records:workDayRecords(plan.preview.records,day.day)})),impact:impactSummary(scoped,{...plan.draft,days:days.map(day=>day.day)},plan.preview.records)});
+    if(posted)await tx.insert(adjustmentCases).values({planId:plan.id,periodId:evidence.id,employeeId:person.id,beforeEvidence:{runs:runs.filter(r=>r.status==="Posted"),days,draft:plan.draft},afterEvidence:days.map(day=>({...day,records:workDayRecords(plan.preview.records,day.day,day.schedule)})),impact:impactSummary(scoped,{...plan.draft,days:days.map(day=>day.day)},plan.preview.records)});
     else {
      const sourceRecords=draftRecords(scoped,plan.draft).filter(r=>plan.preview.records.some(p=>p.id===r.id)||plan.draft.days.includes(workDate(r.at)));
      const reviewDates=[...new Set([...plan.draft.days,...plan.preview.records.map(r=>workDate(r.at))])].filter(day=>scoped.days.some(d=>d.day===day));
-     const records=[...new Map(reviewDates.flatMap(day=>workDayRecords(plan.preview.records,day)).filter(r=>r.employeeId===person.id).map(r=>[r.id,r])).values()];
+     const records=[...new Map(reviewDates.flatMap(day=>workDayRecords(plan.preview.records,day,scoped.days.find(d=>d.day===day)?.schedule??null)).filter(r=>r.employeeId===person.id).map(r=>[r.id,r])).values()];
      const affectedDays=[...new Set([...plan.draft.days,...sourceRecords.map(r=>workDate(r.at)),...records.map(r=>workDate(r.at))])].filter(day=>scoped.days.some(d=>d.day===day));
      if(affectedDays.length)await persistAdminDecision(tx,{periodId:evidence.id,planId:plan.id,actor,employeeNo:person.no,draft:{...plan.draft,days:affectedDays},sourceRecords:[...new Map(sourceRecords.map(r=>[r.id,r])).values()],records,warnings:plan.preview.warnings});
      await invalidateResolutionPeriod(tx,evidence.id,actor);
@@ -233,5 +246,5 @@ export async function approveWorkBatch(actor:string,periodId:string,batchId:stri
 
 export function impactSummary(person:WorkEmployee,draft:WorkDraft,approvedRecords?:WorkRecord[]) {
  const proposed=approvedRecords??previewWork(person,draft).records;
- return draft.days.map(day=>{const d=person.days.find(d=>d.day===day)!;const calculate=(records:WorkRecord[])=>summarizeEmployeeDay(day,records.filter(r=>r.status==="VALID"&&!r.excluded).map((r,i)=>{const wall=manilaWallTime(r.at);return {employeeNo:person.no,employeeId:person.id,loggedAt:new Date(wall.timestamp.replace(" ","T")+"Z"),logDate:wall.date,logTime:wall.time,direction:r.type,sourceLine:i,rawText:"Attendance review evidence"};}),d.schedule??{checkInTime:null,checkOutTime:null},d.leave);return {day,before:calculate(d.records),proposed:calculate(workDayRecords(proposed,day))};});
+ return draft.days.map(day=>{const d=person.days.find(d=>d.day===day)!;const calculate=(records:WorkRecord[])=>summarizeEmployeeDay(day,records.filter(r=>r.status==="VALID"&&!r.excluded).map((r,i)=>{const wall=manilaWallTime(r.at);return {employeeNo:person.no,employeeId:person.id,loggedAt:new Date(wall.timestamp.replace(" ","T")+"Z"),logDate:wall.date,logTime:wall.time,direction:r.type,sourceLine:i,rawText:"Attendance review evidence"};}),d.schedule??{checkInTime:null,checkOutTime:null},d.leave);return {day,before:calculate(d.records),proposed:calculate(workDayRecords(proposed,day,d.schedule))};});
 }

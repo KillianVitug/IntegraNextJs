@@ -8,7 +8,7 @@ export type WorkRecord={id:string;source:"API"|"Manual"|"File";rawLogId?:number;
 export type WorkFinding={code:string;severity:"error"|"warning";employeeId:string;day:string;message:string};
 export type WorkDay={findings?:WorkFinding[];day:string;schedule:ShiftWindow|null;rest:boolean;leave:number;leaveEvidence:unknown;configuration:unknown;records:WorkRecord[];status:string;issues:string[];suggestions:{label:string;explanation:string;changes:Partial<WorkChange>[]}[];version:string;resolved:boolean;decision?:{planId?:string;payrollRunId?:string;revision?:string;approvedAt:string;reason:string;lateConflict:boolean;incomingDigest:string;incomingRecords:WorkRecord[]}};
 export type WorkEmployee={id:string;no:string;name:string;sourceIds:string[];mappingEvidence:unknown;hired:string|null;separated:string|null;days:WorkDay[];contextRecords?:WorkRecord[]};
-export type WorkPlanView={id:string;batchId:string;revision:number;state:string;draft:WorkDraft;result:string|null;approved?:boolean;approvedAt?:string;supersededBy?:string[];updatedAt:string};
+export type WorkPlanView={id:string;batchId:string;revision:number;state:string;draft:WorkDraft;result:string|null;approved?:boolean;approvedAt?:string;historicalDeliveryPending?:boolean;supersededBy?:string[];updatedAt:string};
 export type WorkProgress=Pick<WorkBoard,"plans"|"history"|"adjustments"|"owners">;
 const editablePlanStates=["Draft","Ready for approval","Needs evidence","Rejected","Needs fresh review"];
 /** Conservative display classification: every exact requested correction must have
@@ -23,7 +23,13 @@ export function classifyWorkPlans(plans:WorkPlanView[]):WorkPlanView[] {
  });
 }
 export function isActiveWorkPlan(plan:WorkPlanView) {
- return !plan.supersededBy?.length&&!['Resolved','Removed from draft','Superseded'].includes(plan.state);
+ return !plan.supersededBy?.length&&!['Resolved','Removed from draft','Superseded','Archived draft'].includes(plan.state);
+}
+export function workPlanStateLabel(state:string,draft?:WorkDraft) {
+ if(state!=="Needs evidence")return state;
+ // A legacy evidence requirement must not imply a missing time/direction now
+ // that notes are optional. The saved intent still needs a fresh explicit review.
+ return draft?.changes.length&&draft.changes.every(c=>!changeInputErrors(draft,c).length)?"Saved draft · review current attendance":"Missing required input";
 }
 export type WorkBoard={period:{id:string;code:string;startDate:string;endDate:string;posted:boolean};employees:WorkEmployee[];plans:WorkPlanView[];history?:{id:string;planId:string|null;action:string;actor:string;at:string}[];adjustments:{id:string;employeeId:string;periodId:string;state:string;impact:unknown;reference:string|null;conclusion:string|null}[];owners:{id:string;name:string}[];statuses:{sync:string;review:string;delivery:string;dtr:string;payroll:string};enabled:boolean};
 export const localToInstant=(value:string)=> {
@@ -44,14 +50,17 @@ export function draftRecords(employee:WorkEmployee,draft:WorkDraft) {
   const ids=new Set([...(context?.records??[]),...incoming].map(r=>r.id));
   records=[...records.filter(r=>!ids.has(r.id)&&workDate(r.at)!==day),...incoming];
  }
- return [...new Map(records.filter(r=>draft.days.some(day=>workDayRecords(records,day).some(x=>x.id===r.id))||draft.changes.some(c=>c.eventId===r.id)).map(r=>[r.id,r])).values()];
+ return [...new Map(records.filter(r=>draft.days.some(day=>workDayRecords(records,day,employee.days.find(d=>d.day===day)?.schedule??null).some(x=>x.id===r.id))||draft.changes.some(c=>c.eventId===r.id)).map(r=>[r.id,r])).values()];
 }
 /** Adding/removing dates must never silently accept changed evidence on retained dates. */
 export function retainedDraftVersion(employee:WorkEmployee,days:string[],previous?:WorkDraft) {
  return [...new Set(days)].sort().map(day=>previous?.version.split("|").find(v=>v.startsWith(`${day}:`))??draftVersion(employee,[day])).join("|");
 }
-export function workDayRecords(records:WorkRecord[],day:string) {
+export function workDayRecords(records:WorkRecord[],day:string,schedule?:ShiftWindow|null) {
  const all=records.slice().sort((a,b)=>a.at.localeCompare(b.at)),own=all.filter(r=>workDate(r.at)===day);
+ // A neighbouring capture is context only for a known overnight shift. Merely
+ // alternating IN/OUT on different workdays does not assign it to this day.
+ if(schedule!==undefined&&(!schedule?.checkInTime||!schedule.checkOutTime||schedule.checkOutTime>schedule.checkInTime))return own;
  const first=own.find(r=>r.status==="VALID"&&!r.excluded),last=own.filter(r=>r.status==="VALID"&&!r.excluded).at(-1);
  if(first?.type==="OUT"){const prev=all.filter(r=>r.at<first.at&&r.status==="VALID"&&!r.excluded).at(-1);if(prev?.type==="IN"&&Date.parse(first.at)-Date.parse(prev.at)<=86400000)own.unshift(prev);}
  if(last?.type==="IN"){const next=all.find(r=>r.at>last.at&&r.status==="VALID"&&!r.excluded);if(next?.type==="OUT"&&Date.parse(next.at)-Date.parse(last.at)<=86400000)own.push(next);}

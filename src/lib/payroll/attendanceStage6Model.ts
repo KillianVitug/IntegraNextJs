@@ -58,6 +58,8 @@ export function sourceDeliveryLabel(plan:WorkPlanView) {
  return "Approval recovery pending — approved decision retained";
 }
 export function deliverySummary(plans:WorkPlanView[]) {
+ const historical=plans.filter(p=>p.historicalDeliveryPending&&!p.supersededBy?.length).length;
+ if(historical)return `${historical} historical receipt checks · payroll unchanged`;
  const active=plans.filter(p=>p.approved&&!p.supersededBy?.length&&!['Resolved','Superseded','Removed from draft'].includes(p.state));
  const conflicts=active.filter(p=>['Needs fresh review','Source conflict'].includes(p.state)).length;
  const failures=active.filter(p=>p.state==='Failed').length;

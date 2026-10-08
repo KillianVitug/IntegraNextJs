@@ -1,5 +1,6 @@
 import { employeePayrollRun, payrollInputPeriodScope } from "./payrollGroups";
-import { db } from "@/db";
+import { db, type DbClient } from "@/db";
+import { lockAttendancePayrollInput } from "./attendanceSourceGuard";
 import {
   accountCode,
   department,
@@ -329,22 +330,23 @@ function getManualPayrollDailyRate(
 
 async function getManualPayrollRateContext(
   payrollPeriodId: string,
-  employeeId: string
+  employeeId: string,
+  database:DbClient = db
 ): Promise<ManualPayrollRateContextView> {
   const [period, resolvedSalary, timekeeping, shiftAssignments, weeklyPatterns] =
     await Promise.all([
-      db.query.payrollPeriods.findFirst({
+      database.query.payrollPeriods.findFirst({
         where: eq(payrollPeriods.id, payrollPeriodId),
       }),
-      resolveEmployeeSalaryForPeriod(employeeId, payrollPeriodId),
-      db.query.employeesTimekeeping.findFirst({
+      resolveEmployeeSalaryForPeriod(employeeId, payrollPeriodId, database),
+      database.query.employeesTimekeeping.findFirst({
         where: eq(employeesTimekeeping.employeeId, employeeId),
       }),
-      db
+      database
         .select()
         .from(employeeShiftAssignments)
         .where(eq(employeeShiftAssignments.employeeId, employeeId)),
-      db.query.employeeWeeklyShiftPatterns.findMany({
+      database.query.employeeWeeklyShiftPatterns.findMany({
         where: eq(employeeWeeklyShiftPatterns.employeeId, employeeId),
         with: {
           days: true,
@@ -394,10 +396,10 @@ function getEditBlockReason(status: string | null) {
   return `Manual Payroll can only edit Draft or Stale runs. The latest run is ${status}.`;
 }
 
-export async function getManualAccountCodeOptions(): Promise<
+export async function getManualAccountCodeOptions(database:DbClient = db): Promise<
   ManualPayrollAccountCodeOptionView[]
 > {
-  const rows = await db
+  const rows = await database
     .select({
       id: accountCode.id,
       code: accountCode.accountCode,
@@ -800,7 +802,7 @@ function isHeldDtrRefreshableManualLine(
   );
 }
 
-function createAttendanceRefreshableManualLinePredicate(args?: {
+export function createAttendanceRefreshableManualLinePredicate(args?: {
   refreshableExceptionRowIds?: Iterable<string>;
   refreshHeldDtrLines?: boolean;
 }) {
@@ -1481,7 +1483,8 @@ function getLoanInstallmentSourceIds(lines: ManualLineWithSource[]) {
 }
 
 async function filterActiveLoanInstallmentLines<T extends ManualLineWithSource>(
-  lines: T[]
+  lines: T[],
+  database:DbClient = db
 ): Promise<T[]> {
   const loanInstallmentIds = getLoanInstallmentSourceIds(lines);
   if (loanInstallmentIds.length === 0) {
@@ -1490,7 +1493,7 @@ async function filterActiveLoanInstallmentLines<T extends ManualLineWithSource>(
     );
   }
 
-  const activeInstallments = await db
+  const activeInstallments = await database
     .select({
       id: loanInstallments.id,
     })
@@ -1514,13 +1517,14 @@ async function filterActiveLoanInstallmentLines<T extends ManualLineWithSource>(
 }
 
 async function sanitizeManualPayrollBaselineSnapshot(
-  baseline: ManualPayrollBaselineSnapshot | null | undefined
+  baseline: ManualPayrollBaselineSnapshot | null | undefined,
+  database:DbClient = db
 ) {
   if (!baseline) return null;
 
   return {
     ...baseline,
-    lines: await filterActiveLoanInstallmentLines(baseline.lines),
+    lines: await filterActiveLoanInstallmentLines(baseline.lines,database),
   };
 }
 
@@ -1612,30 +1616,18 @@ function buildManualPayrollPayloadFromEntry(args: {
   };
 }
 
-export async function refreshManualPayrollAttendanceLinesFromBaseline(args: {
-  actorUserId: string;
-  payrollPeriodId: string;
-  employeeId: string;
-  latestBaseline?: ManualPayrollBaselineSnapshot | null;
-  refreshableExceptionRowIds?: string[];
-  refreshHeldDtrLines?: boolean;
-}) {
+type AttendanceLineRefreshArgs={database?:DbClient;actorUserId?:string;payrollPeriodId:string;employeeId:string;latestBaseline?:ManualPayrollBaselineSnapshot|null;refreshableExceptionRowIds?:string[];refreshHeldDtrLines?:boolean};
+/** Read-only projection using exactly the attendance merge used by financial refresh. */
+export async function projectManualPayrollAttendanceLinesFromBaseline(args:AttendanceLineRefreshArgs){
+  const database=args.database??db;
   const sanitizedLatestBaseline = await sanitizeManualPayrollBaselineSnapshot(
-    args.latestBaseline
+    args.latestBaseline,database
   );
 
-  const emptyResult = {
-    refreshed: false,
-    entryId: null as string | null,
-    replacedLineCount: 0,
-    refreshedLineCount: 0,
-    preservedLineCount: 0,
-  };
-
-  if (!sanitizedLatestBaseline) return emptyResult;
+  if (!sanitizedLatestBaseline) return null;
 
   const [entry, period, accountCodeOptions, rateContext] = await Promise.all([
-    db.query.manualPayrollEntries.findFirst({
+    database.query.manualPayrollEntries.findFirst({
       where: and(
         eq(manualPayrollEntries.payrollPeriodId, args.payrollPeriodId),
         eq(manualPayrollEntries.employeeId, args.employeeId)
@@ -1644,18 +1636,18 @@ export async function refreshManualPayrollAttendanceLinesFromBaseline(args: {
         lines: true,
       },
     }),
-    db.query.payrollPeriods.findFirst({
+    database.query.payrollPeriods.findFirst({
       where: eq(payrollPeriods.id, args.payrollPeriodId),
     }),
-    getManualAccountCodeOptions(),
-    getManualPayrollRateContext(args.payrollPeriodId, args.employeeId),
+    getManualAccountCodeOptions(database),
+    getManualPayrollRateContext(args.payrollPeriodId, args.employeeId,database),
   ]);
 
   if (!period) {
     throw new Error("Payroll period not found.");
   }
 
-  if (!entry) return emptyResult;
+  if (!entry) return null;
 
   const latestBaseline = normalizeManualPayrollBaselineForPeriodCycle(
     sanitizedLatestBaseline,
@@ -1690,7 +1682,7 @@ export async function refreshManualPayrollAttendanceLinesFromBaseline(args: {
         rows: payload.lines,
         accountCodeById,
         rateContext,
-      })
+      }),database
     )
   );
   const totals = computeEntryTotals({
@@ -1703,65 +1695,30 @@ export async function refreshManualPayrollAttendanceLinesFromBaseline(args: {
   ).length;
   const preservedLineCount = savedLines.length - replacedLineCount;
 
-  await db.transaction(async (tx) => {
-    await tx
-      .update(manualPayrollEntries)
-      .set({
-        payComputationMode:
-          latestBaseline.payComputationMode ??
-          (entry.payComputationMode as PayrollComputationModeView | null) ??
-          null,
-        baselineSnapshot: latestBaseline,
-        ...totals,
-        sssEc: money(payload.sssEc),
-        updatedByUserId: args.actorUserId,
-        updatedAt: new Date(),
-      })
-      .where(eq(manualPayrollEntries.id, entry.id));
 
-    await tx
-      .delete(manualPayrollEntryLines)
-      .where(eq(manualPayrollEntryLines.manualPayrollEntryId, entry.id));
-
-    if (normalizedLines.length > 0) {
-      await tx.insert(manualPayrollEntryLines).values(
-        normalizedLines.map((line: NormalizedManualLine, index: number) => ({
-          manualPayrollEntryId: entry.id,
-          ...line,
-          sortOrder: index,
-        }))
-      );
-    }
-
-    await recordAdminAuditEvent({
-      actorUserId: args.actorUserId,
-      entityType: "manual_payroll_entry",
-      entityId: entry.id,
-      action: "manual_payroll.attendance_lines_refreshed",
-      details: {
-        payrollPeriodId: args.payrollPeriodId,
-        employeeId: args.employeeId,
-        replacedLineCount,
-        refreshedLineCount,
-        preservedLineCount,
-      },
-      database: tx,
-    });
-  });
-
-  return {
-    refreshed: true,
-    entryId: entry.id,
-    replacedLineCount,
-    refreshedLineCount,
-    preservedLineCount,
-  };
+  return {entry:{...entry,payComputationMode:latestBaseline.payComputationMode??(entry.payComputationMode as PayrollComputationModeView|null)??null,baselineSnapshot:latestBaseline,...totals,sssEc:money(payload.sssEc)},lines:normalizedLines.map((line:NormalizedManualLine,index:number)=>({manualPayrollEntryId:entry.id,...line,sortOrder:index})),replacedLineCount,refreshedLineCount,preservedLineCount};
+}
+export async function refreshManualPayrollAttendanceLinesFromBaseline(args:AttendanceLineRefreshArgs&{actorUserId:string}):Promise<{refreshed:boolean;entryId:string|null;replacedLineCount:number;refreshedLineCount:number;preservedLineCount:number}>{
+ if(!args.database)return db.transaction(tx=>refreshManualPayrollAttendanceLinesFromBaseline({...args,database:tx}));
+ const database=args.database;await lockAttendancePayrollInput(database);
+ await assertManualPayrollEditable(args.payrollPeriodId,args.employeeId,database);
+ const projection=await projectManualPayrollAttendanceLinesFromBaseline(args);
+ if(!projection)return {refreshed:false,entryId:null,replacedLineCount:0,refreshedLineCount:0,preservedLineCount:0};
+ const {entry,lines,replacedLineCount,refreshedLineCount,preservedLineCount}=projection;
+ const {lines:oldLines,...values}=entry;void oldLines;
+ await database.update(manualPayrollEntries).set({...values,updatedByUserId:args.actorUserId,updatedAt:new Date()}).where(eq(manualPayrollEntries.id,entry.id));
+ await database.delete(manualPayrollEntryLines).where(eq(manualPayrollEntryLines.manualPayrollEntryId,entry.id));
+ if(lines.length)await database.insert(manualPayrollEntryLines).values(lines);
+ await recordAdminAuditEvent({actorUserId:args.actorUserId,entityType:"manual_payroll_entry",entityId:entry.id,action:"manual_payroll.attendance_lines_refreshed",details:{payrollPeriodId:args.payrollPeriodId,employeeId:args.employeeId,replacedLineCount,refreshedLineCount,preservedLineCount},database});
+ return {refreshed:true,entryId:entry.id,replacedLineCount,refreshedLineCount,preservedLineCount};
 }
 
-async function assertManualPayrollEditable(payrollPeriodId: string,employeeId:string) {
-  const monthlyPosted=await db.select({id:payrollRuns.id}).from(payrollRuns).innerJoin(payrollRunEmployees,eq(payrollRunEmployees.payrollRunId,payrollRuns.id)).where(and(eq(payrollRunEmployees.employeeId,employeeId),eq(payrollRuns.status,"Posted"),sql`${payrollRuns.inputSnapshot}->>'payrollGroup'='Monthly'`,payrollInputPeriodScope(payrollPeriodId)));
+async function assertManualPayrollEditable(payrollPeriodId: string,employeeId:string,database:DbClient=db) {
+  const [period]=await database.select({status:payrollPeriods.status}).from(payrollPeriods).where(eq(payrollPeriods.id,payrollPeriodId));
+  if(!period||period.status!=="Open")throw new Error("This payroll period is closed. Use the adjustment process; posted payroll is unchanged.");
+  const monthlyPosted=await database.select({id:payrollRuns.id}).from(payrollRuns).innerJoin(payrollRunEmployees,eq(payrollRunEmployees.payrollRunId,payrollRuns.id)).where(and(eq(payrollRunEmployees.employeeId,employeeId),eq(payrollRuns.status,"Posted"),sql`${payrollRuns.inputSnapshot}->>'payrollGroup'='Monthly'`,payrollInputPeriodScope(payrollPeriodId)));
   if(monthlyPosted.length)throw new Error("This employee's monthly payout is already posted. Use the adjustment process; posted payroll is unchanged.");
-  const latestRun = await employeePayrollRun(payrollPeriodId,employeeId);
+  const latestRun = await employeePayrollRun(payrollPeriodId,employeeId,database);
   const editBlockReason = getEditBlockReason(latestRun?.status ?? null);
   if (editBlockReason) {
     throw new Error(editBlockReason);

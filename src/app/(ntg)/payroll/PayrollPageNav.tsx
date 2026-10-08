@@ -67,6 +67,7 @@ export function PayrollPageNav({
             <Link href={getHref(item.section)}>{item.label}</Link>
           </Button>
         ))}
+        <Button asChild variant="outline" size="sm"><Link href={`/payroll/provisional?${new URLSearchParams([...searchParams.entries()].filter(([key]) => ["year", "periodId", "group"].includes(key)))}`}>Provisional payroll</Link></Button>
       </div>
     </div>
   );

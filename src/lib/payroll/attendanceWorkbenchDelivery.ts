@@ -9,7 +9,8 @@ import { type WorkDraft, workDate } from "./attendanceWorkbenchModel";
 import { manilaWallTime, type SourcePunch } from "./attendanceSourceClient";
 import { lockAttendancePayrollInput } from "./attendanceSourceGuard";
 import { PayrollValidationError } from "./validation";
-import { adminDecision } from "./attendanceAdminDecision";
+import { adminDecision, historicalReceiptMatches } from "./attendanceAdminDecision";
+import { attendanceSourceEvents } from "@/db/attendanceSourceSchema";
 import { resolutionDigest } from "./attendanceResolution";
 
 function fail(message:string):never {throw new PayrollValidationError(message);}
@@ -35,14 +36,14 @@ export async function reconcileWorkbenchInputs(tx:DbClient,periodId:string,recor
 /** Retire the former source outbox using receipt reads only. Never replay a request. */
 export async function processWorkDelivery(actor:string,options:{batchId?:string;database?:typeof db;fetcher?:typeof fetch;sync?:(id:string,actor:string)=>Promise<unknown>;budgetMs?:number}={}) {
  const database=options.database??db,deadline=Date.now()+(options.budgetMs??35000);
- const plans=await database.select().from(workPlans).where(and(inArray(workPlans.state,["Approved","Applying","Failed","Sync pending","Source conflict","Needs fresh review"]),sql`${workPlans.sourceResult}->'readOnlyCutover' is null`,sql`(${workPlans.sourceRequest} is not null or ${workPlans.state} in ('Approved','Applying','Failed','Sync pending'))`,options.batchId?eq(workPlans.batchId,options.batchId):undefined)).orderBy(asc(workPlans.updatedAt)).limit(20);
+ const plans=await database.select().from(workPlans).where(and(inArray(workPlans.state,["Approved","Applying","Failed","Sync pending","Source conflict","Needs fresh review"]),options.batchId?undefined:sql`${workPlans.sourceResult}->'readOnlyCutover' is null`,sql`(${workPlans.sourceRequest} is not null or ${workPlans.state} in ('Approved','Applying','Failed','Sync pending'))`,options.batchId?eq(workPlans.batchId,options.batchId):undefined)).orderBy(asc(workPlans.updatedAt)).limit(20);
  let completed=0;
  for(const plan of plans) {
   if(Date.now()>deadline-9000)break;
   if(plan.leaseUntil&&plan.leaseUntil.getTime()>Date.now())continue;
   if(!plan.sourceRequest&&["Needs fresh review","Source conflict"].includes(plan.state))continue;
   const previous=(plan.sourceResult??{}) as Record<string,unknown>;
-  if(previous.readOnlyCutover)continue;
+  if(previous.readOnlyCutover&&!options.batchId)continue;
   let receipt:Record<string,unknown>|null=null,receiptState="Not requested";
   const request=plan.sourceRequest as {operation?:string;id?:string}|null;
   if(request?.operation==="apply-plan"&&request.id){
@@ -52,17 +53,31 @@ export async function processWorkDelivery(actor:string,options:{batchId?:string;
   const retired=await database.transaction(async tx=>{
    await lockAttendancePayrollInput(tx);
    const [current]=await tx.select().from(workPlans).where(eq(workPlans.id,plan.id)).for("update");
-   if(!current||current.updatedAt.getTime()!==plan.updatedAt.getTime()||(current.sourceResult as Record<string,unknown>|null)?.readOnlyCutover||current.leaseUntil&&current.leaseUntil.getTime()>Date.now())return false;
+   if(!current||current.updatedAt.getTime()!==plan.updatedAt.getTime()||(!options.batchId&&(current.sourceResult as Record<string,unknown>|null)?.readOnlyCutover)||current.leaseUntil&&current.leaseUntil.getTime()>Date.now())return false;
    const decisions=await tx.select().from(workTreatments).where(eq(workTreatments.planId,plan.id));
    const localApproved=decisions.some(t=>adminDecision(t.payload));
-   const message=`Source delivery retired — ${receiptState==="Applied"?"historical application confirmed":receiptState==="Not found"?"no applied source receipt":receiptState==="Unverified"?"historical receipt unavailable; application remains unverified":"no source update requested"}. ${localApproved?"Approved local payroll attendance is retained.":"Saved evidence is retained; review a local payroll override if needed."} Phone attendance was not changed.`;
-   await tx.update(workPlans).set({state:localApproved?"Resolved":"Needs fresh review",leaseUntil:null,sourceResult:{...previous,...(receipt?.state==="Applied"?receipt:{}),readOnlyCutover:{at:new Date().toISOString(),actor,receiptState,receipt,localApproved,previousResult:current.sourceResult}},result:message,updatedAt:new Date()}).where(eq(workPlans.id,plan.id));
-   await tx.insert(workHistory).values({planId:plan.id,actor,action:"Source delivery retired",details:{previousState:current.state,sourceRequest:current.sourceRequest,previousResult:current.sourceResult,receiptState,receipt,localApproved,sourceMutationSent:false}});
+   const eventIds=Array.isArray(receipt?.changes)?receipt.changes.flatMap(c=>typeof c.event_id==="string"?[c.event_id]:[]):[];
+   const punches=eventIds.length?(await tx.select({payload:attendanceSourceEvents.payload}).from(attendanceSourceEvents).where(inArray(attendanceSourceEvents.eventId,eventIds))).map(r=>r.payload as SourcePunch):[];
+   const historicalApplied=historicalReceiptMatches(receipt,punches);
+   const message=`Source delivery retired — ${historicalApplied?"historical application and latest synced source values confirmed":receiptState==="Applied"?"historical receipt found; current source values need review":receiptState==="Not found"?"no applied source receipt":receiptState==="Unverified"?"historical receipt unavailable; application remains unverified":"no source update requested"}. ${localApproved?"Approved local payroll attendance is retained.":historicalApplied?"No attendance repair is needed for this historical delivery.":"Saved evidence is retained; review a local payroll override if needed."} Phone attendance was not changed.`;
+   await tx.update(workPlans).set({state:localApproved||historicalApplied?"Resolved":"Needs fresh review",leaseUntil:null,sourceResult:{...previous,...(receipt?.state==="Applied"?receipt:{}),readOnlyCutover:{at:new Date().toISOString(),actor,receiptState,receipt,localApproved,historicalApplied,previousResult:current.sourceResult}},result:message,updatedAt:new Date()}).where(eq(workPlans.id,plan.id));
+   await tx.insert(workHistory).values({planId:plan.id,actor,action:"Source delivery retired",details:{previousState:current.state,sourceRequest:current.sourceRequest,previousResult:current.sourceResult,receiptState,receipt,localApproved,historicalApplied,sourceMutationSent:false}});
    return true;
   });
   if(retired)completed++;
  }
- return {completed,remaining:plans.filter(p=>!(p.sourceResult as Record<string,unknown>|null)?.readOnlyCutover&&(p.sourceRequest||!["Needs fresh review","Source conflict"].includes(p.state))).length-completed};
+ return {completed,remaining:Math.max(0,plans.filter(p=>!(p.sourceResult as Record<string,unknown>|null)?.readOnlyCutover&&(p.sourceRequest||!["Needs fresh review","Source conflict"].includes(p.state))).length-completed)};
+}
+export async function archiveWorkDraft(tx:DbClient,actor:string,id:string,expectedUpdatedAt:string,note:string) {
+ await lockAttendancePayrollInput(tx);
+ const [plan]=await tx.select().from(workPlans).where(eq(workPlans.id,id)).for("update");
+ if(!plan||plan.updatedAt.toISOString()!==expectedUpdatedAt)fail("The saved plan changed. Reload history before archiving it.");
+ if(plan.sourceRequest||!["Draft","Needs fresh review","Rejected","Needs evidence","Ready for approval"].includes(plan.state))fail("Only an unapproved draft can be archived. Reconcile historical approvals separately.");
+ const previousState=plan.state;
+ await tx.update(workPlans).set({state:"Archived draft",result:note.trim()||"Administrator archived this unfinished draft. Its proposed changes were not applied.",updatedAt:new Date()}).where(eq(workPlans.id,id));
+ const [batch]=await tx.update(workBatches).set({revision:sql`${workBatches.revision}+1`,acknowledgedDigest:null,updatedAt:new Date()}).where(eq(workBatches.id,plan.batchId)).returning({revision:workBatches.revision});
+ await tx.insert(workHistory).values({planId:id,actor,action:"Unapproved draft archived",details:{previousState,draft:plan.draft,note:note.trim(),attendanceChanged:false,payrollChanged:false}});
+ return {id,batchId:plan.batchId,revision:batch.revision};
 }
 export async function closeAdjustment(tx:DbClient,actor:string,id:string,reference:string,conclusion:string,confirmed:boolean) {
  if(!confirmed||conclusion.trim().length<10)fail("Review the impact and record evidence for the adjustment or no-impact conclusion.");await lockAttendancePayrollInput(tx);

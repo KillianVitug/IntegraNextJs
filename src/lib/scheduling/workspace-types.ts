@@ -51,7 +51,7 @@ export type ScheduleWorkspace = {
 export type ScheduleWorkspaceQuery = { departmentId?: number; periodId?: string; effectiveDate?: string; employeeId?: string; day?: string; branchId?: number };
 export type SchedulePeriodCommand = {
   requestId: string; departmentId: number; periodId: string; sourceDigest: string; expectedDraftRevision: number | null; expectedDraftId: string | null;
-  changes: Array<{ employeeId: string; day: string; value: string }>;
+  changes: Array<{ employeeId: string; day: string; value: string; customTimes?: { start: string; end: string } }>;
 };
 export type ScheduleDayRepair = {
   departmentId: number; periodId: string; sourceDigest: string;

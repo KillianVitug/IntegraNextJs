@@ -13,10 +13,10 @@ export async function loadWorkPlanViews(periodId:string,database:DbClient=db) {
   database.select({planId:workHistory.planId,at:workHistory.createdAt}).from(workHistory).innerJoin(workPlans,eq(workPlans.id,workHistory.planId)).where(and(eq(workPlans.periodId,periodId),eq(workHistory.action,"Approved"))).orderBy(desc(workHistory.createdAt)),
  ]);
  return classifyWorkPlans(plans.map(p=>{
-  const cutover=(p.sourceResult as {readOnlyCutover?:{localApproved?:boolean}}|null)?.readOnlyCutover;
+  const cutover=(p.sourceResult as {readOnlyCutover?:{localApproved?:boolean;historicalApplied?:boolean}}|null)?.readOnlyCutover;
   // A retained historical request is audit evidence, not a local approval.
-  const approved=cutover?cutover.localApproved===true:!!p.sourceRequest||["Approved","Applying","Sync pending","Resolved","Source conflict"].includes(p.state);
-  return {id:p.id,batchId:p.batchId,revision:batches.find(b=>b.id===p.batchId)?.revision??0,state:p.state,draft:p.draft as WorkDraft,result:p.result,approved,approvedAt:approvals.find(a=>a.planId===p.id)?.at.toISOString(),updatedAt:p.updatedAt.toISOString()};
+  const approved=cutover?cutover.localApproved===true||cutover.historicalApplied===true:!!p.sourceRequest||["Approved","Applying","Sync pending","Resolved","Source conflict"].includes(p.state);
+  return {id:p.id,batchId:p.batchId,revision:batches.find(b=>b.id===p.batchId)?.revision??0,state:p.state,draft:p.draft as WorkDraft,result:p.result,approved,historicalDeliveryPending:!!p.sourceRequest&&!cutover?.historicalApplied&&!cutover?.localApproved&&!["Resolved","Superseded"].includes(p.state),approvedAt:approvals.find(a=>a.planId===p.id)?.at.toISOString(),updatedAt:p.updatedAt.toISOString()};
  }));
 }
 

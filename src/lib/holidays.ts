@@ -1,6 +1,6 @@
 import "server-only";
 
-import { db } from "@/db";
+import { db, type DbClient } from "@/db";
 import {
   holidayTemplates,
   holidayYearCalendar,
@@ -287,9 +287,10 @@ export async function fetchConfirmedHolidayRowsForYear(
 
 export async function fetchConfirmedHolidayRowsForRange(
   startDate: string,
-  endDate: string
+  endDate: string,
+  database: DbClient = db
 ): Promise<ConfirmedHolidayRow[]> {
-  const rows = await db
+  const rows = await database
     .select({
       holidayDate: holidayYearCalendar.holidayDate,
       holidayDate2: holidayYearCalendar.holidayDate2,
