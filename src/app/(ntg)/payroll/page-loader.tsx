@@ -53,9 +53,10 @@ export async function renderPayrollWorkspacePage({
 
   return (
     <>
-      {process.env.ATTENDANCE_SOURCE_ENABLED === "true" && (
-        <div className="px-6 pt-4">
-          <Link
+        <nav aria-label="Payroll workspaces" className="flex flex-wrap gap-3 px-6 pt-4">
+          <Link className="inline-flex min-h-11 items-center rounded-lg border px-3 py-2 text-sm font-semibold" href={`/payroll/provisional?${new URLSearchParams({year:String(selectedYear),group:payrollGroup,...(snapshot.selectedPeriodId?{periodId:snapshot.selectedPeriodId}:{})})}`}>Provisional payroll</Link>
+          {process.env.ATTENDANCE_SOURCE_ENABLED === "true" && <Link
+            className="inline-flex min-h-11 items-center rounded-lg border px-3 py-2 text-sm font-semibold"
             href={attendancePeriodUrl(
               "/payroll/attendance-source",
               selectedYear,
@@ -63,9 +64,8 @@ export async function renderPayrollWorkspacePage({
             )}
           >
             Attendance review & sync
-          </Link>
-        </div>
-      )}
+          </Link>}
+        </nav>
       {snapshot.selectedPeriodId&&<PayrollGroups periodId={snapshot.selectedPeriodId} year={selectedYear} group={payrollGroup}/>}
       <PayrollWorkspace
         key={payrollGroup}
