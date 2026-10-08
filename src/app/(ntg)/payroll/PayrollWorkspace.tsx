@@ -494,7 +494,6 @@ const WORKFLOW_STEPS = [
   "Reviewed",
   "Approved",
   "Posted",
-  "Outputs Published",
 ] as const;
 
 const EMPTY_AGENCY_SUMMARY: PayrollAgencySummaryView = {
@@ -2771,7 +2770,7 @@ function getWorkflowStepStatus(args: {
   attendanceReady: boolean;
 }): "done" | "pending" | "blocked" {
   const { step, selectedPeriod, selectedRun, readiness } = args;
-  if (selectedRun?.status === "Posted" && step !== "Outputs Published") return "done";
+  if (selectedRun?.status === "Posted") return "done";
 
   if (step === "Period Setup") return selectedPeriod ? "done" : "pending";
   if (step === "DTR Ready") {
