@@ -99,20 +99,24 @@ function formatEmployeeName(employee: CalendarEmployee) {
 }
 
 function formatScheduleLabel(employee: CalendarEmployee) {
+  if (!employee.configured) return "No schedule configured";
   if (employee.isRestDay) return "Rest / Off day";
   if (employee.shiftCode && employee.shiftName) {
     return `${employee.shiftCode} | ${employee.shiftName}`;
   }
   if (employee.shiftCode) return employee.shiftCode;
   if (employee.shiftName) return employee.shiftName;
-  if (employee.source === "LEGACY") return "Legacy timekeeping";
+  if (employee.source === "LEGACY") return "Employee default schedule";
   return "Scheduled";
 }
 
-function sourceLabel(source: CalendarEmployee["source"]) {
+function sourceLabel(employee: CalendarEmployee) {
+  if (employee.confirmed) return "Confirmed period schedule";
+  if (!employee.configured) return "Unconfigured";
+  const source = employee.source;
   if (source === "OVERRIDE") return "Approved Override";
   if (source === "WEEKLY_PATTERN") return "Weekly Schedule";
-  return "Legacy";
+  return "Employee default";
 }
 
 function sourceClassName(source: CalendarEmployee["source"]) {
@@ -1125,6 +1129,7 @@ export function BranchCalendarClient({ data, initialSelectedDate }: Props) {
         <Card>
           <CardHeader>
             <CardTitle>Day Schedule</CardTitle>
+            <Link className="inline-flex min-h-11 items-center text-sm font-medium underline" href={`/schedules?view=period&day=${selectedDate}${data.selectedDepartmentId ? `&branchId=${data.selectedDepartmentId}` : ""}`}>Edit period schedule</Link>
             <CardDescription>{formatDayDescription(selectedDay)}</CardDescription>
           </CardHeader>
           <CardContent className="max-h-[70vh] overflow-y-auto">
@@ -1218,7 +1223,7 @@ export function BranchCalendarClient({ data, initialSelectedDate }: Props) {
                             sourceClassName(employee.source),
                           )}
                         >
-                          {sourceLabel(employee.source)}
+                          {sourceLabel(employee)}
                         </span>
                       </div>
                     </div>

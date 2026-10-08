@@ -1,4 +1,5 @@
 import "server-only";
+import { assertNoConfirmedScheduleEdit } from "@/lib/scheduling/guards";
 import { recordAdminAuditEvent } from "@/lib/admin";
 import { buildShiftAssignmentSnapshotFromTable } from "@/lib/shifts";
 import { upsertEmployeeShiftAssignmentSchema } from "@/zod-schemas/employeeShiftAssignment";
@@ -42,6 +43,7 @@ export async function prepareBulkDaySchedules(database:DbClient,input:unknown) {
 
 export async function saveDateAssignment(tx:DbClient, actor:{userId:string}, payload:ReturnType<typeof upsertEmployeeShiftAssignmentSchema.parse>, rebuild=true) {
     await lockShiftAssignmentContext(tx, payload.employeeId);
+    await assertNoConfirmedScheduleEdit(tx, {employeeId: payload.employeeId, startDate: payload.effectiveFrom, endDate: normalizeEffectiveTo(payload.effectiveTo)});
 
     const existingAssignment = payload.id
       ? await tx.query.employeeShiftAssignments.findFirst({
@@ -56,6 +58,7 @@ export async function saveDateAssignment(tx:DbClient, actor:{userId:string}, pay
     if (existingAssignment && existingAssignment.employeeId !== payload.employeeId) {
       throw new PayrollValidationError("Shift assignment employee mismatch.");
     }
+    if (existingAssignment) await assertNoConfirmedScheduleEdit(tx, {employeeId: payload.employeeId, startDate: existingAssignment.effectiveFrom, endDate: existingAssignment.effectiveTo});
 
     const selectedShiftTable = await loadShiftTableForAssignment(tx, payload.shiftTableId);
     const snapshot = buildShiftAssignmentSnapshotFromTable(selectedShiftTable);

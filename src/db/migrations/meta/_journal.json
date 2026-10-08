@@ -855,6 +855,13 @@
       "when": 1791504000000,
       "tag": "0124_payroll_groups",
       "breakpoints": true
+    },
+    {
+      "idx": 126,
+      "version": "7",
+      "when": 1791590400000,
+      "tag": "0125_schedule_workspace",
+      "breakpoints": true
     }
   ]
 }

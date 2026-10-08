@@ -1,4 +1,5 @@
 "use server";
+import { assertNoConfirmedScheduleEdit } from "@/lib/scheduling/guards";
 
 import { revalidatePath } from "next/cache";
 import { addDays, format } from "date-fns";
@@ -628,6 +629,7 @@ export async function saveBranchCalendarScheduleOverrideAction(input: unknown) {
 
     for (const employeeId of employeeIds) {
       await lockShiftAssignmentContext(tx, employeeId);
+      await assertNoConfirmedScheduleEdit(tx, {employeeId, startDate: parsed.attendanceDate, endDate: parsed.attendanceDate});
 
       const overlappingAssignments = await tx
         .select()
@@ -841,6 +843,7 @@ async function revertBranchCalendarScheduleOverrideItem(args: {
   }
 
   await lockShiftAssignmentContext(args.tx, item.employeeId);
+  await assertNoConfirmedScheduleEdit(args.tx, {employeeId: item.employeeId, startDate: item.attendanceDate, endDate: item.attendanceDate});
 
   await markAffectedShiftRunsStale({
     tx: args.tx,

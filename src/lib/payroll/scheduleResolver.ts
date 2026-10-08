@@ -8,8 +8,10 @@ import {
 } from "@/db/schema";
 import type { ShiftWindow } from "./attendance";
 
-export type ShiftAssignmentRecord = typeof employeeShiftAssignments.$inferSelect;
-export type WeeklyShiftPatternDayRecord = typeof employeeWeeklyShiftPatternDays.$inferSelect;
+type StoredAssignment = typeof employeeShiftAssignments.$inferSelect;
+export type ShiftAssignmentRecord = Omit<StoredAssignment, "confirmedSchedule" | "scheduleDecisionId"> & Partial<Pick<StoredAssignment, "confirmedSchedule" | "scheduleDecisionId">>;
+type StoredWeeklyDay = typeof employeeWeeklyShiftPatternDays.$inferSelect;
+export type WeeklyShiftPatternDayRecord = Omit<StoredWeeklyDay, "scheduleState"> & Partial<Pick<StoredWeeklyDay, "scheduleState">>;
 export type WeeklyShiftPatternRecord = typeof employeeWeeklyShiftPatterns.$inferSelect & {
   days: WeeklyShiftPatternDayRecord[];
 };
@@ -28,12 +30,23 @@ export type ResolvedEmployeeSchedule = {
   overrideAssignment: ShiftAssignmentRecord | null;
   weeklyPattern: WeeklyShiftPatternRecord | null;
   weeklyPatternDay: WeeklyShiftPatternDayRecord | null;
+  configured: boolean;
 };
 
 function toAmount(value: string | number | null | undefined) {
   if (value == null || value === "") return 0;
   const numericValue = Number(value);
   return Number.isFinite(numericValue) ? numericValue : 0;
+}
+
+/** New nullable storage columns must not invalidate unchanged pre-migration drafts. */
+export function scheduleVersionRecord<T extends object>(record: T | null): T | null {
+  if (!record) return null;
+  const copy = {...record} as Record<string, unknown>;
+  for (const key of ["confirmedSchedule", "scheduleDecisionId", "scheduleState"]) {
+    if (copy[key] == null) delete copy[key];
+  }
+  return copy as T;
 }
 
 function getDayName(dateKey: string) {
@@ -48,6 +61,15 @@ function getLegacyHoursPerDay(timekeeping: LegacyTimekeepingRecord) {
 function buildOverrideShiftWindow(
   assignment: ShiftAssignmentRecord | null | undefined
 ): ShiftWindow {
+  const confirmed = assignment?.confirmedSchedule;
+  if (confirmed) return {
+    checkInTime: confirmed.checkInTime,
+    checkOutTime: confirmed.checkOutTime,
+    breakMinutes: confirmed.breakMinutes,
+    graceMinutes: confirmed.graceMinutes,
+    hoursPerDay: confirmed.hoursPerDay,
+    restDay: assignment?.restDay ?? null,
+  };
   return {
     checkInTime: assignment?.checkInTime ?? null,
     checkOutTime: assignment?.checkOutTime ?? null,
@@ -63,6 +85,9 @@ function buildWeeklyPatternShiftWindow(args: {
   patternDay: WeeklyShiftPatternDayRecord | null | undefined;
 }): ShiftWindow {
   const patternDay = args.patternDay ?? null;
+  if (patternDay?.scheduleState === "unconfigured") {
+    return { checkInTime: null, checkOutTime: null, breakMinutes: 0, graceMinutes: 0, hoursPerDay: 0, restDay: null };
+  }
   const hoursPerDay = toAmount(patternDay?.hoursPerDay);
   const hasStoredSchedule =
     Boolean(patternDay?.checkInTime) ||
@@ -115,6 +140,8 @@ export function getActiveShiftAssignmentForDate(
           (!assignment.effectiveTo || assignment.effectiveTo >= dateKey)
       )
       .sort((left, right) => {
+        const confirmedComparison = Number(Boolean(right.scheduleDecisionId)) - Number(Boolean(left.scheduleDecisionId));
+        if (confirmedComparison !== 0) return confirmedComparison;
         const fromComparison = right.effectiveFrom.localeCompare(left.effectiveFrom);
         if (fromComparison !== 0) return fromComparison;
         return right.id - left.id;
@@ -160,10 +187,11 @@ export function resolveEmployeeScheduleForDate(args: {
       source: "OVERRIDE",
       dayName,
       shiftWindow,
-      hoursPerDay: toAmount(overrideAssignment.hoursPerDay),
+      hoursPerDay: overrideAssignment.confirmedSchedule?.hoursPerDay ?? toAmount(overrideAssignment.hoursPerDay),
       overrideAssignment,
       weeklyPattern: null,
       weeklyPatternDay: null,
+      configured: overrideAssignment.confirmedSchedule?.kind !== "unconfigured",
     };
   }
 
@@ -187,6 +215,7 @@ export function resolveEmployeeScheduleForDate(args: {
       overrideAssignment: null,
       weeklyPattern,
       weeklyPatternDay,
+      configured: weeklyPatternDay?.scheduleState !== "unconfigured",
     };
   }
 
@@ -200,6 +229,7 @@ export function resolveEmployeeScheduleForDate(args: {
     overrideAssignment: null,
     weeklyPattern: null,
     weeklyPatternDay: null,
+    configured: hasLegacyPaySchedule(args.legacyTimekeeping),
   };
 }
 

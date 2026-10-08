@@ -16,6 +16,7 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
+import type { ScheduleCell, ScheduleSnapshot, ScheduleReceipt } from "@/lib/scheduling/workspace-types";
 import {
   attendanceDtrDayTypeValues,
   attendanceDtrManualStatusValues,
@@ -1763,6 +1764,7 @@ export const employeeWeeklyShiftPatternDays = pgTable(
       .notNull()
       .references(() => employeeWeeklyShiftPatterns.id, { onDelete: "cascade" }),
     weekday: restDayEnum("weekday").notNull(),
+    scheduleState: varchar("schedule_state", { length: 20 }),
     shiftTableId: integer("shift_table_id").references(() => shiftTables.id, {
       onDelete: "set null",
     }),
@@ -1814,6 +1816,8 @@ export const employeeShiftAssignments = pgTable(
       .notNull()
       .default("8.00"),
     isFlexible: boolean("is_flexible").notNull().default(false),
+    scheduleDecisionId: uuid("schedule_decision_id"),
+    confirmedSchedule: jsonb("confirmed_schedule").$type<ScheduleSnapshot>(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()
@@ -1830,6 +1834,7 @@ export const employeeShiftAssignments = pgTable(
       table.effectiveTo
     ),
     index("idx_shift_assignment_active").on(table.employeeId, table.effectiveFrom).where(sql`${table.effectiveTo} is null`),
+    uniqueIndex("uq_confirmed_schedule_employee_day").on(table.employeeId, table.effectiveFrom).where(sql`${table.scheduleDecisionId} is not null`),
   ]
 );
 
@@ -4545,3 +4550,38 @@ export const birWithholdingTaxBracketsRelations = relations(
 
 export * from "./attendanceSourceSchema";
 export * from "./attendanceWorkbenchSchema";
+
+// Planning drafts do not affect payroll. Confirmations are immutable employee/day receipts;
+// effective values are projected into dated assignments for existing payroll consumers.
+export const scheduleWorkspaceDrafts = pgTable("schedule_workspace_drafts", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  departmentId: integer("department_id").notNull().references(() => department.id),
+  periodId: uuid("period_id").notNull().references(() => payrollPeriods.id),
+  revision: integer("revision").notNull().default(1),
+  sourceDigest: varchar("source_digest", { length: 64 }).notNull(),
+  cells: jsonb("cells").$type<ScheduleCell[]>().notNull(),
+  updatedByUserId: varchar("updated_by_user_id", { length: 255 }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, table => [uniqueIndex("uq_schedule_workspace_draft_scope").on(table.departmentId, table.periodId)]);
+
+export const scheduleDecisionRevisions = pgTable("schedule_decision_revisions", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  requestId: uuid("request_id").notNull(),
+  employeeId: uuid("employee_id").notNull().references(() => employees.id),
+  day: date("day").notNull(),
+  departmentId: integer("department_id").notNull().references(() => department.id),
+  periodId: uuid("period_id").notNull().references(() => payrollPeriods.id),
+  snapshot: jsonb("snapshot").$type<ScheduleSnapshot>().notNull(),
+  defaultSnapshot: jsonb("default_snapshot").$type<ScheduleSnapshot>().notNull(),
+  previousSnapshot: jsonb("previous_snapshot").$type<ScheduleSnapshot>().notNull(),
+  actorUserId: varchar("actor_user_id", { length: 255 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, table => [index("idx_schedule_decision_employee_day").on(table.employeeId, table.day), uniqueIndex("uq_schedule_decision_request_day").on(table.requestId, table.employeeId, table.day)]);
+
+export const scheduleRequestReceipts = pgTable("schedule_request_receipts", {
+  requestId: uuid("request_id").primaryKey(),
+  actorUserId: varchar("actor_user_id", { length: 255 }).notNull(),
+  requestDigest: varchar("request_digest", { length: 64 }).notNull(),
+  receipt: jsonb("receipt").$type<ScheduleReceipt>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
