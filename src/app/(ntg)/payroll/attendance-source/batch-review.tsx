@@ -11,9 +11,9 @@ const field="block min-h-11 w-full min-w-0 rounded-lg border border-slate-300 bg
 const summary="flex min-h-11 cursor-pointer items-center text-sm font-semibold focus-visible:ring-2 focus-visible:ring-blue-600";
 export const changeLabels:Record<WorkKind,string>={Direction:"Correct direction",Time:"Correct date/time",Employee:"Correct this punch’s employee",Void:"Void duplicate / practice punch",Restore:"Restore original punch",Manual:"Add IN/OUT",ConfirmSequence:"Confirm this sequence",NoAttendance:"Confirm no attendance",Exclude:"Exclude competing entry from DTR",Retain:"Retain competing entry in DTR",UndoCapture:"Undo prior capture correction",ReopenDay:"Review affected workday"};
 
-type Props={board:WorkBoard;drafts:WorkDraft[];busy:boolean;onChange:(drafts:WorkDraft[])=>void;editDraft:(employeeId:string,patch:Partial<WorkDraft>)=>void;editChange:(employeeId:string,id:string,patch:Partial<WorkChange>)=>void;onNotice:(text:string)=>void;onAdd?:(employee:string,day:string,kind:WorkKind,record?:WorkRecord)=>void;onScheduleSaved?:()=>Promise<void>};
+type Props={board:WorkBoard;drafts:WorkDraft[];busy:boolean;onChange:(drafts:WorkDraft[])=>void;editDraft:(employeeId:string,patch:Partial<WorkDraft>)=>void;editChange:(employeeId:string,id:string,patch:Partial<WorkChange>)=>void;onNotice:(text:string)=>void;onAdd?:(employee:string,day:string,kind:WorkKind,record?:WorkRecord)=>void;onScheduleSaved?:()=>Promise<void>;hiddenChangeIds?:readonly string[]};
 
-function ChangeSummary({change,employee,board}:{change:WorkChange;employee?:WorkEmployee;board:WorkBoard}) {
+function ChangeSummary({change,employee,board,inline=false}:{change:WorkChange;employee?:WorkEmployee;board:WorkBoard;inline?:boolean}) {
  const record=changeRecord(employee,change),instant=change.at&&localToInstant(change.at);
  const name=(id:string|undefined)=>board.employees.find(p=>p.id===id)?.name??"Employee unavailable";
  if(change.kind==="Manual")return <p className="text-sm">New {change.type??"IN/OUT"} · {instant?originalPunchDateTime(instant):"Actual time required"}</p>;
@@ -21,7 +21,7 @@ function ChangeSummary({change,employee,board}:{change:WorkChange;employee?:Work
  if(!record)return <p className="text-sm text-amber-900">Selected punch unavailable — refresh and review.</p>;
  let proposed:string;
  switch(change.kind){
-  case "Direction":proposed=`${record.type} → ${change.type??"Select direction"} · Time unchanged`;break;
+  case "Direction":proposed=`${record.type} → ${change.type??"Select direction"}${inline?"":" · Time unchanged"}`;break;
   case "Time":proposed=`Time → ${instant?originalPunchDateTime(instant):"Actual time required"}`;break;
   case "Employee":proposed=`${name(record.employeeId)} → ${name(change.targetEmployeeId)}`;break;
   case "Void":case "Restore":proposed=`${record.status} → ${change.kind==="Void"?"VOID":"VALID"}`;break;
@@ -29,7 +29,7 @@ function ChangeSummary({change,employee,board}:{change:WorkChange;employee?:Work
   case "UndoCapture":proposed=[change.type?`${record.type} → ${change.type}`:"",change.at?`Time → ${instant?originalPunchDateTime(instant):"Invalid time"}`:"",change.targetEmployeeId?`${name(record.employeeId)} → ${name(change.targetEmployeeId)}`:"",change.status?`${record.status} → ${change.status}`:""].filter(Boolean).join(" · ");break;
   default:proposed=changeLabels[change.kind];
  }
- return <div className="space-y-1 text-sm"><p>{originalPunchDateTime(record.at)} · {record.type}</p><p className="font-semibold text-blue-800">{proposed}</p></div>;
+ return <div className="space-y-1 text-sm">{!inline&&<p>{originalPunchDateTime(record.at)} · {record.type}</p>}<p className="font-semibold text-blue-800 dark:text-blue-200">{proposed}</p></div>;
 }
 
 function DayContext({day,records,errors}:{day:WorkDay;records:WorkRecord[];errors:string[]}) {
@@ -49,13 +49,13 @@ function DayContext({day,records,errors}:{day:WorkDay;records:WorkRecord[];error
  </div>;
 }
 
-function ChangeRow({change:c,draft,employee,board,editChange,remove}:{change:WorkChange;draft:WorkDraft;employee?:WorkEmployee;board:WorkBoard;editChange:Props["editChange"];remove:()=>void}) {
+export function ChangeRow({change:c,draft,employee,board,editChange,remove,inline=false}:{change:WorkChange;draft:WorkDraft;employee?:WorkEmployee;board:WorkBoard;editChange:Props["editChange"];remove:()=>void;inline?:boolean}) {
  const issues=verificationIssues(employee,draft,c,board.employees),effectiveEmployee=employee?{...employee,contextRecords:draftRecords(employee,draft),days:employee.days.map(d=>({...d,records:draftRecords(employee,draft).filter(r=>d.records.some(x=>x.id===r.id))}))}:employee,record=changeRecord(effectiveEmployee,c);
  const edit=(patch:Partial<WorkChange>)=>editChange(draft.employeeId,c.id,patch);
  const existingManual=c.kind==="Manual"&&employee?draftRecords(employee,draft).filter(r=>r.source==="Manual"&&r.rawLogId!==undefined&&r.status==="VALID"&&!r.excluded&&r.type===c.type&&workDate(r.at)===c.day):[];
- return <section aria-label={`${changeLabels[c.kind]} ${c.day}`} data-review-incomplete={issues.length>0} tabIndex={-1} className="min-w-0 scroll-mt-20 space-y-2 border-t border-slate-200 py-3 outline-none">
-  <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-   <div className="min-w-0 space-y-2 break-words"><h5 className="text-sm font-semibold">{c.day} · {changeLabels[c.kind]}</h5><ChangeSummary change={c} employee={effectiveEmployee} board={board}/>
+ return <section aria-label={`${changeLabels[c.kind]} ${c.day}`} data-review-incomplete={issues.length>0} tabIndex={-1} className={`min-w-0 scroll-mt-20 space-y-2 outline-none ${inline?"py-1":"border-t border-slate-200 py-3"}`}>
+  <div className={`grid min-w-0 gap-3 ${inline?"":"lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"}`}>
+   <div className="min-w-0 space-y-2 break-words">{!inline&&<h5 className="text-sm font-semibold">{c.day} · {changeLabels[c.kind]}</h5>}<ChangeSummary change={c} employee={effectiveEmployee} board={board} inline={inline}/>
     {existingManual.map(r=><div key={r.id} className="rounded-lg bg-amber-50 p-2 text-sm"><p>A manual {r.type} already exists at {originalPunchDateTime(r.at)}.</p><button type="button" className={button} onClick={()=>edit({kind:"Time",rawLogId:r.rawLogId,eventId:undefined,type:undefined})}>Correct existing manual {r.type} instead</button></div>)}
     {(c.kind==="Direction"||c.kind==="Manual")&&<label className="block text-xs font-medium">Direction<select aria-label="Direction" className={field} value={c.type??""} onChange={e=>edit({type:e.target.value as "IN"|"OUT"})}><option value="">Select</option><option>IN</option><option>OUT</option></select></label>}
     {(c.kind==="Time"||c.kind==="Manual")&&<label className="block text-xs font-medium">Actual Philippine date and time<input aria-label="Actual Philippine date and time" type="datetime-local" step="0.001" className={field} value={c.at??""} onChange={e=>edit({at:e.target.value})}/><span className="block text-xs font-normal text-slate-600">Enter the actual time. Missing uploads are a warning; the payroll administrator decides.</span></label>}
@@ -63,14 +63,14 @@ function ChangeRow({change:c,draft,employee,board,editChange,remove}:{change:Wor
    </div>
    {!!issues.length&&<ul className="list-inside list-disc break-words text-xs text-amber-900">{issues.map(issue=><li key={issue}>{issue}</li>)}</ul>}
   </div>
-  <div className="flex items-start gap-2"><details className="min-w-0 flex-1"><summary className={summary}>Capture details, optional note and saved history</summary><div className="space-y-2 pb-2 text-xs"><label className="block text-xs font-medium">Change note (optional)<input aria-label="Change note (optional)" className={field} value={c.reason} onChange={e=>edit({reason:e.target.value})} placeholder="Override the employee note if useful"/></label>
+  <div className="flex items-start gap-2"><details className="min-w-0 flex-1"><summary className={summary}>{inline?"Note and capture details":"Capture details, optional note and saved history"}</summary><div className="space-y-2 pb-2 text-xs"><label className="block text-xs font-medium">Change note (optional)<input aria-label="Change note (optional)" className={field} value={c.reason} onChange={e=>edit({reason:e.target.value})} placeholder="Override the employee note if useful"/></label>
    {c.evidence&&<p className="whitespace-pre-wrap break-words">Previously recorded evidence: {c.evidence}</p>}
    {record&&<><p>{record.source} · {record.status}{record.excluded?" · Excluded from DTR":""}</p><p className="break-all">Capture reference: {record.id}</p>{(record.originalAt&&record.originalAt!==record.at||record.originalType&&record.originalType!==record.type)&&<p>Original capture: {record.originalType??record.type} · {originalPunchDateTime(record.originalAt??record.at)}</p>}{record.clockFlag&&<p className="text-amber-900">Device clock warning · {record.clockVerified?"Effective time verified":"Actual time needs verification"}</p>}</>}
-  </div></details><button type="button" className={button} onClick={remove} aria-label={`Remove ${changeLabels[c.kind]} ${c.day}`}>Remove</button></div>
+  </div></details><button type="button" className={button} onClick={remove} aria-label={`${inline?"Undo":"Remove"} ${changeLabels[c.kind]} ${c.day}`}>{inline?"Undo":"Remove"}</button></div>
  </section>;
 }
 
-export function BatchReview({board,drafts,busy,onChange,editDraft,editChange,onNotice,onAdd,onScheduleSaved}:Props) {
+export function BatchReview({board,drafts,busy,onChange,editDraft,editChange,onNotice,onAdd,onScheduleSaved,hiddenChangeIds=[]}:Props) {
  const [reason,setReason]=useState(""),[status,setStatus]=useState("");
  const missingReasons=drafts.filter(d=>!d.reason.trim()).length;
  const selected=drafts.flatMap(d=>d.changes);
@@ -95,7 +95,7 @@ export function BatchReview({board,drafts,busy,onChange,editDraft,editChange,onN
     <div className="mt-2 grid items-start gap-x-3 md:grid-cols-2"><label className="block text-xs font-medium">Employee note (optional)<input className={field} value={d.reason} onChange={e=>editDraft(d.employeeId,{reason:e.target.value})} placeholder="Add context if useful"/></label>
      <details><summary className={summary}>Plan details · {board.owners.find(o=>o.id===d.ownerId)?.name??"Me"}</summary><div className="space-y-2 pb-2 text-xs"><label className="block">Owner<select aria-label="Owner" className={field} value={d.ownerId} onChange={e=>editDraft(d.employeeId,{ownerId:e.target.value})}><option value="">Me</option>{board.owners.map(o=><option value={o.id} key={o.id}>{o.name}</option>)}</select></label><label className="flex min-h-11 items-center gap-2"><input className="h-5 w-5 shrink-0" type="checkbox" checked={d.rejected} onChange={e=>editDraft(d.employeeId,{rejected:e.target.checked})}/>Reject this suggestion. Current approved attendance remains in effect.</label></div></details>
     </div>
-    {[...new Set(d.changes.map(c=>c.day))].sort().map(day=><div key={day}>{d.changes.filter(c=>c.day===day).map(c=><ChangeRow key={c.id} change={c} draft={d} employee={employee} board={board} editChange={editChange} remove={()=>onChange(drafts.map(p=>{if(p.employeeId!==d.employeeId)return p;const changes=p.changes.filter(x=>x.id!==c.id),days=[...new Set(changes.map(x=>x.day))].sort();return {...p,changes,days,version:p.version.split("|").filter(v=>days.some(day=>v.startsWith(`${day}:`))).join("|")};}).filter(p=>p.changes.length))}/>)}{employee?.days.find(x=>x.day===day)&&<><DayContext day={employee.days.find(x=>x.day===day)!} records={simulation.records} errors={simulateWork(context,related.filter(c=>c.day===day),d.employeeId).errors}/>{onAdd&&<details className="border-t py-2"><summary className={summary}>Add correction · {day}</summary><div className="flex flex-wrap gap-2">{(["Manual","ConfirmSequence","NoAttendance"] as WorkKind[]).map(kind=><button type="button" key={kind} className={button} onClick={()=>onAdd(d.employeeId,day,kind)}>{changeLabels[kind]}</button>)}</div>{workDayRecords(draftRecords(employee,d),day,employee.days.find(x=>x.day===day)?.schedule??null).map(record=><div key={record.id} className="py-2 text-sm"><p>{record.type} · {originalPunchDateTime(record.at)}</p><div className="flex flex-wrap gap-2">{(record.source==="API"?["Direction","Time","Employee",record.status==="VALID"?"Void":"Restore",record.excluded?"Retain":"Exclude"]:[...(record.source==="Manual"&&record.rawLogId!==undefined?["Time","Direction"]:[]),record.excluded?"Retain":"Exclude"]).map(kind=><button type="button" key={kind} className={button} onClick={()=>onAdd(d.employeeId,day,kind as WorkKind,record)}>{changeLabels[kind as WorkKind]}</button>)}</div></div>)}{onScheduleSaved&&<DaySchedule employeeId={d.employeeId} day={day} onSaved={onScheduleSaved}/>}</details>}</>}</div>)}
+    {[...new Set(d.changes.map(c=>c.day))].sort().map(day=><div key={day}>{d.changes.filter(c=>c.day===day&&!hiddenChangeIds.includes(c.id)).map(c=><ChangeRow key={c.id} change={c} draft={d} employee={employee} board={board} editChange={editChange} remove={()=>onChange(drafts.map(p=>{if(p.employeeId!==d.employeeId)return p;const changes=p.changes.filter(x=>x.id!==c.id),days=[...new Set(changes.map(x=>x.day))].sort();return {...p,changes,days,version:p.version.split("|").filter(v=>days.some(day=>v.startsWith(`${day}:`))).join("|")};}).filter(p=>p.changes.length))}/>)}{employee?.days.find(x=>x.day===day)&&<><DayContext day={employee.days.find(x=>x.day===day)!} records={simulation.records} errors={simulateWork(context,related.filter(c=>c.day===day),d.employeeId).errors}/>{onAdd&&<details className="border-t py-2"><summary className={summary}>Add correction · {day}</summary><div className="flex flex-wrap gap-2">{(["Manual","ConfirmSequence","NoAttendance"] as WorkKind[]).map(kind=><button type="button" key={kind} className={button} onClick={()=>onAdd(d.employeeId,day,kind)}>{changeLabels[kind]}</button>)}</div>{workDayRecords(draftRecords(employee,d),day,employee.days.find(x=>x.day===day)?.schedule??null).map(record=><div key={record.id} className="py-2 text-sm"><p>{record.type} · {originalPunchDateTime(record.at)}</p><div className="flex flex-wrap gap-2">{(record.source==="API"?["Direction","Time","Employee",record.status==="VALID"?"Void":"Restore",record.excluded?"Retain":"Exclude"]:[...(record.source==="Manual"&&record.rawLogId!==undefined?["Time","Direction"]:[]),record.excluded?"Retain":"Exclude"]).map(kind=><button type="button" key={kind} className={button} onClick={()=>onAdd(d.employeeId,day,kind as WorkKind,record)}>{changeLabels[kind as WorkKind]}</button>)}</div></div>)}{onScheduleSaved&&<DaySchedule employeeId={d.employeeId} day={day} onSaved={onScheduleSaved}/>}</details>}</>}</div>)}
    </article>;
   })}
  </fieldset>;

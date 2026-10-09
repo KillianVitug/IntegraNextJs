@@ -1,87 +1,50 @@
+import "server-only";
 import { db } from "@/db";
 import { employees, employeeFiles, employeeFolders } from "@/db/schema";
-import { eq, sql, isNull, asc } from "drizzle-orm";
+import { eq, isNull, asc, and, inArray } from "drizzle-orm";
 import { sortEmployeesByLastName } from "@/utils/employeeDisplay";
+import { currentDocumentActor } from "@/lib/employee-documents/http";
+import { listFiles, readFolder } from "@/lib/employee-documents/service";
+import { DocumentError, protectedDocumentUrl } from "@/lib/employee-documents/model";
 
 export async function getEmployeeFiles() {
-    const results = await db.select({
-        id: employeeFiles.id,
-        employeeNo: employees.employeeNo,
-        employeeType: employees.employeeType,
-        employeeName: sql<string>`CONCAT(${employees.lastName}, ', ', ${employees.firstName}, ' ', COALESCE(${employees.middleName}, ''))`,
-        // fileType: employeeFiles.fileType,
-        fileName: employeeFiles.fileName,
-        remarks: employeeFiles.remarks,
-        description: employeeFiles.description,
-        filePath: employeeFiles.filePath,
-        fileExtension: employeeFiles.fileExtension,
-        mimeType: employeeFiles.mimeType,
-        groupId: employeeFiles.groupId,
-        createdAt: employeeFiles.createdAt,
-        // isArchived: employeeFiles.isArchived,
-    })
-    .from(employeeFiles)
-    .innerJoin(employees, eq(employeeFiles.id, employees.id))
-    .where(sql`${employeeFiles.deletedAt} IS NULL`) // ? This is the fix
-    .orderBy(asc(employeeFiles.createdAt))
-    return results
-} 
-
+  const folders = await getAllFoldersWithFiles();
+  return folders.flatMap(folder => folder.files.map(file => ({
+    ...file, employeeNo: folder.employeeNo, employeeType: folder.employeeType, employeeName: folder.employeeName,
+  })));
+}
 export async function getEmployeeFile(groupId: string) {
-    const employeeFile = await db.query.employeeFiles.findFirst({
-        where: eq(employeeFiles.groupId, groupId),
-    });
-    return employeeFile;
+  return (await listFiles(await currentDocumentActor(), groupId))[0];
 }
-
-
 export async function getEmployeeFolder(groupId: string) {
-    const employeeFolder = await db.query.employeeFolders.findFirst({
-        where: eq(employeeFolders.id, groupId),
-    });
-    return employeeFolder;
+  const actor = await currentDocumentActor();
+  try { return await readFolder(actor, groupId); }
+  catch (error) { if (error instanceof DocumentError && error.status === 404) return undefined; throw error; }
 }
-
 export async function getFilesByGroup(groupId: string) {
-    return db
-      .select()
-      .from(employeeFiles)
-      .where(eq(employeeFiles.groupId, groupId))
-      .orderBy(asc(employeeFiles.createdAt));
-  }
-
-  
-  export async function getAllFoldersWithFiles() {
-    const folders = await db.query.employeeFolders.findMany({
-      with: {
-        files: true,
-        employee: {
-          columns: {
-            employeeType: true,
-            employeeNo: true,
-            firstName: true,
-            middleName: true,
-            lastName: true,
-          },
-        },
-      },
-      where: isNull(employeeFolders.deletedAt),
-      orderBy: asc(employeeFolders.createdAt),
-    });
-  
-    return sortEmployeesByLastName(folders.map(folder => ({
-      id: folder.id,
-      employeeNo: folder.employee.employeeNo,
-      employeeType: folder.employee.employeeType,
-      employeeName: `${folder.employee.lastName}, ${folder.employee.firstName} ${
-        folder.employee.middleName ?? ""
-      }`,
-      folderName: folder.folderName,
-      folderType: folder.folderType,
-      description: folder.description,
-      remarks: folder.remarks,
-      createdAt: folder.createdAt,
-      files: folder.files,   // 👈 list of employeeFiles
-    })));
-  }
-  
+  return listFiles(await currentDocumentActor(), groupId);
+}
+export async function getAllFoldersWithFiles(searchText = "") {
+  await currentDocumentActor();
+  const folders = await db.select({ folder: employeeFolders, employee: employees }).from(employeeFolders)
+    .innerJoin(employees, eq(employeeFolders.employeeId, employees.id))
+    .where(and(isNull(employeeFolders.deletedAt), isNull(employees.deletedAt)))
+    .orderBy(asc(employeeFolders.createdAt));
+  const search = searchText.trim().toLowerCase();
+  const selected = folders.filter(({ folder, employee }) => !search ||
+    [employee.employeeNo, employee.employeeType, employee.firstName, employee.middleName, employee.lastName, folder.folderName]
+      .filter(Boolean).join(" ").toLowerCase().includes(search));
+  const ids = selected.map(row => row.folder.id);
+  const files = ids.length ? await db.select({ file: employeeFiles }).from(employeeFiles)
+    .innerJoin(employeeFolders, eq(employeeFiles.groupId, employeeFolders.id))
+    .innerJoin(employees, eq(employeeFolders.employeeId, employees.id))
+    .where(and(inArray(employeeFiles.groupId, ids), isNull(employeeFiles.deletedAt), isNull(employeeFolders.deletedAt), isNull(employees.deletedAt)))
+    .orderBy(asc(employeeFiles.createdAt)) : [];
+  return sortEmployeesByLastName(selected.map(({ folder, employee }) => ({
+    id: folder.id, employeeNo: employee.employeeNo, employeeType: employee.employeeType,
+    employeeName: [employee.lastName + ",", employee.firstName, employee.middleName].filter(Boolean).join(" "),
+    folderName: folder.folderName, folderType: folder.folderType, description: folder.description,
+    remarks: folder.remarks, createdAt: folder.createdAt,
+    files: files.filter(row => row.file.groupId === folder.id).map(({ file }) => ({ ...file, filePath: protectedDocumentUrl(file.id) })),
+  })));
+}

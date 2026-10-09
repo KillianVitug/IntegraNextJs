@@ -1,11 +1,11 @@
 "use server";
 import { calculateGeneratedDtrRows, EMPTY_GENERATED_DTR_EXCEPTION_ROW_SYNC, fetchHolidayRowsForGeneratedDtr, getRequiredHolidayCheckDates, buildHolidayAccountByType, buildHolidayCheckRequirementByDate, buildDtrMetricOverrideByEmployeeDate, applyAttendanceDtrMetricOverride, buildCheckDateAttendanceByDate, buildAttendanceDtrTotals, buildHolidayWorkedRowsForGeneratedDtr, getEffectiveHolidayTypeForDate, buildHolidayOvertimeRowsForGeneratedDtr, buildGeneratedDtrExceptionRows, GENERATED_DTR_OVERRIDE_SOURCES } from "@/lib/payroll/generatedDtrCalculation";
 import type { AttendanceTransaction, GeneratedDtrExceptionRowSyncResult, GeneratedDtrAccountCodeRow, DtrPeriodOverrideValues, GeneratedDtrExceptionRowInsert } from "@/lib/payroll/generatedDtrCalculation";
-import { withAttendanceFinancialRefresh } from "@/lib/payroll/attendanceFinancialRefresh";
+import { lockEditableAttendancePeriod, withAttendanceFinancialRefresh } from "@/lib/payroll/attendanceFinancialRefresh";
 import { workTreatments } from "@/db/attendanceWorkbenchSchema";
 import { assertFileAttendanceBatch } from "@/lib/payroll/validation";
 import { loadEffectiveAttendanceRawLogs, loadEffectiveAttendanceCorrections } from "@/lib/payroll/effectiveAttendanceInputs";
-import { attendanceSourceVersion, confirmAttendanceSourceSummaryRefresh } from "@/lib/payroll/attendanceSourceGuard";
+import { attendanceSourceVersion, confirmAttendanceSourceSummaryRefresh, lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
 
 import { revalidatePath } from "next/cache";
 import { createHash } from "crypto";
@@ -85,7 +85,6 @@ import {
   createOrRecomputePayrollRun,
 } from "@/lib/payroll/engine";
 import { refreshManualPayrollAttendanceLinesFromBaseline } from "@/lib/payroll/manualPayroll";
-
 
 import {
   buildBranchCalendarOverrideRowsForGeneratedDtr,
@@ -197,7 +196,6 @@ type AttendancePeriodPersistedSummarySourceData = {
     holidayType: OvertimeHolidayType;
   }>;
 };
-
 
 type AttendanceDatabase = typeof db | AttendanceTransaction;
 
@@ -450,10 +448,6 @@ async function resolveApprovedLeaveFlags<T extends AttendancePeriodLeaveRecord>(
     isPaid: resolveLeavePayStatus(leave, leaveTypesByCode).isPaid,
   }));
 }
-
-
-
-
 
 
 
@@ -977,6 +971,7 @@ async function markPayrollPeriodRunsStale(args: {
   actorUserId: string;
   notes?: string;
 }) {
+  await lockEditableAttendancePeriod(args.tx, args.payrollPeriodId);
   const affectedRuns = await args.tx
     .select({
       id: payrollRuns.id,
@@ -1002,7 +997,7 @@ async function markPayrollPeriodRunsStale(args: {
 
   if (staleRunIds.length === 0) return 0;
 
-  await args.tx
+  const changedRuns = await args.tx
     .update(payrollRuns)
     .set({
       status: "Stale",
@@ -1012,9 +1007,14 @@ async function markPayrollPeriodRunsStale(args: {
       approvedByUserId: null,
       updatedAt: new Date(),
     })
-    .where(inArray(payrollRuns.id, staleRunIds));
+    .where(and(inArray(payrollRuns.id, staleRunIds), inArray(payrollRuns.status, ["Draft", "Reviewed"])))
+    .returning({ id: payrollRuns.id });
 
-  for (const runId of staleRunIds) {
+  if (changedRuns.length !== staleRunIds.length) {
+    throw new Error("Payroll changed while attendance was being saved. Refresh and retry; no attendance changes were saved.");
+  }
+
+  for (const { id: runId } of changedRuns) {
     await recordPayrollRunEvent({
       payrollRunId: runId,
       actorUserId: args.actorUserId,
@@ -1027,7 +1027,7 @@ async function markPayrollPeriodRunsStale(args: {
     });
   }
 
-  return staleRunIds.length;
+  return changedRuns.length;
 }
 
 export type ManagerDtrPayrollSyncResult = {
@@ -1042,8 +1042,8 @@ function getPayrollRunBlockedMessage(payrollPeriodCode: string, status: string) 
   return `Manager DTR updates are blocked because payroll period ${payrollPeriodCode} already has a ${status} run. Ask HR/Admin to void or reverse the run before changing DTR data.`;
 }
 
-async function getPayrollPeriodForManagerDtrSync(payrollPeriodId: string) {
-  const payrollPeriod = await db.query.payrollPeriods.findFirst({
+async function getPayrollPeriodForManagerDtrSync(payrollPeriodId: string, database: DbClient = db) {
+  const payrollPeriod = await database.query.payrollPeriods.findFirst({
     where: eq(payrollPeriods.id, payrollPeriodId),
   });
 
@@ -1054,9 +1054,10 @@ async function getPayrollPeriodForManagerDtrSync(payrollPeriodId: string) {
   return payrollPeriod;
 }
 
-async function assertManagerDtrPayrollPeriodCanChange(payrollPeriodId: string) {
-  const payrollPeriod = await getPayrollPeriodForManagerDtrSync(payrollPeriodId);
-  const [blockingRun] = await db
+async function assertManagerDtrPayrollPeriodCanChange(payrollPeriodId: string, database: DbClient = db) {
+  const payrollPeriod = await getPayrollPeriodForManagerDtrSync(payrollPeriodId, database);
+  if (payrollPeriod.status !== "Open") throw new Error("This payroll period is closed. Use the adjustment process; no DTR changes were saved.");
+  const [blockingRun] = await database
     .select({
       status: payrollRuns.status,
       runNumber: payrollRuns.runNumber,
@@ -1098,6 +1099,8 @@ async function syncManagerDtrPayrollPeriod(args: {
 
     if (args.markStale ?? true) {
       await db.transaction(async (tx) => {
+        await lockAttendancePayrollInput(tx);
+        await assertManagerDtrPayrollPeriodCanChange(args.payrollPeriodId, tx);
         await markPayrollPeriodRunsStale({
           tx,
           payrollPeriodId: payrollPeriod.id,
@@ -1660,23 +1663,25 @@ async function importAttendanceLogsForScope(
     })
   );
 
-  const existingHashes = new Set<string>();
-  for (const hashes of chunk(normalizedHashes, 500)) {
-    if (hashes.length === 0) continue;
-
-    const rows = await db
-      .select({ normalizedHash: attendanceRawLogs.normalizedHash })
-      .from(attendanceRawLogs)
-      .where(inArray(attendanceRawLogs.normalizedHash, hashes));
-
-    for (const row of rows) {
-      if (row.normalizedHash) {
-        existingHashes.add(row.normalizedHash);
-      }
+  const batch = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
+    if (selectedPayrollPeriod) {
+      if (scope.employeeIds) await assertManagerDtrPayrollPeriodCanChange(selectedPayrollPeriod.id, tx);
     }
-  }
-
-  const importResult = await db.transaction(async (tx) => {
+    // Serialize retries with the same file, including requests that both passed
+    // the early read before either import had committed.
+    const priorBatch = await tx.query.attendanceImportBatches.findFirst({ where: and(eq(attendanceImportBatches.sourceHash, sourceHash), params.payrollPeriodId ? eq(attendanceImportBatches.payrollPeriodId, params.payrollPeriodId) : isNull(attendanceImportBatches.payrollPeriodId)) });
+    if (priorBatch) return priorBatch;
+    const existingHashes = new Set<string>();
+    for (const hashes of chunk(normalizedHashes, 500)) {
+      if (hashes.length === 0) continue;
+      const rows = await tx.select({ normalizedHash: attendanceRawLogs.normalizedHash })
+        .from(attendanceRawLogs).where(inArray(attendanceRawLogs.normalizedHash, hashes));
+      for (const row of rows) if (row.normalizedHash) existingHashes.add(row.normalizedHash);
+    }
+    if (selectedPayrollPeriod) {
+      await markPayrollPeriodRunsStale({ tx, payrollPeriodId: selectedPayrollPeriod.id, payrollPeriodCode: selectedPayrollPeriod.code, actorUserId: scope.actorUserId, notes: "Marked stale because attendance logs were imported." });
+    }
     const [createdBatch] = await tx
       .insert(attendanceImportBatches)
       .values({
@@ -2063,7 +2068,7 @@ async function importAttendanceLogsForScope(
       where: eq(attendanceImportBatches.id, createdBatch.id),
     });
 
-    return {
+    const importResult = {
       batch,
       affectedEmployeeIds: matchedEmployeeIds,
       refreshableExceptionRowIds:
@@ -2071,40 +2076,43 @@ async function importAttendanceLogsForScope(
       ignoredOutOfScopeRows,
       ignoredUnmatchedRows,
     };
-  });
-  const batch = importResult.batch;
 
-  if (batch?.payrollPeriodId) {
-    await refreshManualPayrollAttendanceForEmployees({
-      actorUserId: scope.actorUserId,
-      payrollPeriodId: batch.payrollPeriodId,
-      employeeIds: importResult.affectedEmployeeIds,
-      refreshableExceptionRowIds: importResult.refreshableExceptionRowIds,
-    });
-  }
-
-  if (batch) {
-    await recordAdminAuditEvent({
-      actorUserId: scope.actorUserId,
-      entityType: "attendance_import_batch",
-      entityId: batch.id,
-      action: scope.auditAction,
-      details: {
-        fileName: batch.sourceFileName,
+    if (batch?.payrollPeriodId) {
+      await refreshManualPayrollAttendanceForEmployees({
+        database: tx,
+        actorUserId: scope.actorUserId,
         payrollPeriodId: batch.payrollPeriodId,
-        totalRows: batch.totalRows,
-        matchedRows: batch.matchedRows,
-        unmatchedRows: batch.unmatchedRows,
-        duplicateRows: batch.duplicateRows,
-        detectedFormat: parsedAttendance.detectedFormat,
-        employeeIdentifierHeader: parsedAttendance.employeeIdentifierHeader,
-        replaceExisting: scope.replaceExisting,
-        ignoredOutOfScopeRows: importResult.ignoredOutOfScopeRows,
-        ignoredUnmatchedRows: importResult.ignoredUnmatchedRows,
-        ...scope.auditDetails,
-      },
-    });
-  }
+        employeeIds: importResult.affectedEmployeeIds,
+        refreshableExceptionRowIds: importResult.refreshableExceptionRowIds,
+      });
+    }
+
+    if (batch) {
+      await recordAdminAuditEvent({
+        database: tx,
+        actorUserId: scope.actorUserId,
+        entityType: "attendance_import_batch",
+        entityId: batch.id,
+        action: scope.auditAction,
+        details: {
+          fileName: batch.sourceFileName,
+          payrollPeriodId: batch.payrollPeriodId,
+          totalRows: batch.totalRows,
+          matchedRows: batch.matchedRows,
+          unmatchedRows: batch.unmatchedRows,
+          duplicateRows: batch.duplicateRows,
+          detectedFormat: parsedAttendance.detectedFormat,
+          employeeIdentifierHeader: parsedAttendance.employeeIdentifierHeader,
+          replaceExisting: scope.replaceExisting,
+          ignoredOutOfScopeRows: importResult.ignoredOutOfScopeRows,
+          ignoredUnmatchedRows: importResult.ignoredUnmatchedRows,
+          ...scope.auditDetails,
+        },
+      });
+    }
+
+    return batch;
+  });
 
   for (const path of scope.revalidatePaths) {
     revalidatePath(path);
@@ -2468,6 +2476,8 @@ export async function markManagerDtrPayrollStaleAction(payrollPeriodId: string) 
   }
 
   await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
+    await assertManagerDtrPayrollPeriodCanChange(payrollPeriodId, tx);
     await markPayrollPeriodRunsStale({
       tx,
       payrollPeriodId,
@@ -2575,43 +2585,46 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
   await assertManagerDtrPayrollPeriodCanChange(parsed.sourcePayrollPeriodId);
   await assertManagerDtrPayrollPeriodCanChange(targetPayrollPeriodId);
 
-  const heldRows = await loadAttendanceDtrHeldRows(
-    parsed.sourcePayrollPeriodId,
-    scope.employeeIds
-  );
-  const heldRowsForEmployee = heldRows.rows.filter(
-    (row) => row.employeeId === parsed.employeeId
-  );
-  const heldDateSet = new Set(
-    heldRowsForEmployee.map((row) => row.attendanceDate)
-  );
-  const nonHeldDate = attendanceDates.find(
-    (attendanceDate) => !heldDateSet.has(attendanceDate)
-  );
-  if (nonHeldDate) {
-    throw new Error("One or more selected dates are no longer held.");
-  }
-  const selectedHeldRows = attendanceDates
-    .map((attendanceDate) =>
-      heldRowsForEmployee.find((row) => row.attendanceDate === attendanceDate)
-    )
-    .filter((row): row is (typeof heldRowsForEmployee)[number] => Boolean(row));
-  const intendedWorkedMinutes = selectedHeldRows.reduce(
-    (total, row) => total + row.intendedWorkedMinutes,
-    0
-  );
-  const submissionTotals: AttendanceHoldApprovalMinutes = {
-    workedMinutes: computeAttendanceHoldWorkedMinutes({
-      intendedWorkedMinutes,
+  const result = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
+    await assertManagerDtrPayrollPeriodCanChange(parsed.sourcePayrollPeriodId, tx);
+    await assertManagerDtrPayrollPeriodCanChange(targetPayrollPeriodId, tx);
+    const heldRows = await loadAttendanceDtrHeldRows(
+      parsed.sourcePayrollPeriodId,
+      scope.employeeIds, tx
+    );
+    const heldRowsForEmployee = heldRows.rows.filter(
+      (row) => row.employeeId === parsed.employeeId
+    );
+    const heldDateSet = new Set(
+      heldRowsForEmployee.map((row) => row.attendanceDate)
+    );
+    const nonHeldDate = attendanceDates.find(
+      (attendanceDate) => !heldDateSet.has(attendanceDate)
+    );
+    if (nonHeldDate) {
+      throw new Error("One or more selected dates are no longer held.");
+    }
+    const selectedHeldRows = attendanceDates
+      .map((attendanceDate) =>
+        heldRowsForEmployee.find((row) => row.attendanceDate === attendanceDate)
+      )
+      .filter((row): row is (typeof heldRowsForEmployee)[number] => Boolean(row));
+    const intendedWorkedMinutes = selectedHeldRows.reduce(
+      (total, row) => total + row.intendedWorkedMinutes,
+      0
+    );
+    const submissionTotals: AttendanceHoldApprovalMinutes = {
+      workedMinutes: computeAttendanceHoldWorkedMinutes({
+        intendedWorkedMinutes,
+        lateMinutes: parsed.lateMinutes,
+        undertimeMinutes: parsed.undertimeMinutes,
+      }),
       lateMinutes: parsed.lateMinutes,
       undertimeMinutes: parsed.undertimeMinutes,
-    }),
-    lateMinutes: parsed.lateMinutes,
-    undertimeMinutes: parsed.undertimeMinutes,
-    overtimeMinutes: parsed.overtimeMinutes,
-  };
+      overtimeMinutes: parsed.overtimeMinutes,
+    };
 
-  const result = await db.transaction(async (tx) => {
     const [sourcePeriod, targetPeriod] = await Promise.all([
       tx.query.payrollPeriods.findFirst({
         where: eq(payrollPeriods.id, parsed.sourcePayrollPeriodId),
@@ -2666,6 +2679,12 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
       targetPayrollPeriodId,
     ]);
 
+    for (const affectedId of new Set([parsed.sourcePayrollPeriodId, ...affectedTargetPeriodIds])) {
+      await assertManagerDtrPayrollPeriodCanChange(affectedId, tx);
+      const affectedPeriod = await lockEditableAttendancePeriod(tx, affectedId);
+      const staleRunCount = await markPayrollPeriodRunsStale({ tx, payrollPeriodId: affectedId, payrollPeriodCode: affectedPeriod.code, actorUserId: auth.accountId, notes: "Marked stale because held attendance was approved or retargeted." });
+      affectedTargetPeriods.set(affectedId, { payrollPeriodCode: affectedPeriod.code, refreshableExceptionRowIds: [], generatedAccountCodeRowCount: 0, staleRunCount });
+    }
     const approvedAt = new Date();
     const splitSubmissions = splitAttendanceHoldApprovalMinutes(
       submissionTotals,
@@ -2762,7 +2781,7 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
       database: tx,
     });
 
-    return {
+    const result = {
       sourcePayrollPeriodCode: sourcePeriod.code,
       targetPayrollPeriodCode: targetPeriod.code,
       submittedDateCount: attendanceDates.length,
@@ -2776,17 +2795,20 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
         })
       ),
     };
-  });
 
-  for (const affected of result.affectedTargetPeriods) {
-    await refreshManualPayrollAttendanceForEmployees({
-      actorUserId: auth.accountId,
-      payrollPeriodId: affected.payrollPeriodId,
-      employeeIds: [parsed.employeeId],
-      refreshableExceptionRowIds: affected.refreshableExceptionRowIds,
-      refreshHeldDtrLines: true,
-    });
-  }
+    for (const affected of result.affectedTargetPeriods) {
+      await refreshManualPayrollAttendanceForEmployees({
+        database: tx,
+        actorUserId: auth.accountId,
+        payrollPeriodId: affected.payrollPeriodId,
+        employeeIds: [parsed.employeeId],
+        refreshableExceptionRowIds: affected.refreshableExceptionRowIds,
+        refreshHeldDtrLines: true,
+      });
+    }
+
+    return result;
+  });
 
   const recomputePeriodIds = [
     ...new Set([
@@ -2859,6 +2881,12 @@ export async function saveManagerAttendanceDtrDayMetricOverrideAction(
   );
 
   const result = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
+    await assertManagerDtrPayrollPeriodCanChange(parsed.payrollPeriodId, tx);
+    const currentSummary = await tx.query.attendanceDailySummaries.findFirst({
+      where: and(eq(attendanceDailySummaries.employeeId, parsed.employeeId), eq(attendanceDailySummaries.attendanceDate, parsed.attendanceDate)),
+    });
+    if (!currentSummary) throw new Error("DTR summary row was removed. Refresh before editing this date.");
     const staleRunCount = await markPayrollPeriodRunsStale({
       tx,
       payrollPeriodId: payrollPeriod.id,
@@ -2934,18 +2962,20 @@ export async function saveManagerAttendanceDtrDayMetricOverrideAction(
       database: tx,
     });
 
+    const manualPayrollRefresh = await refreshManualPayrollAttendanceForEmployees({
+      database: tx,
+      actorUserId: auth.accountId,
+      payrollPeriodId: parsed.payrollPeriodId,
+      employeeIds: [parsed.employeeId],
+      refreshableExceptionRowIds: generatedDtrRows.refreshableExceptionRowIds,
+    });
     return {
+      manualPayrollRefresh,
       ...generatedDtrRows,
       staleRunCount,
     };
   });
 
-  const manualPayrollRefresh = await refreshManualPayrollAttendanceForEmployees({
-    actorUserId: auth.accountId,
-    payrollPeriodId: parsed.payrollPeriodId,
-    employeeIds: [parsed.employeeId],
-    refreshableExceptionRowIds: result.refreshableExceptionRowIds,
-  });
 
   revalidatePath("/managerDtrFiles");
   revalidatePath("/payroll");
@@ -2960,7 +2990,7 @@ export async function saveManagerAttendanceDtrDayMetricOverrideAction(
     payrollPeriodCode: payrollPeriod.code,
     attendanceDate: parsed.attendanceDate,
     cleared: isClearing,
-    manualPayrollRefresh,
+    manualPayrollRefresh: result.manualPayrollRefresh,
     generatedAccountCodeRowCount: result.generatedAccountCodeRowCount,
     staleRunCount: result.staleRunCount,
     payrollRecompute,
@@ -2975,6 +3005,7 @@ type AttendanceImportBatchRevertRawLog = {
 
 type AttendanceImportBatchRevertOptions = {
   actorUserId: string;
+  managerScope?: boolean;
   auditAction: string;
   auditDetails?: Record<string, unknown>;
   revalidatePaths: string[];
@@ -3027,7 +3058,14 @@ async function revertAttendanceImportBatchForActor(
     }
   }
 
-  const revertResult = await db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
+    if (payrollPeriod) {
+      await assertManagerDtrPayrollPeriodCanChange(payrollPeriod.id, tx);
+      await lockEditableAttendancePeriod(tx, payrollPeriod.id);
+    }
+    const currentBatch = await tx.query.attendanceImportBatches.findFirst({ where: eq(attendanceImportBatches.id, batch.id) });
+    if (!currentBatch) throw new Error("Attendance import batch was already removed. Refresh the file list.");
     const rawLogRows = await tx
       .select({
         id: attendanceRawLogs.id,
@@ -3187,6 +3225,7 @@ async function revertAttendanceImportBatchForActor(
     for (const targetRebuildKey of targetRebuildKeys) {
       const [targetPayrollPeriodId, employeeId] = targetRebuildKey.split("|");
       if (!targetPayrollPeriodId || !employeeId) continue;
+      if (options.managerScope) await assertManagerDtrPayrollPeriodCanChange(targetPayrollPeriodId, tx);
 
       const rebuilt = await rebuildHeldDtrExceptionRowsForTargetPeriod({
         tx,
@@ -3243,7 +3282,7 @@ async function revertAttendanceImportBatchForActor(
         })
       : EMPTY_GENERATED_DTR_EXCEPTION_ROW_SYNC;
 
-    return {
+    const revertResult = {
       result: {
         batchId: batch.id,
         sourceFileName: batch.sourceFileName,
@@ -3266,47 +3305,52 @@ async function revertAttendanceImportBatchForActor(
         generatedDtrWorkedRows.refreshableExceptionRowIds,
       affectedTargetPeriods,
     };
-  });
-  const result = revertResult.result;
+    const result = revertResult.result;
 
-  if (payrollPeriod) {
-    await refreshManualPayrollAttendanceForEmployees({
-      actorUserId: options.actorUserId,
-      payrollPeriodId: payrollPeriod.id,
-      employeeIds: revertResult.affectedEmployeeIds,
-      refreshableExceptionRowIds: revertResult.refreshableExceptionRowIds,
-    });
-  }
-  for (const targetPeriod of revertResult.affectedTargetPeriods) {
-    await refreshManualPayrollAttendanceForEmployees({
-      actorUserId: options.actorUserId,
-      payrollPeriodId: targetPeriod.payrollPeriodId,
-      employeeIds: targetPeriod.employeeIds,
-      refreshableExceptionRowIds: targetPeriod.refreshableExceptionRowIds,
-      refreshHeldDtrLines: true,
-    });
-  }
+    if (payrollPeriod) {
+      await refreshManualPayrollAttendanceForEmployees({
+        database: tx,
+        actorUserId: options.actorUserId,
+        payrollPeriodId: payrollPeriod.id,
+        employeeIds: revertResult.affectedEmployeeIds,
+        refreshableExceptionRowIds: revertResult.refreshableExceptionRowIds,
+      });
+    }
+    for (const targetPeriod of revertResult.affectedTargetPeriods) {
+      await refreshManualPayrollAttendanceForEmployees({
+        database: tx,
+        actorUserId: options.actorUserId,
+        payrollPeriodId: targetPeriod.payrollPeriodId,
+        employeeIds: targetPeriod.employeeIds,
+        refreshableExceptionRowIds: targetPeriod.refreshableExceptionRowIds,
+        refreshHeldDtrLines: true,
+      });
+    }
 
-  await recordAdminAuditEvent({
-    actorUserId: options.actorUserId,
-    entityType: "attendance_import_batch",
-    entityId: batch.id,
-    action: options.auditAction,
-    details: {
-      sourceFileName: batch.sourceFileName,
-      payrollPeriodId: batch.payrollPeriodId,
-      payrollPeriodCode: result.payrollPeriodCode,
-      rawLogCount: result.rawLogCount,
-      summaryCount: result.summaryCount,
-      affectedEmployeeCount: result.affectedEmployeeCount,
-      affectedDateCount: result.affectedDateCount,
-      staleRunCount: result.staleRunCount,
-      deletedHoldOverrideCount: result.deletedHoldOverrideCount,
-      deletedHoldApprovalCount: result.deletedHoldApprovalCount,
-      affectedTargetPeriods: result.affectedTargetPeriods,
-      targetStaleRunCount: result.targetStaleRunCount,
-      ...options.auditDetails,
-    },
+    await recordAdminAuditEvent({
+      database: tx,
+      actorUserId: options.actorUserId,
+      entityType: "attendance_import_batch",
+      entityId: batch.id,
+      action: options.auditAction,
+      details: {
+        sourceFileName: batch.sourceFileName,
+        payrollPeriodId: batch.payrollPeriodId,
+        payrollPeriodCode: result.payrollPeriodCode,
+        rawLogCount: result.rawLogCount,
+        summaryCount: result.summaryCount,
+        affectedEmployeeCount: result.affectedEmployeeCount,
+        affectedDateCount: result.affectedDateCount,
+        staleRunCount: result.staleRunCount,
+        deletedHoldOverrideCount: result.deletedHoldOverrideCount,
+        deletedHoldApprovalCount: result.deletedHoldApprovalCount,
+        affectedTargetPeriods: result.affectedTargetPeriods,
+        targetStaleRunCount: result.targetStaleRunCount,
+        ...options.auditDetails,
+      },
+    });
+
+    return result;
   });
 
   for (const path of options.revalidatePaths) {
@@ -3347,6 +3391,7 @@ export async function revertManagerDtrImportBatchAction(batchId: string) {
 
   return revertAttendanceImportBatchForActor(batchId, {
     actorUserId: auth.accountId,
+    managerScope: true,
     auditAction: "attendance.manager_import_removed",
     auditDetails: {
       managerAccountId: auth.accountId,
@@ -3503,6 +3548,7 @@ async function refreshAttendancePeriodSummariesForScope(args: {
   auditDetails?: Record<string, unknown>;
 }) {
   const result=await withAttendanceFinancialRefresh(db,args.payrollPeriodId,async tx=>{
+  if (args.employeeIds) await assertManagerDtrPayrollPeriodCanChange(args.payrollPeriodId, tx);
   const sourceVersion = await attendanceSourceVersion(args.payrollPeriodId,tx);
   const sourceData = await loadAttendancePeriodSourceData(
     tx,
@@ -4296,7 +4342,6 @@ const attendanceDtrCorrectionReviewSchema = z.object({
 });
 
 
-
 const HELD_DTR_OVERRIDE_SOURCES = [
   "DTR_HOLD_WORKED",
   "DTR_HOLD_TARDINESS",
@@ -4338,7 +4383,6 @@ const HELD_DTR_ACCOUNT_CODE_CONFIG = {
 } as const;
 
 
-
 type AttendanceHoldApprovalMinutes = {
   workedMinutes: number;
   lateMinutes: number;
@@ -4364,13 +4408,7 @@ type AttendanceHoldRefreshSummaryRow = Pick<
 
 
 
-
-
-
-
 const FALLBACK_HELD_DTR_WORKED_MINUTES = 8 * 60;
-
-
 
 
 
@@ -4429,14 +4467,6 @@ function createHeldDtrExceptionRow(args: {
     updatedAt: new Date(),
   } satisfies typeof employeePayrollExceptionRows.$inferInsert;
 }
-
-
-
-
-
-
-
-
 
 
 
@@ -4532,8 +4562,6 @@ async function ensureHeldDtrAccountCodes(tx: AttendanceTransaction) {
 
   return accountBySource;
 }
-
-
 
 
 
@@ -4895,6 +4923,7 @@ export async function refreshGeneratedDtrRowsForBranchCalendarAccountCodeOverrid
   }> = [];
 
   const result = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
     const periods = await tx
       .select()
       .from(payrollPeriods)
@@ -4999,6 +5028,7 @@ export async function refreshGeneratedDtrRowsForHolidayCalendarChange(args: {
   }> = [];
 
   const result = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
     const periods = await tx
       .select()
       .from(payrollPeriods)
@@ -5140,6 +5170,7 @@ async function rebuildHeldDtrExceptionRowsForTargetPeriod(args: {
   targetPayrollPeriodId: string;
   employeeId: string;
 }) {
+  await lockEditableAttendancePeriod(args.tx, args.targetPayrollPeriodId);
   const payrollPeriod = await args.tx.query.payrollPeriods.findFirst({
     where: eq(payrollPeriods.id, args.targetPayrollPeriodId),
   });
@@ -5293,6 +5324,7 @@ export async function reviewAttendanceDtrCorrectionsAction(input: unknown) {
   }
 
   const result = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
     const correctionRows = await tx
       .select()
       .from(attendanceDtrCorrections)
@@ -5537,6 +5569,7 @@ export async function saveAttendanceDtrPeriodOverrideAction(input: unknown) {
   const isClearing = Object.values(overrides).every((value) => value == null);
 
   const result = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
     const staleRunCount = await markPayrollPeriodRunsStale({
       tx,
       payrollPeriodId: payrollPeriod.id,
@@ -5670,6 +5703,7 @@ export async function saveAttendanceDtrPeriodOverridesWithAccountCodesAction(
   const isClearing = Object.values(overrides).every((value) => value == null);
 
   const result = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
     const staleRunCount = await markPayrollPeriodRunsStale({
       tx,
       payrollPeriodId: payrollPeriod.id,
@@ -5820,6 +5854,7 @@ export async function approveAttendanceDtrHoldRowsAction(input: unknown) {
   const targetPayrollPeriodId = parsed.targetPayrollPeriodId;
 
   const result = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
     const [sourcePeriod, targetPeriod] = await Promise.all([
       tx.query.payrollPeriods.findFirst({
         where: eq(payrollPeriods.id, parsed.sourcePayrollPeriodId),
@@ -6087,6 +6122,7 @@ export async function resetAttendanceDtrHoldRowsAction(input: unknown) {
   );
 
   const result = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
     const sourcePeriod = await tx.query.payrollPeriods.findFirst({
       where: eq(payrollPeriods.id, parsed.sourcePayrollPeriodId),
     });
@@ -6291,6 +6327,7 @@ export async function saveAttendanceDtrDayOverridesAction(input: unknown) {
   }
 
   const result = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
     const staleRunCount = await markPayrollPeriodRunsStale({
       tx,
       payrollPeriodId: payrollPeriod.id,
@@ -6522,9 +6559,10 @@ export async function getAttendanceImportBatch(batchId: string) {
 
 async function loadAttendanceDtrHeldRows(
   periodId: string,
-  employeeScopeIds?: string[]
+  employeeScopeIds?: string[],
+  database: DbClient = db
 ): Promise<AttendanceDtrHeldRowsView> {
-  const period = await db.query.payrollPeriods.findFirst({
+  const period = await database.query.payrollPeriods.findFirst({
     where: eq(payrollPeriods.id, periodId),
   });
   if (!period) throw new Error("Payroll period not found");
@@ -6548,7 +6586,7 @@ async function loadAttendanceDtrHeldRows(
   }
 
   // Fetch manually-held overrides for this period
-  const manualOverrides = await db
+  const manualOverrides = await database
     .select({
       employeeId: employeeAttendanceDayStatusOverrides.employeeId,
       attendanceDate: employeeAttendanceDayStatusOverrides.attendanceDate,
@@ -6565,7 +6603,7 @@ async function loadAttendanceDtrHeldRows(
     );
 
   // Fetch all daily summaries for the period that have ODD_PUNCH_COUNT or MISSING_OUT flags
-  const flaggedSummaries = await db
+  const flaggedSummaries = await database
     .select()
     .from(attendanceDailySummaries)
     .where(
@@ -6637,14 +6675,14 @@ async function loadAttendanceDtrHeldRows(
     summaryRows,
     rawPunchRows,
   ] = await Promise.all([
-    db.query.employees.findMany({
+    database.query.employees.findMany({
       where: inArray(employees.id, allEmployeeIds),
       with: {
         generalInfo: true,
       },
     }),
-    loadEmployeeDepartmentMetadataByEmployeeId(allEmployeeIds, db),
-    db
+    loadEmployeeDepartmentMetadataByEmployeeId(allEmployeeIds, database),
+    database
       .select()
       .from(attendanceDailySummaries)
       .where(
@@ -6654,7 +6692,7 @@ async function loadAttendanceDtrHeldRows(
           lte(attendanceDailySummaries.attendanceDate, period.endDate)
         )
       ),
-    db
+    database
       .select({
         employeeId: attendanceRawLogs.employeeId,
         logDate: attendanceRawLogs.logDate,
@@ -6702,7 +6740,7 @@ async function loadAttendanceDtrHeldRows(
     rawPunchesByKey.set(key, punches);
   }
 
-  const approvalRows = await db
+  const approvalRows = await database
     .select()
     .from(attendanceDtrHoldApprovals)
     .where(
@@ -6718,7 +6756,7 @@ async function loadAttendanceDtrHeldRows(
   ];
   const targetPayrollPeriods =
     targetPayrollPeriodIds.length > 0
-      ? await db
+      ? await database
           .select({
             id: payrollPeriods.id,
             code: payrollPeriods.code,

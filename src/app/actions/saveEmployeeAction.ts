@@ -12,6 +12,7 @@ import {
   employeesTimekeeping,
 } from "@/db/schema";
 import { requireAdmin, syncLinkedAccountEmailTx } from "@/lib/auth/server";
+import { acquireAccountLifecycleLockTx, assertAccountAdminTx, assertEmployeeConfidentialityChangeTx } from "@/lib/auth/lifecycle";
 import { actionClient } from "@/lib/safe-action";
 import { SaveEmployeeResult } from "@/types/employeeResults";
 import {
@@ -182,6 +183,8 @@ export const saveEmployeeAction = actionClient
 
     try {
       return await db.transaction(async (tx) => {
+        await acquireAccountLifecycleLockTx(tx);
+        await assertAccountAdminTx(tx, auth);
         let employeeId = id;
 
         if (!employeeId) {
@@ -276,6 +279,9 @@ export const saveEmployeeAction = actionClient
           normalizedSalaryForSave != null &&
           hasSalaryImpactChange(existingSalary, normalizedSalaryForSave);
 
+        if (generalInfo?.confidentialityLevel !== undefined) {
+          await assertEmployeeConfidentialityChangeTx(tx, employeeId, generalInfo.confidentialityLevel);
+        }
         await upsert(
           employeesGeneralInfo,
           generalInfo && {

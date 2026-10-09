@@ -1,6 +1,7 @@
 "use client";
 
 import type { OpenEmployeesResult } from "@/lib/queries/getEmployee";
+import Link from "next/link";
 
 import {
   createColumnHelper,
@@ -33,11 +34,12 @@ type Props = {
   data: OpenEmployeesResult["data"];
   total: number;
   pageSize: number;
+  canManageAccess?: boolean;
 };
 
 type RowType = OpenEmployeesResult["data"][number];
 
-export default function EmployeeTable({ data, total, pageSize }: Props) {
+export default function EmployeeTable({ data, total, pageSize, canManageAccess = false }: Props) {
   const columnHeaderArray: Array<keyof RowType> = [
     "employeeNo",
     "firstName",
@@ -108,7 +110,27 @@ export default function EmployeeTable({ data, total, pageSize }: Props) {
         },
       cell: ({ getValue, row }) => {
         if (columnName === "employeeNo") {
-          return formatEmployeeNoDisplay(getValue() as string | null);
+          return (
+            <div className="flex flex-col items-start gap-2">
+              <Link
+                href={`/employeeMaster/form?employeeId=${row.original.id}`}
+                className="underline underline-offset-4"
+                onClick={(event) => event.stopPropagation()}
+              >
+                {formatEmployeeNoDisplay(getValue() as string | null)}
+              </Link>
+              {canManageAccess && (
+                <Link
+                  href={`/employeeMaster/form?employeeId=${row.original.id}&tab=access`}
+                  className="whitespace-nowrap rounded-md border px-2 py-2 text-sm hover:bg-muted focus-visible:outline focus-visible:outline-2"
+                  onClick={(event) => event.stopPropagation()}
+                  aria-label={`Account access for ${row.original.firstName} ${row.original.lastName}`}
+                >
+                  Account access
+                </Link>
+              )}
+            </div>
+          );
         }
 
         if (columnName === "employeeType") {

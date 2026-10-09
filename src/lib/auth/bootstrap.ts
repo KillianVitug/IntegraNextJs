@@ -1,5 +1,5 @@
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
-import { db, type DbClient } from "../../db";
+import { and, eq, isNull, sql } from "drizzle-orm";
+import { db, type DbClient, type DbTransaction } from "../../db";
 import {
   authAccounts,
   authEmailOtps,
@@ -12,7 +12,13 @@ import {
 import { generateEmployeeNoTx } from "../../utils/generateEmployeeNo";
 import { ADMIN_EMPLOYEE_TYPE } from "@/utils/employeeCode";
 import { hashPassword, normalizeEmail } from "./crypto";
-import { assignDefaultAccountGroupTx } from "./group-sync";
+import { setAccountGroupsTx, setManagerDepartmentsTx } from "./group-sync";
+import { AUTH_GROUP_KEYS, getDefaultGroupForConfidentialityLevel, type AuthGroupKey } from "./permissions";
+import {
+  acquireAccountLifecycleLockTx,
+  assertNotRemovingLastSystemAdminTx,
+  countActiveEffectiveAccountsInGroupsTx,
+} from "./lifecycle";
 
 // TEMP_DISABLED_NO_DOMAIN:
 // import {
@@ -32,7 +38,7 @@ type ExistingEmployeeRecord = {
   accountId: string | null;
 };
 
-type BootstrapAccountStatus = "Active";
+type BootstrapAccountStatus = "PendingSetup" | "Active" | "Locked" | "Disabled";
 type BootstrapSource = "promoted-existing" | "created-new";
 
 export type BootstrapFirstAdminArgs = {
@@ -51,16 +57,16 @@ export type BootstrapFirstAdminResult = {
   confidentialityLevel: BootstrapAdminLevel;
 };
 
-async function findAuthAccountByEmail(email: string) {
-  return db.query.authAccounts.findFirst({
+async function findAuthAccountByEmail(email: string, database: DbClient) {
+  return database.query.authAccounts.findFirst({
     where: eq(authAccounts.email, normalizeEmail(email)),
   });
 }
 
-async function findEmployeeClaimByEmail(email: string): Promise<ExistingEmployeeRecord | null> {
+async function findEmployeeClaimByEmail(email: string, database: DbClient): Promise<ExistingEmployeeRecord | null> {
   const normalizedEmail = normalizeEmail(email);
 
-  const [record] = await db
+  const [record] = await database
     .select({
       employeeId: employees.id,
       employeeNo: employees.employeeNo,
@@ -87,28 +93,6 @@ async function findEmployeeClaimByEmail(email: string): Promise<ExistingEmployee
     .limit(1);
 
   return record ?? null;
-}
-
-async function countActiveAdmins() {
-  const [record] = await db
-    .select({
-      count: sql<number>`count(*)::int`,
-    })
-    .from(authAccounts)
-    .innerJoin(employees, eq(authAccounts.employeeId, employees.id))
-    .innerJoin(employeesGeneralInfo, eq(employees.id, employeesGeneralInfo.employeeId))
-    .where(
-      and(
-        eq(authAccounts.status, "Active"),
-        isNull(employees.deletedAt),
-        inArray(employeesGeneralInfo.confidentialityLevel, [
-          "Supervisory",
-          "Managerial",
-        ]),
-      ),
-    );
-
-  return Number(record?.count ?? 0);
 }
 
 async function revokeAccountSessionsTx(tx: DbClient, accountId: string, now = new Date()) {
@@ -154,37 +138,52 @@ export type UpsertAdminAccountWithTemporaryPasswordArgs = {
   firstName?: string;
   lastName?: string;
   tempPassword: string;
+  groupKey?: AuthGroupKey;
+  departmentIds?: number[];
 };
 
 export async function upsertAdminAccountWithTemporaryPassword(
   args: UpsertAdminAccountWithTemporaryPasswordArgs,
+  transaction?: DbTransaction,
 ): Promise<BootstrapFirstAdminResult> {
   const normalizedEmail = normalizeEmail(args.email);
   const confidentialityLevel = args.level ?? "Managerial";
   const tempPassword = normalizeRequiredTempPassword(args.tempPassword);
   const passwordHash = await hashPassword(tempPassword);
 
-  const existingEmployee = await findEmployeeClaimByEmail(normalizedEmail);
-  const accountByEmail = await findAuthAccountByEmail(normalizedEmail);
+  const groupKey = args.groupKey ?? getDefaultGroupForConfidentialityLevel(confidentialityLevel)!;
+  const run = async (tx: DbTransaction): Promise<BootstrapFirstAdminResult> => {
+    await acquireAccountLifecycleLockTx(tx);
+    const existingEmployee = await findEmployeeClaimByEmail(normalizedEmail, tx);
+    const accountByEmail = await findAuthAccountByEmail(normalizedEmail, tx);
 
-  if (
-    existingEmployee &&
-    accountByEmail &&
-    accountByEmail.employeeId !== existingEmployee.employeeId
-  ) {
-    throw new Error("That email is already linked to a different auth account.");
-  }
+    if (
+      existingEmployee &&
+      accountByEmail &&
+      accountByEmail.employeeId !== existingEmployee.employeeId
+    ) {
+      throw new Error("That email is already linked to a different auth account.");
+    }
 
-  if (!existingEmployee && accountByEmail) {
-    throw new Error(
-      "That email is already linked to an auth account without a matching employee profile.",
-    );
-  }
+    if (!existingEmployee && accountByEmail) {
+      throw new Error(
+        "That email is already linked to an auth account without a matching employee profile.",
+      );
+    }
 
-  return db.transaction(async (tx) => {
     const now = new Date();
 
     if (existingEmployee) {
+      const existingAccount = existingEmployee.accountId
+        ? await tx.query.authAccounts.findFirst({
+            where: eq(authAccounts.id, existingEmployee.accountId),
+          })
+        : null;
+      if (existingAccount) {
+        await assertNotRemovingLastSystemAdminTx({
+          tx, accountId: existingAccount.id, nextGroupKey: groupKey,
+        });
+      }
       await tx
         .insert(employeesGeneralInfo)
         .values({
@@ -211,19 +210,12 @@ export async function upsertAdminAccountWithTemporaryPassword(
           },
         });
 
-      const existingAccount = existingEmployee.accountId
-        ? await tx.query.authAccounts.findFirst({
-            where: eq(authAccounts.id, existingEmployee.accountId),
-          })
-        : null;
-
       if (existingAccount) {
         await tx
           .update(authAccounts)
           .set({
             email: normalizedEmail,
             passwordHash,
-            status: "Active",
             mustSetPassword: true,
             lastLoginAt: null,
             updatedAt: now,
@@ -231,7 +223,8 @@ export async function upsertAdminAccountWithTemporaryPassword(
           .where(eq(authAccounts.id, existingAccount.id));
 
         await revokeAccountArtifactsTx(tx, existingAccount.id, now);
-        await assignDefaultAccountGroupTx(tx, existingAccount.id, confidentialityLevel);
+        await setAccountGroupsTx(tx, existingAccount.id, [groupKey]);
+        await setManagerDepartmentsTx(tx, existingAccount.id, args.departmentIds ?? []);
       } else {
         const [createdAccount] = await tx
           .insert(authAccounts)
@@ -244,7 +237,8 @@ export async function upsertAdminAccountWithTemporaryPassword(
           })
           .returning({ id: authAccounts.id });
 
-        await assignDefaultAccountGroupTx(tx, createdAccount.id, confidentialityLevel);
+        await setAccountGroupsTx(tx, createdAccount.id, [groupKey]);
+        await setManagerDepartmentsTx(tx, createdAccount.id, args.departmentIds ?? []);
       }
 
       // TEMP_DISABLED_NO_DOMAIN:
@@ -254,7 +248,7 @@ export async function upsertAdminAccountWithTemporaryPassword(
         source: "promoted-existing" as const,
         email: normalizedEmail,
         employeeId: existingEmployee.employeeId,
-        accountStatus: "Active" as const,
+        accountStatus: existingAccount?.status ?? "Active",
         confidentialityLevel,
       };
     }
@@ -294,7 +288,8 @@ export async function upsertAdminAccountWithTemporaryPassword(
       })
       .returning({ id: authAccounts.id });
 
-    await assignDefaultAccountGroupTx(tx, createdAccount.id, confidentialityLevel);
+    await setAccountGroupsTx(tx, createdAccount.id, [groupKey]);
+    await setManagerDepartmentsTx(tx, createdAccount.id, args.departmentIds ?? []);
 
     // TEMP_DISABLED_NO_DOMAIN:
     // const otpRecord = await createOnboardingOtpRecordTx(tx, createdAccount.id);
@@ -306,19 +301,20 @@ export async function upsertAdminAccountWithTemporaryPassword(
       accountStatus: "Active" as const,
       confidentialityLevel,
     };
-  });
+  };
+  return transaction ? run(transaction) : db.transaction(run);
 }
 
 export async function bootstrapFirstAdmin(
   args: BootstrapFirstAdminArgs,
 ): Promise<BootstrapFirstAdminResult> {
-  const activeAdminCount = await countActiveAdmins();
-
-  if (activeAdminCount > 0) {
-    throw new Error(
-      "An active admin already exists. Use /access-management to create later admin accounts.",
-    );
-  }
-
-  return upsertAdminAccountWithTemporaryPassword(args);
+  return db.transaction(async (tx) => {
+    await acquireAccountLifecycleLockTx(tx);
+    if (await countActiveEffectiveAccountsInGroupsTx(tx, [AUTH_GROUP_KEYS.SYSTEM_ADMIN, AUTH_GROUP_KEYS.HR_ADMIN]) > 0) {
+      throw new Error(
+        "An active admin already exists. Use /access-management to create later admin accounts.",
+      );
+    }
+    return upsertAdminAccountWithTemporaryPassword(args, tx);
+  });
 }

@@ -1,29 +1,41 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
+import { getCurrentAuthContext, hasPermission } from "@/lib/auth/server";
+import { AUTH_PERMISSIONS } from "@/lib/auth/permissions";
 import { getSalaryRateHistory } from "@/lib/queries/getSalaryRateHistory";
+
+function privateJson(body: unknown, status = 200) {
+  return NextResponse.json(body, {
+    status,
+    headers: { "Cache-Control": "private, no-store", Vary: "Cookie" },
+  });
+}
 
 export async function GET(
   _req: Request,
   context: { params: Promise<{ employeeId: string }> }
 ) {
   try {
-    const { employeeId } = await context.params; // ✅ await here
+    const auth = await getCurrentAuthContext();
+    if (!auth) {
+      return privateJson({ error: "Unauthorized." }, 401);
+    }
+    if (!hasPermission(auth, AUTH_PERMISSIONS.SALARY_MANAGE)) {
+      return privateJson({ error: "Forbidden." }, 403);
+    }
 
-    if (!employeeId) {
-      return NextResponse.json(
-        { error: "Employee ID is required" },
-        { status: 400 }
-      );
+    const { employeeId } = await context.params;
+
+    if (!z.string().uuid().safeParse(employeeId).success) {
+      return privateJson({ error: "A valid employee ID is required." }, 400);
     }
 
     const data = await getSalaryRateHistory(employeeId);
 
-    return NextResponse.json({ data });
+    return privateJson({ data });
   } catch (error) {
     console.error("SalaryRateHistory API error:", error);
 
-    return NextResponse.json(
-      { error: "Failed to fetch salary rate history" },
-      { status: 500 }
-    );
+    return privateJson({ error: "Failed to fetch salary rate history" }, 500);
   }
 }

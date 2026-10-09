@@ -1,5 +1,6 @@
 import {
   pgTable,
+  check,
   uuid,
   varchar,
   boolean,
@@ -1407,6 +1408,20 @@ export const employeeFiles = pgTable("employee_files", {
     .$onUpdate(() => new Date()),
   deletedAt: timestamp("deleted_at"),
 });
+
+// Private document bytes are separate so metadata queries never select content.
+export const employeeFileContents = pgTable("employee_file_contents", {
+  fileId: uuid("file_id").primaryKey().references(() => employeeFiles.id, { onDelete: "cascade" }),
+  contentBase64: text("content_base64").notNull(),
+  sha256: varchar("sha256", { length: 64 }).notNull(),
+  size: integer("size").notNull(),
+  mimeType: varchar("mime_type", { length: 100 }).notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, table => [
+  check("employee_file_contents_size_check", sql`${table.size} > 0 AND ${table.size} <= 3145728`),
+  check("employee_file_contents_base64_size", sql`length(${table.contentBase64}) = 4 * ((${table.size} + 2) / 3)`),
+  check("employee_file_contents_hash_format", sql`${table.sha256} ~ '^[0-9a-f]{64}$'`),
+]);
 
 //EMPLOYEE FOLDER TABLE
 export const employeeFolders = pgTable("employee_folder", {

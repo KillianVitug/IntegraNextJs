@@ -1,43 +1,24 @@
-import { NextResponse } from "next/server";
-import { writeFile, mkdir } from "fs/promises";
-import path from "path";
-import { getCurrentAuthContext } from "@/lib/auth/server";
-
-export async function POST(req: Request) {
-  try {
-    const auth = await getCurrentAuthContext();
-    if (!auth || auth.role !== "ADMIN") {
-      return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
-    }
-
-    const formData = await req.formData();
-    const file = formData.get("file") as File;
-
-    if (!file) {
-      return NextResponse.json({ error: "No file uploaded." }, { status: 400 });
-    }
-
-    const bytes = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
-
-    const uploadDir = path.join(process.cwd(), "public/uploads");
-    await mkdir(uploadDir, { recursive: true });
-
-    const serverFileName = `${Date.now()}-${file.name}`;
-    const filePath = path.join(uploadDir, serverFileName);
-
-    await writeFile(filePath, buffer);
-
-    return NextResponse.json({
-      success: true,
-      filePath: `/uploads/${serverFileName}`,
-      originalName: file.name,
-      size: file.size,
-      extension: file.name.split(".").pop(),
-      mime: file.type,
+import { File } from "node:buffer";
+import { documentForm, documentRequest } from "@/lib/employee-documents/http";
+import { DocumentError, MAX_DOCUMENT_BYTES } from "@/lib/employee-documents/model";
+import { saveUpload } from "@/lib/employee-documents/service";
+export const runtime = "nodejs";
+export async function POST(request: Request) {
+  return documentRequest(request, async actor => {
+    const form = await documentForm(request);
+    const file = form.get("file");
+    if (!(file instanceof File) || !file.size) throw new DocumentError(400, "Select a non-empty file to upload.");
+    if (file.size > MAX_DOCUMENT_BYTES) throw new DocumentError(413, "Maximum file size is 3 MiB.");
+    const field = (name: string) => {
+      const value = form.get(name);
+      if (value !== null && typeof value !== "string") throw new DocumentError(400, "Invalid upload fields.");
+      return value;
+    };
+    const saved = await saveUpload(actor, {
+      id: field("id") ?? "", groupId: field("groupId") ?? "", fileName: field("fileName") || file.name,
+      description: field("description"), remarks: field("remarks"),
+      bytes: Buffer.from(await file.arrayBuffer()), originalName: file.name,
     });
-  } catch (e) {
-    console.error("UPLOAD ERROR:", e);
-    return NextResponse.json({ error: "Upload failed." }, { status: 500 });
-  }
+    return Response.json({ success: true, id: saved.id, filePath: saved.filePath, originalName: file.name, size: saved.fileSize, extension: saved.fileExtension, mime: saved.mimeType });
+  });
 }

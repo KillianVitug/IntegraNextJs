@@ -6,11 +6,13 @@ import { approveWorkBatchAction, getWorkBatchCompletionAction, refreshWorkBatchA
 import { payrollRead } from "@/lib/payroll/readClient";
 import { generateUUID } from "@/lib/uuid";
 import { appendManualDraft, buildNoWorkDrafts } from "@/lib/payroll/attendanceStage6Model";
-import { canCorrectRecord, draftVersion, type WorkBoard, type WorkDraft, type WorkEmployee, type WorkKind, type WorkRecord } from "@/lib/payroll/attendanceWorkbenchModel";
+import { draftVersion, type WorkBoard, type WorkChange, type WorkDraft, type WorkEmployee, type WorkKind, type WorkRecord } from "@/lib/payroll/attendanceWorkbenchModel";
+import { changesForPunch, removeDraftChanges, upsertPunchChange } from "@/lib/payroll/provisionalPunchEdits";
 import { formatWorkday } from "@/lib/payroll/dateDisplay";
 import { originalPunchDateTime } from "@/lib/payroll/attendanceResolutionModel";
-import { BatchReview, changeLabels } from "../attendance-source/batch-review";
+import { BatchReview } from "../attendance-source/batch-review";
 import { QuickPunch } from "../attendance-source/quick-punch";
+import { PunchReview } from "./punch-review";
 
 type Preview = NonNullable<Extract<Awaited<ReturnType<typeof previewProvisionalCorrectionAction>>, { ok: true }>["data"]["preview"]>;
 type SavedState = { requestId: string; draft: WorkDraft | null; revision?: number; preview: Preview | null; approved: boolean };
@@ -22,7 +24,7 @@ export function DayCorrection({ period, employeeId, day, reviewHref, onSaved, pa
   const [employee, setEmployee] = useState<WorkEmployee | null>(null);
   const [state, setState] = useState<SavedState>({ requestId: "", draft: null, preview: null, approved: false });
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState(""), [estimated, setEstimated] = useState(false);
-  const [addPunch, setAddPunch] = useState<boolean | null>(null), [ready, setReady] = useState(false);
+  const [addPunch, setAddPunch] = useState(false), [ready, setReady] = useState(false);
   const errorRef = useRef<HTMLDivElement>(null), previewRef=useRef<HTMLDivElement>(null), gate = useRef(false);
   function retain(next: SavedState) { setState(next); try { sessionStorage.setItem(storage, JSON.stringify(next)); } catch { /* Server receipts remain available in attendance history. */ } }
   useEffect(() => {
@@ -36,9 +38,14 @@ export function DayCorrection({ period, employeeId, day, reviewHref, onSaved, pa
   useEffect(()=>{if(state.preview&&!state.approved){previewRef.current?.focus();previewRef.current?.scrollIntoView({block:"start"});}},[state.preview,state.approved]);
   const currentDay = employee?.days.find(value => value.day === day);
   const attendance = currentDay?.attendance;
-  const showAddPunch = addPunch ?? !!attendance?.missingDirection;
+  const showAddPunch = addPunch;
+  const inlineChangeIds = currentDay?.records.flatMap(record => changesForPunch(state.draft, record, day).map(change => change.id)) ?? [];
+  const additionalChanges = state.draft?.changes.filter(change => !inlineChangeIds.includes(change.id)) ?? [];
   const board: WorkBoard = { period, employees: employee ? [employee] : [], plans: [], adjustments: [], owners: [], statuses: { sync: "", review: "", delivery: "", dtr: "", payroll: "" }, enabled: true };
   function changeDraft(draft: WorkDraft | null) { retain({ ...state, draft, preview: null }); setError(""); setNotice(""); }
+  function editChange(_employeeId: string, id: string, patch: Partial<WorkChange>) {
+    if (state.draft) changeDraft({ ...state.draft, changes: state.draft.changes.map(change => change.id === id ? { ...change, ...patch } : change) });
+  }
   function add(kind: WorkKind, record?: WorkRecord) {
     if (!employee) return;
     try {
@@ -46,7 +53,7 @@ export function DayCorrection({ period, employeeId, day, reviewHref, onSaved, pa
       const base = state.draft ?? { employeeId, days: [day], changes: [], reason: "", ownerId: "", needed: "", rejected: false, version: draftVersion(employee, [day]) };
       const target = record ? record.source === "API" ? { eventId: record.id } : { rawLogId: record.rawLogId } : {};
       const change = { id: generateUUID(), day, kind, ...target, ...(kind === "Direction" ? { type: record?.type === "IN" ? "OUT" as const : "IN" as const } : {}), reason: "", evidence: "", verified: false };
-      changeDraft({ ...base, changes: [...base.changes, change] });
+      changeDraft(record ? upsertPunchChange(base, change) : { ...base, changes: [...base.changes, change] });
     } catch (cause) { setError(cause instanceof Error ? cause.message : "This change could not be added."); }
   }
   async function review(draft = state.draft) {
@@ -103,14 +110,15 @@ export function DayCorrection({ period, employeeId, day, reviewHref, onSaved, pa
     {currentDay && !state.approved && <>
       {payrollHold && <p className="rounded-lg border border-amber-400 p-3 text-sm">Attendance time is on hold by administrator decision. Editing punches does not release held time. {holdHref&&<Link className="underline" href={holdHref}>Review held-time decisions</Link>}</p>}
       {currentDay.decision?.lateConflict && <p className="rounded-lg border border-amber-400 p-3 text-sm">Incoming attendance differs. The approved decision remains in effect. <Link className="underline" href={reviewHref}>Keep the decision or review incoming attendance</Link>.</p>}
-      {attendance && <div className={`rounded-lg border p-3 text-sm ${attendance.issues.length || currentDay.decision?.lateConflict ? "border-amber-400" : "border-emerald-400"}`}><p className="font-semibold">{attendance.complete && !attendance.issues.length ? currentDay.decision?.lateConflict ? "Approved attendance retained" : "Complete attendance · No correction needed" : attendance.missingDirection ? `Missing ${attendance.missingDirection} · Enter the actual time below` : attendance.issues.length ? "Review the items below" : "No work recorded · No action required"}</p>{attendance.issues.length>0&&<ul className="mt-1 list-inside list-disc">{attendance.issues.map(issue=><li key={issue}>{issue}</li>)}</ul>}{attendance.canConfirmExisting&&!currentDay.decision?.lateConflict&&!state.draft&&<button className={`${primary} mt-2`} disabled={busy} onClick={()=>void reviewExisting()}>Review existing punches</button>}</div>}
-      <div className="rounded-lg border p-3 text-sm"><p>Schedule: {currentDay.rest ? "Rest day" : currentDay.schedule?.checkInTime ? `${currentDay.schedule.checkInTime}–${currentDay.schedule.checkOutTime}` : "Unconfigured"}</p><p className="mt-1">Philippine time · Seconds shown · Original captures retained</p>
-        <ul className="mt-2 divide-y">{currentDay.records.map(record => { const input=attendance?.punches.find(punch=>punch.id===record.id); return <li className="flex flex-wrap items-center justify-between gap-2 py-2" key={record.id}><span>{record.type} · {originalPunchDateTime(record.at)}{input ? <small className={`block ${input.included ? "text-muted-foreground" : "text-amber-700 dark:text-amber-300"}`}>{input.included ? "Included in attendance calculation" : `Not counted · ${input.reason || "Review required"}`}</small> : record.status === "VOID" ? " · VOID" : record.excluded ? " · Excluded" : ""}{(record.originalAt && record.originalAt !== record.at || record.originalType && record.originalType !== record.type) && <small className="block">Original: {record.originalType || record.type} · {originalPunchDateTime(record.originalAt || record.at)}</small>}</span><select aria-label={`Change ${record.type} ${originalPunchDateTime(record.at)}`} disabled={busy} className="min-h-11 max-w-full rounded border bg-background p-2" value="" onChange={event => add(event.target.value as WorkKind, record)}><option value="">Change this punch…</option>{(["Direction", "Time", "Void", "Restore", "Exclude", "Retain"] as WorkKind[]).filter(kind => canCorrectRecord(record, kind)).map(kind => <option key={kind} value={kind}>{changeLabels[kind]}</option>)}</select></li>; })}</ul>{!currentDay.records.length && <p className="py-2">No work recorded. A correction is optional.</p>}
+      {attendance && <div className={`rounded-lg border p-3 text-sm ${attendance.issues.length || currentDay.decision?.lateConflict ? "border-amber-400" : "border-emerald-400"}`}><p className="font-semibold">{attendance.complete && !attendance.issues.length ? currentDay.decision?.lateConflict ? "Approved attendance retained" : "Complete attendance · No correction needed" : attendance.missingDirection ? `Missing ${attendance.missingDirection} · Add the actual punch or correct an existing capture` : attendance.issues.length ? "Review the items below" : "No work recorded · No action required"}</p>{attendance.issues.length>0&&<ul className="mt-1 list-inside list-disc">{attendance.issues.map(issue=><li key={issue}>{issue}</li>)}</ul>}{attendance.canConfirmExisting&&!currentDay.decision?.lateConflict&&!state.draft&&<button className={`${primary} mt-2`} disabled={busy} onClick={()=>void reviewExisting()}>Review existing punches</button>}</div>}
+      {employee && <PunchReview board={board} employee={employee} day={day} draft={state.draft} busy={busy} onAdd={add} editChange={editChange} onRemove={ids => state.draft && changeDraft(removeDraftChanges(state.draft, ids))} />}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {!showAddPunch && !state.draft?.changes.some(change=>change.kind==="Manual") && <button className={button} disabled={busy} onClick={()=>{ changeDraft(state.draft); setAddPunch(true); }}>{attendance?.missingDirection ? `Add missing ${attendance.missingDirection}` : "Add missing IN or OUT"}</button>}
+        {state.draft && !state.preview && <button className={primary} disabled={busy || !state.draft.changes.length} onClick={() => void review()}>{busy ? "Reviewing…" : `Review ${state.draft.changes.length} ${state.draft.changes.length === 1 ? "change" : "changes"}`}</button>}
       </div>
       {showAddPunch && employee && !state.preview && !state.draft?.changes.some(change=>change.kind==="Manual") && <QuickPunch key={`${day}:${attendance?.missingDirection || "IN"}`} day={day} busy={busy} initialDirection={attendance?.missingDirection || "IN"} onEdit={() => retain({ ...state, preview: null })} onReview={async (change, note) => { const draft = appendManualDraft(state.draft ? [state.draft] : [], employee, change, note)[0]; await review(draft); }} />}
-      <details><summary className="flex min-h-11 cursor-pointer items-center text-sm font-semibold">Other day actions</summary><div className="flex flex-wrap gap-2">{!showAddPunch&&<button className={button} disabled={busy} onClick={()=>setAddPunch(true)}>Add an actual punch</button>}<button className={button} disabled={busy || !currentDay.records.some(record=>record.status==="VALID"&&!record.excluded)} onClick={() => add("NoAttendance")}>Mark these punches as no work</button></div><p className="mt-1 text-xs">Use only when the recorded day is incorrect. No-work days without punches need no action.</p></details>
-      {state.draft && <BatchReview board={board} drafts={[state.draft]} busy={busy} onChange={drafts => changeDraft(drafts[0] ?? null)} editDraft={(_id, patch) => state.draft && changeDraft({ ...state.draft, ...patch })} editChange={(_id, id, patch) => state.draft && changeDraft({ ...state.draft, changes: state.draft.changes.map(change => change.id === id ? { ...change, ...patch } : change) })} onNotice={setNotice} />}
-      {state.draft && !state.preview && <button className={primary} disabled={busy || !state.draft.changes.length} onClick={() => void review()}>{busy ? "Reviewing…" : "Review these changes"}</button>}
+      {state.draft && <details key={additionalChanges.map(change=>change.id).join("|")} open={additionalChanges.length > 0} className="min-w-0"><summary className="flex min-h-11 cursor-pointer items-center text-sm font-semibold">{additionalChanges.length ? `${additionalChanges.length} additional ${additionalChanges.length === 1 ? "change" : "changes"} · Plan details and day preview` : "Plan note, saved history and day preview"}</summary><BatchReview board={board} drafts={[state.draft]} busy={busy} hiddenChangeIds={inlineChangeIds} onChange={drafts => changeDraft(drafts[0] ?? null)} editDraft={(_id, patch) => state.draft && changeDraft({ ...state.draft, ...patch })} editChange={editChange} onNotice={setNotice} /></details>}
+      <details><summary className="flex min-h-11 cursor-pointer items-center text-sm font-semibold">Other day actions</summary><button className={button} disabled={busy || !currentDay.records.some(record=>record.status==="VALID"&&!record.excluded)} onClick={() => add("NoAttendance")}>Mark these punches as no work</button><p className="mt-1 text-xs">Use only when the recorded day is incorrect. No-work days without punches need no action.</p></details>
     </>}
     {state.preview && !state.approved && <div ref={previewRef} tabIndex={-1} className="space-y-3 rounded-xl border border-blue-400 p-4 focus:ring-2 focus:ring-blue-500"><h3 className="font-semibold">Confirm this correction</h3><p className="text-sm">{employee?.name} · {formatWorkday(day)} · {state.draft?.changes.length} change(s)</p><div className="text-sm"><strong>Proposed sequence · preview</strong>{state.preview.plans.flatMap(plan => plan.records).filter(record => record.status === "VALID" && !record.excluded).map(record => <p key={record.id}>{record.type} · {originalPunchDateTime(record.at)}</p>)}</div><ul className="list-inside list-disc text-sm">{[...new Set(state.preview.plans.flatMap(plan => plan.warnings))].map(warning => <li key={warning}>{warning}</li>)}</ul><p className="text-sm">Confirming approves the exact values and accepts these warnings. Notes are optional. Phone attendance stays unchanged.</p><button className={primary} disabled={busy} onClick={() => void approve()}>{busy ? "Checking and saving…" : "Confirm correction"}</button></div>}
     {state.approved && !estimated && <button className={primary} disabled={busy} onClick={() => void approve()}>{busy ? "Updating…" : "Check status and update estimate"}</button>}
