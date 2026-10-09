@@ -1,9 +1,9 @@
+import { getAllFoldersWithFiles } from "./getEmployeeFiles";
 import { db } from "@/db";
-import { customPayrollDefinitions, position , department, employees, employeesGeneralInfo, employeesOtherReferences, employeesSalary, employeeFiles, employeesLoans, accountCode, slvlGroup } from "@/db/schema";
+import { customPayrollDefinitions, position , department, employees, employeesGeneralInfo, employeesOtherReferences, employeesSalary, employeesLoans, accountCode, slvlGroup } from "@/db/schema";
 import { ilike, or, eq, sql, asc, and } from "drizzle-orm";
 import { getSickAndLeaveWithUsage } from "./getSickAndLeave"
 import { employeeCodeSql } from "@/lib/employeeCodeSql";
-import { sortEmployeesByLastName } from "@/utils/employeeDisplay";
 
 const employeeSearchSelect = {
     id: employees.id,
@@ -80,62 +80,15 @@ export async function getCustomPayrollSearchResults(searchText: string) {
 }
 export type CustomPayrollResultsType = Awaited<ReturnType<typeof getCustomPayrollSearchResults>>
 
-//EmployeeFile
+// Employee-document searches use the same protected, active ownership query as the list.
 export async function getEmployeeSearchFileResults(searchText: string) {
-    const results = await db.select({
-        fileName: employeeFiles.fileName,
-        description: employeeFiles.description,
-        remarks: employeeFiles.remarks,
-        filePath: employeeFiles.filePath,
-        fileExtension: employeeFiles.fileExtension,
-        mimeType: employeeFiles.mimeType,
-        createdAt: employeeFiles.createdAt,
-    })
-    .from(employeeFiles)
-    .where(or(
-        ilike(employees.employeeNo, `%${searchText}%`),
-        ilike(employees.middleName, `%${searchText}%`),
-        sql`lower(concat(${employees.firstName}, ' ', ${employees.lastName})) LIKE ${`%${searchText.toLowerCase().replace(' ', '%')}%`}`,
-    ))
-    return results
+  return (await getAllFoldersWithFiles(searchText)).flatMap(folder => folder.files);
 }
-export type EmployeeSearchFileResultsType = Awaited<ReturnType<typeof getEmployeeSearchFileResults>>
-
+export type EmployeeSearchFileResultsType = Awaited<ReturnType<typeof getEmployeeSearchFileResults>>;
 export async function getFolderSearchResults(searchText: string) {
-    const folders = await db.query.employeeFolders.findMany({
-      with: {
-        files: true,
-        employee: true,
-      },
-      where: or(
-        ilike(employeeCodeSql({
-          employeeType: employees.employeeType,
-          employeeNo: employees.employeeNo,
-        }), `%${searchText}%`),
-        ilike(employees.employeeNo, `%${searchText}%`),
-        ilike(employees.middleName, `%${searchText}%`),
-        sql`lower(concat(${employees.firstName}, ' ', ${employees.lastName})) LIKE ${`%${searchText.toLowerCase()}%`}`
-      ),
-    });
-
-    return sortEmployeesByLastName(folders.map(folder => ({
-      id: folder.id,
-      employeeNo: folder.employee.employeeNo,
-      employeeType: folder.employee.employeeType,
-      employeeName: `${folder.employee.lastName}, ${folder.employee.firstName} ${
-        folder.employee.middleName ?? ""
-      }`,
-      folderName: folder.folderName,
-      folderType: folder.folderType,
-      description: folder.description,
-      remarks: folder.remarks,
-      createdAt: folder.createdAt,
-      files: folder.files,
-    })));
-  }
-
-  export type EmployeeSearchFolderResultsType = Awaited<ReturnType<typeof getFolderSearchResults>>
-
+  return getAllFoldersWithFiles(searchText);
+}
+export type EmployeeSearchFolderResultsType = Awaited<ReturnType<typeof getFolderSearchResults>>;
 //EmployeeLoan
 export async function getEmployeeLoanSearchResults(searchText: string, page = 1, pageSize = 50) {
     const offset = (page - 1) * pageSize;

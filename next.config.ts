@@ -3,6 +3,8 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   /* config options here */
   output: "standalone",
+  // Employee documents must not enter the public image-optimization cache.
+  images: { localPatterns: [{ pathname: "/images/**" }, { pathname: "/*.svg" }] },
   transpilePackages: [
     "@radix-ui/react-dropdown-menu",
     "@radix-ui/react-popover",

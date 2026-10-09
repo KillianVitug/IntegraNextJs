@@ -15,22 +15,28 @@ import {
   employeeFolders,
   employeeFiles,
 } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
-import { requireAdminActor } from "@/lib/admin";
-import { disableLinkedAccountTx } from "@/lib/auth/server";
+import { recordAdminAuditEvent } from "@/lib/admin";
+import { disableLinkedAccountTx, requireAdmin } from "@/lib/auth/server";
+import { acquireAccountLifecycleLockTx, assertAccountAdminTx } from "@/lib/auth/lifecycle";
 
 export const archiveEmployeeAction = actionClient
   .metadata({ actionName: "archiveEmployee" })
   .schema(z.string().uuid())
   .action(async ({ parsedInput: employeeId }) => {
-    await requireAdminActor();
+    const actor = await requireAdmin();
     const now = new Date();
 
-    await db.transaction(async (tx) => {
+    try {
+      await db.transaction(async (tx) => {
+      await acquireAccountLifecycleLockTx(tx);
+      await assertAccountAdminTx(tx, actor);
       await disableLinkedAccountTx(tx, employeeId);
-      await tx.update(employees).set({ deletedAt: now }).where(eq(employees.id, employeeId));
+      const [archived] = await tx.update(employees).set({ deletedAt: now })
+        .where(eq(employees.id, employeeId)).returning({ id: employees.id });
+      if (!archived) throw new Error("Employee not found.");
       await tx.update(employeesGeneralInfo).set({ deletedAt: now }).where(eq(employeesGeneralInfo.employeeId, employeeId));
       await tx.update(employeesSalary).set({ deletedAt: now }).where(eq(employeesSalary.employeeId, employeeId));
       await tx.update(employeesOtherReferences).set({ deletedAt: now }).where(eq(employeesOtherReferences.employeeId, employeeId));
@@ -44,7 +50,7 @@ export const archiveEmployeeAction = actionClient
       await tx.update(employeeFiles)
         .set({ deletedAt: now })
         .where(
-          eq(
+          inArray(
             employeeFiles.groupId,
             tx.select({ id: employeeFolders.id })
               .from(employeeFolders)
@@ -52,8 +58,25 @@ export const archiveEmployeeAction = actionClient
           )
         );
         
-        revalidatePath("/employeeMaster");
-    });
+      await recordAdminAuditEvent({
+        actorUserId: actor.accountId,
+        entityType: "employee",
+        entityId: employeeId,
+        action: "archived",
+        database: tx,
+      });
+      });
+    } catch (error) {
+      if (error instanceof Error && [
+        "At least one active System Admin account is required.",
+        "Employee not found.",
+      ].includes(error.message)) {
+        return { success: false, message: error.message };
+      }
+      throw error;
+    }
 
+    revalidatePath("/employeeMaster");
+    revalidatePath("/access-management");
     return { success: true };
   });

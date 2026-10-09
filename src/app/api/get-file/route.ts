@@ -1,14 +1,6 @@
-// src/app/api/get-file/route.ts
-import { NextResponse } from "next/server";
-import { getEmployeeFile } from "@/lib/queries/getEmployeeFiles";
-
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const groupId = searchParams.get("groupId");
-
-  if (!groupId) return NextResponse.json(null);
-
-  const result = await getEmployeeFile(groupId);
-  return NextResponse.json(result);
+import { documentRequest } from "@/lib/employee-documents/http";
+import { listFiles } from "@/lib/employee-documents/service";
+export const dynamic = "force-dynamic";
+export async function GET(request: Request) {
+  return documentRequest(request, async actor => Response.json((await listFiles(actor, new URL(request.url).searchParams.get("groupId") ?? ""))[0] ?? null));
 }
-

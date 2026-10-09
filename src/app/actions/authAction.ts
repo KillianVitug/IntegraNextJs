@@ -2,18 +2,13 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect, unstable_rethrow } from "next/navigation";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { z, ZodError } from "zod";
 import { db } from "@/db";
 import {
-  authAccountPermissionGroups,
   authAccounts,
-  authEmailOtps,
-  authPermissionGroups,
-  authPasswordSetupTokens,
   authSessions,
   authTemporaryPasswordReveals,
-  employees,
   employeesGeneralInfo,
 } from "@/db/schema";
 import {
@@ -21,14 +16,15 @@ import {
   encryptSecret,
   hashPassword,
   normalizeEmail,
-  verifyPassword,
 } from "@/lib/auth/crypto";
 import { authConfig, getTempPasswordRevealKey } from "@/lib/auth/config";
 import type { AuthActionState } from "@/lib/auth/action-state";
 import {
   consumePasswordSetupToken,
   createPasswordSetupToken,
-  createSession,
+  createSessionTx,
+  setCreatedSessionCookie,
+  signInWithPassword,
   assignDefaultAccountGroupTx,
   findAuthAccountByEmail,
   findEmployeeClaimByEmail,
@@ -45,9 +41,14 @@ import {
   AUTH_GROUP_KEYS,
   AUTH_PERMISSIONS,
   type AuthGroupKey,
-  isAuthGroupKey,
 } from "@/lib/auth/permissions";
 import { upsertAdminAccountWithTemporaryPassword } from "@/lib/auth/bootstrap";
+import {
+  acquireAccountLifecycleLockTx,
+  assertAccountAccessManagerTx,
+  assertNotRemovingLastSystemAdminTx,
+  getAccountAccessStateTx,
+} from "@/lib/auth/lifecycle";
 
 type DbExecutor = Pick<typeof db, "select" | "insert" | "update" | "delete">;
 
@@ -198,40 +199,22 @@ export async function claimEmployeeAccountAction(
   try {
     const values = claimEmployeeAccountSchema.parse(formDataToValues(formData));
     const normalizedEmail = normalizeEmail(values.email);
-    const employee = await findEmployeeClaimByEmail(normalizedEmail);
     const genericClaimMessage =
       "If the email is eligible, the account claim has been submitted. A System Admin can provide the temporary password from Access Management.";
 
-    if (!employee || employee.confidentialityLevel !== "Rank and File") {
-      return {
-        status: "success",
-        message: genericClaimMessage,
-      };
-    }
-
-    const existingAccount = employee.accountId
-      ? await db.query.authAccounts.findFirst({
-          where: eq(authAccounts.id, employee.accountId),
-        })
-      : null;
-
-    if (existingAccount) {
-      const existingRole = await getRoleForAccount(existingAccount.id);
-      const shouldRegenerateTemporaryPassword =
-        existingRole === "EMPLOYEE" &&
-        existingAccount.status === "Active" &&
-        existingAccount.mustSetPassword;
-
-      if (!shouldRegenerateTemporaryPassword) {
-        return {
-          status: "success",
-          message: genericClaimMessage,
-        };
-      }
-    }
-
-    const now = new Date();
     await db.transaction(async (tx) => {
+      await acquireAccountLifecycleLockTx(tx);
+      const employee = await findEmployeeClaimByEmail(normalizedEmail, tx);
+      if (!employee || employee.confidentialityLevel !== "Rank and File") return;
+      const existingAccount = employee.accountId
+        ? await tx.query.authAccounts.findFirst({ where: eq(authAccounts.id, employee.accountId) })
+        : null;
+      if (existingAccount) {
+        const role = await getRoleForAccount(existingAccount.id, tx);
+        if (role !== "EMPLOYEE" || existingAccount.status !== "Active"
+          || !existingAccount.mustSetPassword) return;
+      }
+      const now = new Date();
       if (existingAccount) {
         const passwordHash = await createTemporaryPasswordRevealTx({
           tx,
@@ -343,31 +326,14 @@ export async function setPasswordAction(
 ): Promise<AuthActionState> {
   try {
     const values = setPasswordSchema.parse(formDataToValues(formData));
-    const tokenResult = await consumePasswordSetupToken(
-      values.email,
-      values.setupToken,
-    );
-
-    if (!tokenResult.account || tokenResult.error) {
-      return {
-        status: "error",
-        message:
-          tokenResult.error ?? "The password setup link is invalid or expired.",
-      };
-    }
-
     const passwordHash = await hashPassword(values.password);
-    const role = await getRoleForAccount(tokenResult.account.id);
-
-    if (!role) {
-      return {
-        status: "error",
-        message: "This account is not linked to a valid application role.",
-      };
-    }
-
-    const now = new Date();
-    await db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
+      const tokenResult = await consumePasswordSetupToken(values.email, values.setupToken, tx);
+      if (!tokenResult.account || tokenResult.error) return null;
+      const accountId = tokenResult.account.id;
+      const role = await getRoleForAccount(accountId, tx);
+      if (!role) throw new Error("This account is not linked to a valid application role.");
+      const now = new Date();
       await tx
         .update(authAccounts)
         .set({
@@ -377,27 +343,28 @@ export async function setPasswordAction(
           lastLoginAt: now,
           updatedAt: now,
         })
-        .where(eq(authAccounts.id, tokenResult.account!.id));
+        .where(eq(authAccounts.id, accountId));
 
-      await tx
-        .delete(authEmailOtps)
-        .where(eq(authEmailOtps.accountId, tokenResult.account!.id));
-      await tx
-        .delete(authPasswordSetupTokens)
-        .where(eq(authPasswordSetupTokens.accountId, tokenResult.account!.id));
+      await revokeAccountArtifactsTx(tx, accountId, now);
       await tx
         .update(authTemporaryPasswordReveals)
         .set({ revealedAt: now })
         .where(
           and(
-            eq(authTemporaryPasswordReveals.accountId, tokenResult.account!.id),
+            eq(authTemporaryPasswordReveals.accountId, accountId),
             isNull(authTemporaryPasswordReveals.revealedAt),
           ),
         );
+      const session = await createSessionTx(tx, accountId, passwordHash);
+      return { role, session };
     });
 
-    await createSession(tokenResult.account.id);
-    redirect(getRedirectForRole(role));
+    if (!result) return {
+      status: "error",
+      message: "The password setup link is invalid or expired.",
+    };
+    await setCreatedSessionCookie(result.session);
+    redirect(getRedirectForRole(result.role));
   } catch (error) {
     unstable_rethrow(error);
 
@@ -419,62 +386,27 @@ export async function passwordLoginAction(
 ): Promise<AuthActionState> {
   try {
     const values = passwordLoginSchema.parse(formDataToValues(formData));
-    const account = await findAuthAccountByEmail(values.email);
-
-    if (
-      !account ||
-      account.status !== "Active" ||
-      !account.passwordHash
-    ) {
+    const result = await signInWithPassword(values.email, values.password);
+    if (!result) {
       return {
         status: "error",
         message: "Invalid email or password.",
       };
     }
 
-    const isValidPassword = await verifyPassword(
-      values.password,
-      account.passwordHash,
-    );
-
-    if (!isValidPassword) {
-      return {
-        status: "error",
-        message: "Invalid email or password.",
-      };
-    }
-
-    const role = await getRoleForAccount(account.id);
-    if (!role) {
-      return {
-        status: "error",
-        message: "This account is not linked to a valid application role.",
-      };
-    }
-
-    if (account.mustSetPassword) {
-      const setupToken = await createPasswordSetupToken(account.id);
-
+    if (result.setupToken) {
       return {
         status: "success",
         message:
           "Temporary password accepted. Set your permanent password to continue.",
         passwordSetup: {
-          email: account.email,
-          token: setupToken,
+          email: result.email,
+          token: result.setupToken,
         },
       };
     }
 
-    await db
-      .update(authAccounts)
-      .set({
-        lastLoginAt: new Date(),
-      })
-      .where(eq(authAccounts.id, account.id));
-
-    await createSession(account.id);
-    redirect(getRedirectForRole(role));
+    redirect(getRedirectForRole(result.role));
   } catch (error) {
     unstable_rethrow(error);
 
@@ -511,41 +443,35 @@ export async function createAdminAccountAction(
     }
     const confidentialityLevel = getConfidentialityForAdminGroup(values.groupKey);
 
-    const result = await upsertAdminAccountWithTemporaryPassword({
-      email: values.email,
-      level: confidentialityLevel,
-      firstName: values.firstName || undefined,
-      lastName: values.lastName || undefined,
-      tempPassword: values.tempPassword,
-    });
-
-    const account = await findAuthAccountByEmail(result.email);
-    if (!account) {
-      throw new Error("Created account could not be loaded.");
-    }
-
-    await db.transaction(async (tx) => {
-      await setAccountGroupsTx(tx, account.id, [values.groupKey]);
-      await setManagerDepartmentsTx(
-        tx,
-        account.id,
-        values.groupKey === AUTH_GROUP_KEYS.MANAGER ? values.departmentIds : [],
-      );
-    });
-
-    await recordAdminAuditEvent({
-      actorUserId: actor.accountId,
-      entityType: "auth_account",
-      entityId: result.employeeId,
-      action: "admin_account_upsert",
-      details: {
-        email: result.email,
-        source: result.source,
+    const result = await db.transaction(async (tx) => {
+      await acquireAccountLifecycleLockTx(tx);
+      await assertAccountAccessManagerTx(tx, actor);
+      const result = await upsertAdminAccountWithTemporaryPassword({
+        email: values.email,
+        level: confidentialityLevel,
+        firstName: values.firstName || undefined,
+        lastName: values.lastName || undefined,
+        tempPassword: values.tempPassword,
         groupKey: values.groupKey,
-        confidentialityLevel,
-        managerDepartmentIds:
-          values.groupKey === AUTH_GROUP_KEYS.MANAGER ? values.departmentIds : [],
-      },
+        departmentIds: values.groupKey === AUTH_GROUP_KEYS.MANAGER ? values.departmentIds : [],
+      }, tx);
+      await recordAdminAuditEvent({
+        actorUserId: actor.accountId,
+        entityType: "auth_account",
+        entityId: result.employeeId,
+        action: "admin_account_upsert",
+        details: {
+          email: result.email,
+          source: result.source,
+          groupKey: values.groupKey,
+          confidentialityLevel,
+          accountStatus: result.accountStatus,
+          managerDepartmentIds:
+            values.groupKey === AUTH_GROUP_KEYS.MANAGER ? values.departmentIds : [],
+        },
+        database: tx,
+      });
+      return result;
     });
 
     revalidatePath("/access-management");
@@ -555,7 +481,9 @@ export async function createAdminAccountAction(
       message:
         result.source === "created-new"
           ? "Access account created. Share the temporary password securely."
-          : "Access account updated. Share the temporary password securely.",
+          : result.accountStatus === "Active"
+            ? "Access account updated. Share the temporary password securely."
+            : `Access account updated. Its ${result.accountStatus} status is unchanged; activate it separately when appropriate.`,
     };
   } catch (error) {
     if (error instanceof ZodError) {
@@ -574,96 +502,6 @@ export async function createAdminAccountAction(
       status: "error",
       message: "We could not create the admin account right now.",
     };
-  }
-}
-
-async function getAccountGroupKeys(accountId: string, database: DbExecutor = db) {
-  const rows = await database
-    .select({
-      key: authPermissionGroups.key,
-    })
-    .from(authAccountPermissionGroups)
-    .innerJoin(
-      authPermissionGroups,
-      eq(authAccountPermissionGroups.groupId, authPermissionGroups.id),
-    )
-    .where(eq(authAccountPermissionGroups.accountId, accountId));
-
-  return rows
-    .map((row: { key: string }) => row.key)
-    .filter(isAuthGroupKey);
-}
-
-async function getAccountStatus(accountId: string, database: DbExecutor = db) {
-  const [account] = await database
-    .select({
-      status: authAccounts.status,
-    })
-    .from(authAccounts)
-    .where(eq(authAccounts.id, accountId))
-    .limit(1);
-
-  if (!account) {
-    throw new Error("Account not found.");
-  }
-
-  return account.status as "PendingSetup" | "Active" | "Locked" | "Disabled";
-}
-
-async function countActiveSystemAdmins(database: DbExecutor = db) {
-  const [record] = await database
-    .select({
-      count: sql<number>`count(distinct ${authAccounts.id})::int`,
-    })
-    .from(authAccounts)
-    .innerJoin(employees, eq(authAccounts.employeeId, employees.id))
-    .innerJoin(
-      authAccountPermissionGroups,
-      eq(authAccountPermissionGroups.accountId, authAccounts.id),
-    )
-    .innerJoin(
-      authPermissionGroups,
-      eq(authAccountPermissionGroups.groupId, authPermissionGroups.id),
-    )
-    .where(
-      and(
-        eq(authAccounts.status, "Active"),
-        isNull(employees.deletedAt),
-        eq(authPermissionGroups.key, AUTH_GROUP_KEYS.SYSTEM_ADMIN),
-      ),
-    );
-
-  return Number(record?.count ?? 0);
-}
-
-async function assertNotRemovingLastSystemAdmin(args: {
-  accountId: string;
-  database: DbExecutor;
-  nextGroupKey?: AuthGroupKey;
-  nextStatus?: "Active" | "Locked" | "Disabled";
-}) {
-  const [currentStatus, currentGroupKeys, activeSystemAdminCount] =
-    await Promise.all([
-      getAccountStatus(args.accountId, args.database),
-      getAccountGroupKeys(args.accountId, args.database),
-      countActiveSystemAdmins(args.database),
-    ]);
-
-  const isActiveSystemAdmin =
-    currentStatus === "Active" &&
-    currentGroupKeys.includes(AUTH_GROUP_KEYS.SYSTEM_ADMIN);
-  const removesSystemAdminGroup =
-    args.nextGroupKey != null &&
-    args.nextGroupKey !== AUTH_GROUP_KEYS.SYSTEM_ADMIN;
-  const removesActiveStatus =
-    args.nextStatus != null && args.nextStatus !== "Active";
-
-  if (
-    isActiveSystemAdmin &&
-    activeSystemAdminCount <= 1 &&
-    (removesSystemAdminGroup || removesActiveStatus)
-  ) {
-    throw new Error("At least one active System Admin account is required.");
   }
 }
 
@@ -687,13 +525,15 @@ export async function updateAccountGroupAction(formData: FormData) {
           : "Rank and File";
 
   await db.transaction(async (tx) => {
-    await assertNotRemovingLastSystemAdmin({
+    await acquireAccountLifecycleLockTx(tx);
+    await assertAccountAccessManagerTx(tx, actor);
+    await assertNotRemovingLastSystemAdminTx({
       accountId: values.accountId,
-      database: tx,
+      tx,
       nextGroupKey: groupKey,
     });
 
-    const previousGroups = await getAccountGroupKeys(values.accountId, tx);
+    const previousGroups = (await getAccountAccessStateTx(tx, values.accountId)).groupKeys;
     await setAccountGroupsTx(tx, values.accountId, [groupKey]);
     await setManagerDepartmentsTx(
       tx,
@@ -751,13 +591,19 @@ export async function updateAccountStatusAction(formData: FormData) {
   const now = new Date();
 
   await db.transaction(async (tx) => {
-    await assertNotRemovingLastSystemAdmin({
+    await acquireAccountLifecycleLockTx(tx);
+    await assertAccountAccessManagerTx(tx, actor);
+    await assertNotRemovingLastSystemAdminTx({
       accountId: values.accountId,
-      database: tx,
+      tx,
       nextStatus: values.status,
     });
 
-    const previousStatus = await getAccountStatus(values.accountId, tx);
+    const current = await getAccountAccessStateTx(tx, values.accountId);
+    if (values.status === "Active" && current.employeeDeletedAt) {
+      throw new Error("An archived employee account cannot be activated.");
+    }
+    const previousStatus = current.account.status;
 
     await tx
       .update(authAccounts)
@@ -794,11 +640,13 @@ export async function resetAccountPasswordAction(formData: FormData) {
   const now = new Date();
 
   await db.transaction(async (tx) => {
+    await acquireAccountLifecycleLockTx(tx);
+    await assertAccountAccessManagerTx(tx, actor);
+    const current = await getAccountAccessStateTx(tx, values.accountId);
     await tx
       .update(authAccounts)
       .set({
         passwordHash,
-        status: "Active",
         mustSetPassword: true,
         lastLoginAt: null,
         updatedAt: now,
@@ -814,6 +662,7 @@ export async function resetAccountPasswordAction(formData: FormData) {
       action: "account_password_reset",
       details: {
         method: "temporary_password",
+        accountStatus: current.account.status,
       },
       database: tx,
     });
@@ -828,6 +677,8 @@ export async function revokeAccountSessionsAction(formData: FormData) {
   const now = new Date();
 
   await db.transaction(async (tx) => {
+    await acquireAccountLifecycleLockTx(tx);
+    await assertAccountAccessManagerTx(tx, actor);
     await tx
       .update(authSessions)
       .set({ revokedAt: now })

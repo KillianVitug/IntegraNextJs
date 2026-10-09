@@ -20,7 +20,8 @@ import {
   shiftScheduleEnum,
   taxStatusEnum,
 } from "@/db/schema";
-import { syncLinkedAccountEmailTx } from "@/lib/auth/server";
+import { requireAdmin, syncLinkedAccountEmailTx } from "@/lib/auth/server";
+import { acquireAccountLifecycleLockTx, assertAccountAdminTx, assertEmployeeConfidentialityChangeTx } from "@/lib/auth/lifecycle";
 import { DEFAULT_EMPLOYEE_TYPE } from "@/utils/employeeCode";
 import { InvalidEmployeeNoError, normalizeEmployeeNoForSave } from "@/utils/employeeNo";
 
@@ -230,6 +231,7 @@ export function parseCsv(buffer: Buffer): RawCsvRow[] {
 export async function importEmployeesFromCsv(
   rows: RawCsvRow[],
 ): Promise<EmployeeCsvImportResult> {
+  const actor = await requireAdmin();
   const importRows = normalizeAndValidateRows(rows);
 
   const summary: EmployeeCsvImportSummary = {
@@ -241,6 +243,8 @@ export async function importEmployeesFromCsv(
   };
 
   await db.transaction(async (tx) => {
+    await acquireAccountLifecycleLockTx(tx);
+    await assertAccountAdminTx(tx, actor);
     const lookups = await buildLookupMaps(tx);
     const employeeNos = importRows.map((row) => row.employeeNo);
     const existingEmployees = await tx
@@ -279,6 +283,10 @@ export async function importEmployeesFromCsv(
       const departmentId = await resolveDepartmentId(tx, row, lookups, summary);
       const positionId = await resolvePositionId(tx, row, lookups, summary);
 
+      if (row.confidentialityLevel !== undefined) {
+        await assertEmployeeConfidentialityChangeTx(tx, employeeId,
+          row.confidentialityLevel as (typeof confidentialityLevelEnum.enumValues)[number]);
+      }
       await upsertEmployeeOwnedRow(tx, employeesGeneralInfo, employeeId, {
         ...pickDefined(row, [
           "dateHired",

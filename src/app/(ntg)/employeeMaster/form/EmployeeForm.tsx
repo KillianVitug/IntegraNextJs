@@ -41,7 +41,7 @@ import {
 } from "@/zod-schemas/employeeRecurringEntries";
 import type { EmployeeSalaryTabView } from "@/zod-schemas/employeeSalary";
 import { saveEmployeeAction } from "@/app/actions/saveEmployeeAction";
-import { archiveEmployeeAction } from "@/app/actions/archiveEmployeeAction";
+import ArchiveEmployeeButton from "./ArchiveEmployeeButton";
 // import { SaveEmployeeSuccess } from "@/types/employeeResults";
 import SalaryHistoryModal from "@/components/modal/SalaryHistoryModal";
 import { formatRateDisplay } from "@/lib/number";
@@ -293,11 +293,6 @@ export default function EmployeeForm({
     reset: resetSaveAction,
   } = useAction(saveEmployeeAction);
   
-  const { 
-    execute: executeArchive, 
-    isPending: isArchiving
-  } = useAction(archiveEmployeeAction);
-
   async function submitForm(data: InsertEmployeeSchemaType) {
   setHasSubmitted(true);  // Mark that user submitted
   const salaryPayload: InsertEmployeeSchemaType["salary"] | undefined =
@@ -622,22 +617,7 @@ async function handleCsvUpload(file: File) {
               </Button>
 
               {employee?.id && (
-                <Button
-                  type="button"
-                  variant="destructive"
-                  className="col-span-4 leading-none"
-                  disabled={isArchiving}
-                  onClick={async () => {
-                    if (!confirm("Archive this employee?")) return;
-                    await executeArchive(employee.id);
-                    router.refresh();
-                    router.push("/employeeMaster");
-                  }}
-                >
-                  {isArchiving ? "Archiving..." : "Archive Employee"}
-                </Button>
-                
-                
+                <ArchiveEmployeeButton employeeId={employee.id} disabled={isSaving} />
               )}
 
               {!employee?.id && (

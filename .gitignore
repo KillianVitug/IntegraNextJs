@@ -47,3 +47,8 @@ next-env.d.ts
 
 # Private attendance test credentials and reports
 /.attendance-test/
+
+# Employee bytes are served by authenticated routes, never as public uploads.
+/public/uploads/
+# Historical source bytes are retained only in the private local release archive.
+/private/employee-files/

@@ -9,6 +9,8 @@ import { employees } from "@/db/schema";
 import { actionClient } from "@/lib/safe-action";
 import { recordAdminAuditEvent, requireAdminActor } from "@/lib/admin";
 import { DELETE_EMPLOYEE_MASTER_DATA_CONFIRMATION } from "@/constants/employeeMasterData";
+import { requireAdmin } from "@/lib/auth/server";
+import { acquireAccountLifecycleLockTx, assertAccountAdminTx, countActiveEffectiveSystemAdminsTx } from "@/lib/auth/lifecycle";
 
 const employeeMasterDataPath = "/constants/dataMenu/employeeMasterData";
 
@@ -33,19 +35,26 @@ export const deleteAllRegularEmployeesAction = actionClient
     })
   )
   .action(async () => {
-    const actor = await requireAdminActor();
+    const actor = await requireAdmin();
     let deletedCount = 0;
 
     await db.transaction(async (tx) => {
+      await acquireAccountLifecycleLockTx(tx);
+      await assertAccountAdminTx(tx, actor);
+      const previousAdminCount = await countActiveEffectiveSystemAdminsTx(tx);
+      if (previousAdminCount > 0 && await countActiveEffectiveSystemAdminsTx(tx, "ADMIN") === 0) {
+        throw new Error("At least one active System Admin account is required.");
+      }
       const deletedRows = await tx
         .delete(employees)
         .where(eq(employees.employeeType, "EMP"))
         .returning({ id: employees.id });
 
+
       deletedCount = deletedRows.length;
 
       await recordAdminAuditEvent({
-        actorUserId: actor.userId,
+        actorUserId: actor.accountId,
         entityType: "employee_master_data",
         entityId: "EMP",
         action: "employee_master_data.delete_all_regular_employees",

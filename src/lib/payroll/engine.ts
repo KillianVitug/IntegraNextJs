@@ -3454,11 +3454,13 @@ export async function createOrRecomputePayrollRun(
     payrollTerms: "Semi-Monthly",
   });
 
-  const calculator = await loadPayrollCalculation(period, selectedGroup);
-  const { computations, eligibleEmployees, payouts, priorPaid, shortfallLedger, inputSnapshot } = await calculator.calculate();
   return db.transaction(async (tx) => {
     await lockAttendancePayrollInput(tx);
     if(request){const receipt=await findComputeReceipt(actorUserId,request,tx);if(receipt)return tx.query.payrollRuns.findFirst({where:eq(payrollRuns.id,receipt.runId),with:{payrollPeriod:true,employees:{with:{lines:true}}}});}
+    // Read and calculate under the same lock as manager input saves and payroll
+    // transitions. An earlier calculation must not overwrite a newer input save.
+    const calculator = await loadPayrollCalculation(period, selectedGroup, tx);
+    const { computations, eligibleEmployees, payouts, priorPaid, shortfallLedger, inputSnapshot } = await calculator.calculate();
     if(selectedGroup==="Daily")await confirmAttendanceSourcePayrollInput(tx, payrollPeriodId, attendanceSourceInput);
     const currentShortfalls = await loadShortfallBalances(computations.map(row => row.employeeId), period.startDate, tx);
     if (currentShortfalls.digest !== shortfallLedger.digest) throw new PayrollValidationError("Shortfall balances changed during calculation. Recompute to use the latest balances.");

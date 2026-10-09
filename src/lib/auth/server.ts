@@ -24,6 +24,7 @@ import {
   hashValue,
   normalizeEmail,
   normalizeOptionalEmail,
+  verifyPassword,
 } from "@/lib/auth/crypto";
 import { sendAdminInviteEmail } from "@/lib/auth/mailer";
 import { issueOnboardingOtp } from "@/lib/auth/onboarding";
@@ -39,6 +40,11 @@ import {
   isAuthGroupKey,
 } from "@/lib/auth/permissions";
 import { currentDepartmentMemberStatusCondition } from "@/lib/employmentStatus";
+import {
+  acquireAccountLifecycleLockTx,
+  assertNotRemovingLastSystemAdminTx,
+  getAccountAccessStateTx,
+} from "@/lib/auth/lifecycle";
 export {
   assignDefaultAccountGroupTx,
   ensureDefaultPermissionGroupsTx,
@@ -102,8 +108,8 @@ function formatInviteEmailResult(emailFailed: boolean) {
     : "Invite created and emailed.";
 }
 
-async function listAssignedGroupKeys(accountId: string) {
-  const rows = await db
+async function listAssignedGroupKeys(accountId: string, database: DbClient = db) {
+  const rows = await database
     .select({
       key: authPermissionGroups.key,
     })
@@ -349,14 +355,22 @@ export async function assertManagerCanAccessEmployee(args: {
   return true;
 }
 
-export async function createSession(accountId: string) {
+export async function createSessionTx(tx: DbClient, accountId: string, expectedPasswordHash?: string) {
+  await acquireAccountLifecycleLockTx(tx);
   const now = new Date();
   const expiresAt = addDays(now, authConfig.sessionTtlDays);
   const rawToken = createOpaqueToken(32);
   const sessionTokenHash = hashValue(rawToken);
   const headerStore = await headers();
 
-  await db.insert(authSessions).values({
+  const current = await getAccountAccessStateTx(tx, accountId);
+  if (current.account.status !== "Active" || current.employeeDeletedAt
+    || current.account.mustSetPassword
+    || (expectedPasswordHash != null && current.account.passwordHash !== expectedPasswordHash)
+    || !getAppRoleForGroups(current.groupKeys)) {
+    throw new Error("This account is no longer eligible to sign in. Please sign in again.");
+  }
+  await tx.insert(authSessions).values({
     accountId,
     sessionTokenHash,
     expiresAt,
@@ -364,8 +378,45 @@ export async function createSession(accountId: string) {
     ipAddress: headerStore.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null,
     userAgent: headerStore.get("user-agent"),
   });
+  return { rawToken, expiresAt };
+}
 
-  await setSessionCookie(rawToken, expiresAt);
+export async function setCreatedSessionCookie(session: { rawToken: string; expiresAt: Date }) {
+  await setSessionCookie(session.rawToken, session.expiresAt);
+}
+
+export async function createSession(accountId: string, expectedPasswordHash?: string) {
+  const session = await db.transaction((tx) => createSessionTx(tx, accountId, expectedPasswordHash));
+  await setCreatedSessionCookie(session);
+}
+
+export async function signInWithPassword(email: string, password: string, allowPasswordSetup = true) {
+  const candidate = await findAuthAccountByEmail(email);
+  if (!candidate || candidate.status !== "Active" || !candidate.passwordHash
+    || (!allowPasswordSetup && candidate.mustSetPassword)) return null;
+  const candidatePasswordHash = candidate.passwordHash;
+  // Password verification is deliberately outside the shared lifecycle lock;
+  // only an unchanged credential may proceed once current eligibility is checked.
+  if (!await verifyPassword(password, candidatePasswordHash)) return null;
+
+  const result = await db.transaction(async (tx) => {
+    await acquireAccountLifecycleLockTx(tx);
+    const account = await findAuthAccountByEmail(email, tx);
+    if (!account || account.id !== candidate.id || account.status !== "Active"
+      || account.passwordHash !== candidatePasswordHash
+      || (!allowPasswordSetup && account.mustSetPassword)) return null;
+    const role = await getRoleForAccount(account.id, tx);
+    if (!role) return null;
+    if (account.mustSetPassword) {
+      const setupToken = await createPasswordSetupTokenTx(tx, account.id);
+      return { role, email: account.email, setupToken, session: null };
+    }
+    await tx.update(authAccounts).set({ lastLoginAt: new Date() }).where(eq(authAccounts.id, account.id));
+    const session = await createSessionTx(tx, account.id, candidatePasswordHash);
+    return { role, email: account.email, setupToken: null, session };
+  });
+  if (result?.session) await setCreatedSessionCookie(result.session);
+  return result ? { role: result.role, email: result.email, setupToken: result.setupToken } : null;
 }
 
 export async function logout() {
@@ -402,8 +453,8 @@ export async function revokeAccountArtifactsTx(
     .where(eq(authPasswordSetupTokens.accountId, accountId));
 }
 
-export async function getRoleForAccount(accountId: string): Promise<AppRole> {
-  const [record] = await db
+export async function getRoleForAccount(accountId: string, database: DbClient = db): Promise<AppRole> {
+  const [record] = await database
     .select({
       confidentialityLevel: employeesGeneralInfo.confidentialityLevel,
       employeeDeletedAt: employees.deletedAt,
@@ -419,7 +470,7 @@ export async function getRoleForAccount(accountId: string): Promise<AppRole> {
   }
 
   const groupKeys = withFallbackGroup(
-    await listAssignedGroupKeys(accountId),
+    await listAssignedGroupKeys(accountId, database),
     record.confidentialityLevel,
   );
 
@@ -468,6 +519,7 @@ export async function syncLinkedAccountEmailTx(
 }
 
 export async function disableLinkedAccountTx(tx: DbClient, employeeId: string) {
+  await acquireAccountLifecycleLockTx(tx);
   const account = await tx.query.authAccounts.findFirst({
     where: eq(authAccounts.employeeId, employeeId),
     columns: {
@@ -478,6 +530,13 @@ export async function disableLinkedAccountTx(tx: DbClient, employeeId: string) {
   if (!account) {
     return;
   }
+
+  await assertNotRemovingLastSystemAdminTx({
+    tx,
+    accountId: account.id,
+    nextStatus: "Disabled",
+    nextEmployeeArchived: true,
+  });
 
   const now = new Date();
 
@@ -492,16 +551,16 @@ export async function disableLinkedAccountTx(tx: DbClient, employeeId: string) {
   await revokeAccountArtifactsTx(tx, account.id, now);
 }
 
-export async function findAuthAccountByEmail(email: string) {
-  return db.query.authAccounts.findFirst({
+export async function findAuthAccountByEmail(email: string, database: DbClient = db) {
+  return database.query.authAccounts.findFirst({
     where: eq(authAccounts.email, normalizeEmail(email)),
   });
 }
 
-export async function findEmployeeClaimByEmail(email: string) {
+export async function findEmployeeClaimByEmail(email: string, database: DbClient = db) {
   const normalizedEmail = normalizeEmail(email);
 
-  const [record] = await db
+  const [record] = await database
     .select({
       employeeId: employees.id,
       employeeNo: employees.employeeNo,
@@ -576,54 +635,66 @@ export async function verifyOnboardingOtp(email: string, otp: string) {
   return { account, error: null };
 }
 
-export async function createPasswordSetupToken(accountId: string) {
+async function createPasswordSetupTokenTx(tx: DbClient, accountId: string) {
+  await acquireAccountLifecycleLockTx(tx);
   const rawToken = createOpaqueToken(24);
   const now = new Date();
   const expiresAt = addMinutes(now, authConfig.setupTtlMinutes);
 
-  await db.transaction(async (tx) => {
-    await tx
-      .delete(authPasswordSetupTokens)
-      .where(eq(authPasswordSetupTokens.accountId, accountId));
+  const current = await getAccountAccessStateTx(tx, accountId);
+  if (current.employeeDeletedAt || current.account.status !== "Active"
+    || !getAppRoleForGroups(current.groupKeys)) {
+    throw new Error("This account is no longer eligible for password setup.");
+  }
+  await tx
+    .delete(authPasswordSetupTokens)
+    .where(eq(authPasswordSetupTokens.accountId, accountId));
 
-    await tx.insert(authPasswordSetupTokens).values({
-      accountId,
-      tokenHash: hashValue(rawToken),
-      expiresAt,
-    });
+  await tx.insert(authPasswordSetupTokens).values({
+    accountId,
+    tokenHash: hashValue(rawToken),
+    expiresAt,
   });
-
   return rawToken;
+}
+
+export async function createPasswordSetupToken(accountId: string) {
+  return db.transaction((tx) => createPasswordSetupTokenTx(tx, accountId));
 }
 
 export async function consumePasswordSetupToken(
   email: string,
   rawToken: string,
+  tx: DbClient,
 ) {
-  const account = await findAuthAccountByEmail(email);
+  await acquireAccountLifecycleLockTx(tx);
+  const account = await findAuthAccountByEmail(email, tx);
   if (!account) {
     return { account: null, error: "The password setup link is invalid or expired." };
   }
 
+  const current = await getAccountAccessStateTx(tx, account.id);
+  if (current.employeeDeletedAt
+    || (account.status !== "Active" && account.status !== "PendingSetup")) {
+    return { account: null, error: "The password setup link is invalid or expired." };
+  }
+
   const now = new Date();
-  const tokenRecord = await db.query.authPasswordSetupTokens.findFirst({
-    where: and(
+  // Consume within the same transaction as the password change. RETURNING and
+  // the unused/expiry predicates make a repeated token fail even under races.
+  const [tokenRecord] = await tx.update(authPasswordSetupTokens)
+    .set({ usedAt: now })
+    .where(and(
       eq(authPasswordSetupTokens.accountId, account.id),
       eq(authPasswordSetupTokens.tokenHash, hashValue(rawToken)),
       isNull(authPasswordSetupTokens.usedAt),
       gt(authPasswordSetupTokens.expiresAt, now),
-    ),
-    orderBy: [desc(authPasswordSetupTokens.createdAt)],
-  });
+    ))
+    .returning({ id: authPasswordSetupTokens.id });
 
   if (!tokenRecord) {
     return { account: null, error: "The password setup link is invalid or expired." };
   }
-
-  await db
-    .update(authPasswordSetupTokens)
-    .set({ usedAt: now })
-    .where(eq(authPasswordSetupTokens.id, tokenRecord.id));
 
   return { account, error: null };
 }

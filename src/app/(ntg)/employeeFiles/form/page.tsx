@@ -4,6 +4,7 @@ import { PageHeader } from "@/components/layout/page-layout";
 import FileForm from "@/app/(ntg)/employeeFiles/form/EmployeeFileForm";
 import EmployeeFileFormTable from "./EmployeeFileFormTable";
 import { getActiveEmployees } from "@/app/actions/employeeAction";
+import { currentDocumentActor } from "@/lib/employee-documents/http";
 
 export async function generateMetadata({
     searchParams,
@@ -23,7 +24,7 @@ export default async function EmployeeFilePage({
     searchParams: Promise<{ [key: string]: string | undefined }>;
 }) {
     try {
-
+        await currentDocumentActor();
         const employees = await getActiveEmployees();
         const { groupId } = await searchParams;
         let employeeFile = undefined;
