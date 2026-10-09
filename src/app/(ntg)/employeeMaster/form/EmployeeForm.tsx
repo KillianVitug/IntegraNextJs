@@ -1,6 +1,6 @@
 "use client";
 
-import { FormProvider, useForm } from "react-hook-form";
+import { FormProvider, useForm, type FieldErrors } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useRouter } from "next/navigation";
 // import { Form } from "@/components/ui/form";
@@ -40,6 +40,7 @@ import {
   type EmployeeRecurringEntryFormType,
 } from "@/zod-schemas/employeeRecurringEntries";
 import type { EmployeeSalaryTabView } from "@/zod-schemas/employeeSalary";
+import type { EmployeeAccountAccessData } from "@/lib/auth/employee-access-types";
 import { saveEmployeeAction } from "@/app/actions/saveEmployeeAction";
 import ArchiveEmployeeButton from "./ArchiveEmployeeButton";
 // import { SaveEmployeeSuccess } from "@/types/employeeResults";
@@ -68,6 +69,8 @@ type Props = {
   slvlGroups: { id: number; name: string }[];
   nextEmployeeNo?: string;
   canManageEmployeeType: boolean;
+  canManageAccess?: boolean;
+  initialEmployeeType?: "EMP" | "ADMIN";
   customPayrollCodes: {
     id: number;
     code: string;
@@ -129,6 +132,8 @@ export default function EmployeeForm({
   slvlGroups,
   nextEmployeeNo,
   canManageEmployeeType,
+  canManageAccess = false,
+  initialEmployeeType = DEFAULT_EMPLOYEE_TYPE,
   customPayrollCodes,
   recurringEntries,
   recurringAccountCodeOptions,
@@ -137,11 +142,16 @@ export default function EmployeeForm({
   const router = useRouter();
   const searchParams = useSearchParams();
   const hasEmployeeId = searchParams.has("employeeId");
-  const [saveMode, setSaveMode] = useState<"normal" | "new">("normal");
+  const [saveMode, setSaveMode] = useState<"normal" | "new" | "access">("normal");
+  const [activeTab, setActiveTab] = useState(searchParams.get("tab") === "access" && canManageAccess ? "access" : "general");
   const [hasSubmitted, setHasSubmitted] = useState(false);
+  const [accessSaveError, setAccessSaveError] = useState<string | null>(null);
+  const [accountPending, setAccountPending] = useState(false);
+  const [accessRefreshKey, setAccessRefreshKey] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const hasInitializedEmployeeTypePreviewRef = useRef(false);
+  const initializedEmployeeIdRef = useRef<string | null>(null);
   const [isImporting, setIsImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const isCreateMode = !employee?.id;
@@ -151,7 +161,7 @@ export default function EmployeeForm({
   
   const emptyValues = useMemo<InsertEmployeeSchemaType>(
     () => ({
-      employeeType: defaultEmployeeValues.employeeType,
+      employeeType: initialEmployeeType,
       employeeNo: nextEmployeeNo,
       firstName: defaultEmployeeValues.firstName,
       lastName: defaultEmployeeValues.lastName,
@@ -164,7 +174,7 @@ export default function EmployeeForm({
       timekeeping: defaultTimekeeping,
       recurringEntries: [],
     }),
-    [nextEmployeeNo]
+    [initialEmployeeType, nextEmployeeNo]
   );
 
   const defaultValues = useMemo<InsertEmployeeSchemaType>(
@@ -284,6 +294,8 @@ export default function EmployeeForm({
     defaultValues,
   });
   const selectedEmployeeType = form.watch("employeeType") ?? DEFAULT_EMPLOYEE_TYPE;
+  // Subscribe to dirty fields so keepDirtyValues also covers unmounted tabs.
+  const employeeDirty = form.formState.isDirty || Object.keys(form.formState.dirtyFields).length > 0;
 
 
   const {
@@ -316,6 +328,10 @@ export default function EmployeeForm({
 }
 
 useEffect(() => {
+  if (searchParams.get("tab") === "access" && canManageAccess) setActiveTab("access");
+}, [canManageAccess, searchParams]);
+
+useEffect(() => {
   const valuesToReset = hasEmployeeId ? defaultValues : emptyValues;
   // Format salary fields for display
   const formattedSalary = valuesToReset.salary
@@ -334,21 +350,14 @@ useEffect(() => {
         ),
       }
     : defaultSalary;
+  const identity = employee?.id ?? "new";
+  const preserveEdits = initializedEmployeeIdRef.current === identity;
   form.reset({
     ...valuesToReset,
     salary: formattedSalary,
-  });
-}, [defaultValues, emptyValues, form, hasEmployeeId, selectedEmployeeIdParam]);
-
-useEffect(() => {
-  if (!employee?.id && nextEmployeeNo) {
-    form.reset({
-      ...emptyValues,
-      employeeType: selectedEmployeeType,
-      employeeNo: nextEmployeeNo,
-    });
-  }
-}, [employee?.id, emptyValues, form, nextEmployeeNo, selectedEmployeeType]);
+  }, { keepDirtyValues: preserveEdits });
+  initializedEmployeeIdRef.current = identity;
+}, [defaultValues, emptyValues, employee?.id, form, hasEmployeeId, selectedEmployeeIdParam]);
 
 useEffect(() => {
   if (!isCreateMode) return;
@@ -402,6 +411,17 @@ useEffect(() => {
     router.push("/employeeMaster");
   }
 
+  if (saveMode === "access") {
+    const savedId = actionData.data.employeeId;
+    form.reset(form.getValues());
+    resetSaveAction();
+    setSaveMode("normal");
+    setActiveTab("access");
+    setAccessRefreshKey((current) => current + 1);
+    router.push(`/employeeMaster/form?employeeId=${savedId}&tab=access`);
+    router.refresh();
+  }
+
   if (saveMode === "new") {
     (async () => {
       const employeeType = form.getValues("employeeType") ?? DEFAULT_EMPLOYEE_TYPE;
@@ -421,6 +441,30 @@ useEffect(() => {
 
   setHasSubmitted(false);
 }, [emptyValues, form, hasSubmitted, resetSaveAction, router, saveMode, saveResult]);
+
+function saveEmployeeAndContinue() {
+  setAccessSaveError(null);
+  setSaveMode("access");
+  void form.handleSubmit(submitForm, showEmployeeErrors)();
+}
+
+function showEmployeeErrors(errors: FieldErrors<InsertEmployeeSchemaType>) {
+  setActiveTab(errors.otherReferences ? "references" : errors.salary ? "salary" : errors.timekeeping ? "timekeeping" : "general");
+  setAccessSaveError("Check the highlighted employee fields, then save again.");
+}
+
+function handleAccessSaved(data: EmployeeAccountAccessData) {
+  // Role assignment deliberately updates this employee field. Refresh its form
+  // default without reloading or discarding any other employee inputs.
+  const savedDefaults = form.formState.defaultValues as InsertEmployeeSchemaType;
+  form.reset({
+    ...savedDefaults,
+    generalInfo: {
+      ...savedDefaults.generalInfo,
+      confidentialityLevel: data.employee.confidentialityLevel,
+    },
+  }, { keepDirtyValues: true });
+}
 
 async function handleCsvUpload(file: File) {
   try {
@@ -463,6 +507,7 @@ async function handleCsvUpload(file: File) {
       <SalaryHistoryModal />
       <div className="space-y-4">
         <DisplayServerActionResponse result={saveResult} />
+        {accessSaveError && <p role="alert" className="text-sm text-destructive">{accessSaveError}</p>}
         <PageHeader
           title={`${employee?.id ? "Edit" : "New"} Employee ${
             employee?.id ? `#${employee.id}` : "Form"
@@ -470,11 +515,10 @@ async function handleCsvUpload(file: File) {
         />
 
         <form
-          onSubmit={form.handleSubmit(submitForm, (errors) =>
-            console.log("Form validation errors:", errors)
-          )}
+          onSubmit={form.handleSubmit(submitForm, showEmployeeErrors)}
           className="mb-4"
         >
+          <fieldset disabled={accountPending || isSaving} className="min-w-0">
           <FormGrid columns={3}>
           <div className="flex w-full min-w-0 flex-col gap-3">
             <FormField
@@ -484,7 +528,7 @@ async function handleCsvUpload(file: File) {
                 <FormItem>
                   <FormLabel>Employee No</FormLabel>
                   <div className="flex items-start gap-2">
-                    <div className="w-[78%]">
+                    <div className="min-w-0 flex-1">
                       <FormControl>
                         <Input
                           {...field}
@@ -493,7 +537,7 @@ async function handleCsvUpload(file: File) {
                         />
                       </FormControl>
                     </div>
-                    <div className="w-[22%] min-w-[96px]">
+                    <div className="w-24 shrink-0">
                       <FormField
                         control={form.control}
                         name="employeeType"
@@ -580,10 +624,10 @@ async function handleCsvUpload(file: File) {
               )}
             </div> */}
             {/* BUTTONS */}
-            <div className="grid grid-cols-4 gap-x-2 gap-y-2">
+            <div className="grid grid-cols-4 gap-2">
               <Button
                 type="submit"
-                className="col-span-2 leading-none"
+                className="col-span-4 leading-none sm:col-span-2"
                 disabled={isSaving}
                 onClick={() => setSaveMode("normal")}
               >
@@ -598,19 +642,22 @@ async function handleCsvUpload(file: File) {
 
               <Button
                 type="button"
-                variant="destructive"
+                variant="outline"
+                className="col-span-2 whitespace-normal sm:col-span-1"
+                disabled={isSaving}
                 onClick={() => {
                   form.reset();   // 👈 resets but keeps employeeNo
                   resetSaveAction();
+                  setAccessSaveError(null);
                 }}
               >
-                Reset
+                Reset form
               </Button>
 
               <Button
                 type="button"
                 variant="outline"
-                className="leading-none"
+                className="col-span-2 leading-none sm:col-span-1"
                 onClick={() => router.back()}
               >
                 Back
@@ -618,6 +665,18 @@ async function handleCsvUpload(file: File) {
 
               {employee?.id && (
                 <ArchiveEmployeeButton employeeId={employee.id} disabled={isSaving} />
+              )}
+
+              {!employee?.id && canManageAccess && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="col-span-full"
+                  disabled={isSaving}
+                  onClick={saveEmployeeAndContinue}
+                >
+                  Save & set up login
+                </Button>
               )}
 
               {!employee?.id && (
@@ -672,8 +731,10 @@ async function handleCsvUpload(file: File) {
             </div>
           </div>
           </FormGrid>
+          </fieldset>
         </form>
         <div className="flex-grow overflow-auto">
+          <fieldset disabled={isSaving} className="min-w-0">
           <TabsSection
             employee={employee}
             departments={departments}
@@ -683,7 +744,18 @@ async function handleCsvUpload(file: File) {
             recurringEntries={recurringEntries}
             recurringAccountCodeOptions={recurringAccountCodeOptions}
             salaryTabView={salaryTabView}
+            canManageAccess={canManageAccess}
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            employeeDirty={employeeDirty}
+            isSaving={isSaving}
+            onSaveEmployee={saveEmployeeAndContinue}
+            onAccessSaved={handleAccessSaved}
+            accountPending={accountPending}
+            onAccountPendingChange={setAccountPending}
+            accessRefreshKey={accessRefreshKey}
           />
+          </fieldset>
         </div>
       </div>
     </FormProvider>

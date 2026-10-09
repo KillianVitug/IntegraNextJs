@@ -13,7 +13,8 @@ import {
 import { getNextEmployeeNoPreview } from "@/lib/queries/getNextEmployeeNoPreview";
 import { getRecurringEntriesByEmployee } from "@/app/actions/recurrigEntryAction";
 import { getEmployeeSalaryTabView } from "@/lib/payroll/salaryResolver";
-import { requireAdmin } from "@/lib/auth/server";
+import { hasPermission, requireAdmin } from "@/lib/auth/server";
+import { AUTH_PERMISSIONS } from "@/lib/auth/permissions";
 import type { EmployeeRecurringAccountCodeOption } from "@/zod-schemas/employeeRecurringEntries";
 import {
     DEFAULT_EMPLOYEE_TYPE,
@@ -39,11 +40,13 @@ export default async function EmployeeFormPage({
 }) {
     try {
         const auth = await requireAdmin();
-        const { employeeId } = await searchParams;
+        const { employeeId, employeeType } = await searchParams;
+        const canManageEmployeeType = isManagerialConfidentialityLevel(auth.confidentialityLevel);
+        const initialEmployeeType = canManageEmployeeType && employeeType === "ADMIN" ? "ADMIN" : DEFAULT_EMPLOYEE_TYPE;
         let employee = undefined;
         let salaryTabView = null;
         const nextEmployeeNo = !employeeId
-            ? await getNextEmployeeNoPreview(DEFAULT_EMPLOYEE_TYPE)
+            ? await getNextEmployeeNoPreview(initialEmployeeType)
             : undefined;
 
         if (employeeId) {
@@ -103,7 +106,9 @@ export default async function EmployeeFormPage({
                         positions={positions} 
                         slvlGroups={slvlGroups} 
                         nextEmployeeNo={nextEmployeeNo} 
-                        canManageEmployeeType={isManagerialConfidentialityLevel(auth.confidentialityLevel)}
+                        canManageEmployeeType={canManageEmployeeType}
+                        canManageAccess={hasPermission(auth, AUTH_PERMISSIONS.ACCESS_MANAGE)}
+                        initialEmployeeType={initialEmployeeType}
                         customPayrollCodes={customPayrollCodes}
                         recurringEntries={recurringEntries}
                         recurringAccountCodeOptions={recurringAccountCodeOptions}

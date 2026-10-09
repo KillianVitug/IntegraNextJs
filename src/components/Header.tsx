@@ -102,17 +102,12 @@ export async function Header() {
             label="Settings"
             aria-label="Settings Menu"
             choices={[
+              ...(canManageAccess
+                ? [{ title: "Users & access", href: "/access-management" }]
+                : []),
               {
                 title: "General Codes Menu",
                 children: [
-                  ...(canManageAccess
-                    ? [
-                        {
-                          title: "Access Management",
-                          href: "/access-management",
-                        },
-                      ]
-                    : []),
                   {
                     title: "Account Codes",
                     href: "/constants/accountCode/form",

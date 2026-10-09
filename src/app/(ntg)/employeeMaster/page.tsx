@@ -3,6 +3,8 @@ import EmployeeTable from "@/app/(ntg)/employeeMaster/EmployeeTable";
 import { PageHeader } from "@/components/layout/page-layout";
 import { getOpenEmployees } from "@/lib/queries/getEmployee";
 import { parseTableQueryParams } from "@/lib/queries/tableQuery";
+import { hasPermission, requireAdmin } from "@/lib/auth/server";
+import { AUTH_PERMISSIONS } from "@/lib/auth/permissions";
 
 export const metadata = {
     title: "Employee Master",
@@ -16,6 +18,8 @@ export default async function EmployeeMaster({
 }: {
     searchParams: Promise<{ [key: string]: string | undefined }>;
 }) {
+    const auth = await requireAdmin();
+    const canManageAccess = hasPermission(auth, AUTH_PERMISSIONS.ACCESS_MANAGE);
     const params = await searchParams;
     const query = parseTableQueryParams(params, { id: "employeeNo", desc: false });
     const showAdmin = params[SHOW_ADMIN_PARAM] === "true";
@@ -42,7 +46,7 @@ export default async function EmployeeMaster({
                 ? (
                     <>
                         {!data.length ? <p className="mt-4">No results found.</p> : null}
-                        <EmployeeTable data={data} total={total} pageSize={PAGE_SIZE} />
+                        <EmployeeTable data={data} total={total} pageSize={PAGE_SIZE} canManageAccess={canManageAccess} />
                     </>
                 )
                 : <p className="mt-4">No employee found</p>

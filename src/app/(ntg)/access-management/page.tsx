@@ -1,18 +1,15 @@
 import { AccessManagementClient } from "./AccessManagementClient";
 import { listAccountAccessRows, requirePermission } from "@/lib/auth/server";
 import { AUTH_PERMISSIONS } from "@/lib/auth/permissions";
-import { fetchDepartments } from "@/lib/queries/fetchLookupData";
+import { isManagerialConfidentialityLevel } from "@/utils/employeeCode";
 
 export const metadata = {
-  title: "Access Management",
+  title: "Users & access",
 };
 
 export default async function AccessManagementPage() {
-  await requirePermission(AUTH_PERMISSIONS.ACCESS_MANAGE, { redirectTo: "/" });
-  const [accountRows, departments] = await Promise.all([
-    listAccountAccessRows(),
-    fetchDepartments(),
-  ]);
+  const auth = await requirePermission(AUTH_PERMISSIONS.ACCESS_MANAGE, { redirectTo: "/" });
+  const accountRows = await listAccountAccessRows();
   const accounts = accountRows.map((account) => ({
       ...account,
       createdAt: account.createdAt.toISOString(),
@@ -22,19 +19,12 @@ export default async function AccessManagementPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-semibold tracking-tight">Access Management</h1>
+        <h1 className="text-3xl font-semibold tracking-tight">Users &amp; access</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Manage account groups, lifecycle status, sessions, and password resets.
+          Find a login account, then manage access and passwords on the employee record.
         </p>
       </div>
-      <AccessManagementClient
-        accounts={accounts}
-        departments={departments.map((department) => ({
-          id: department.id,
-          code: department.code,
-          name: department.name,
-        }))}
-      />
+      <AccessManagementClient accounts={accounts} canCreateAdministrator={isManagerialConfidentialityLevel(auth.confidentialityLevel)} />
     </div>
   );
 }

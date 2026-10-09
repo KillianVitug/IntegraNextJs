@@ -200,7 +200,7 @@ export async function claimEmployeeAccountAction(
     const values = claimEmployeeAccountSchema.parse(formDataToValues(formData));
     const normalizedEmail = normalizeEmail(values.email);
     const genericClaimMessage =
-      "If the email is eligible, the account claim has been submitted. A System Admin can provide the temporary password from Access Management.";
+      "If the email is eligible, the account claim has been submitted. A System Admin can provide the temporary password from Users & access.";
 
     await db.transaction(async (tx) => {
       await acquireAccountLifecycleLockTx(tx);
