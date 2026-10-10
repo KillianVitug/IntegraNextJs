@@ -9,17 +9,18 @@ import { loadPayrollCalculation, type EmployeePayrollComputation } from "./engin
 import { loadEffectiveAttendanceCorrections, loadEffectiveAttendanceInputSet, attendanceInputForDay, mapEffectiveAttendanceCorrections } from "./effectiveAttendanceInputs";
 import { buildAttendancePeriodDetailRows, buildAttendanceSummaryComputations } from "./attendanceSync";
 import { resolveEmployeeScheduleForDate, isResolvedScheduleRestDay } from "./scheduleResolver";
-import { calculateGeneratedDtrRows, GENERATED_DTR_OVERRIDE_SOURCES } from "./generatedDtrCalculation";
+import { applyAttendanceDtrMetricOverride, calculateGeneratedDtrRows, GENERATED_DTR_OVERRIDE_SOURCES } from "./generatedDtrCalculation";
 import { buildLeaveTypeMapByCode, resolveLeavePayStatus } from "./leave";
 import { earningMonth, monthRange, payrollGroup, runPayrollGroup } from "./payrollGroupModel";
 import { loadEmployeeDepartmentMetadataByEmployeeId } from "./employeeDepartment";
 import { isPayrollEligibleEmploymentStatus } from "@/lib/employmentStatus";
 import { sourceDayOffset } from "./attendanceSourceClient";
-import { normalizeAttendanceDtrAnomalyFlags } from "./dtrOverrides";
+import { applyAttendanceDtrEffectiveStatus, computePolicyAttendancePay, normalizeAttendanceDtrAnomalyFlags, type AttendanceDtrManualStatus } from "./dtrOverrides";
 import { PayrollValidationError } from "./validation";
 import { buildDeductibleRegularBreakWindows } from "@/lib/shifts";
 import { buildManualPayrollBaselineSnapshotFromComputation, projectManualPayrollAttendanceLinesFromBaseline } from "./manualPayroll";
 import type { ProvisionalAmounts, ProvisionalDay, ProvisionalEmployee, ProvisionalPayroll, ProvisionalPayrollQuery } from "./provisionalTypes";
+import { withProvisionalLineDetails, type ProvisionalLineContext, type ProvisionalManualDetail } from "./provisionalLineDetails";
 
 const daySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => { const day = new Date(`${value}T00:00:00Z`); return Number.isFinite(day.getTime()) && day.toISOString().slice(0,10) === value; }, "Select a valid date.");
 const querySchema = z.object({periodId:z.string().uuid(),group:z.enum(["Daily","Monthly"]),asOfDate:daySchema.optional(),departmentId:z.number().int().positive().optional(),employeeId:z.string().uuid().optional()});
@@ -86,6 +87,7 @@ export async function loadProvisionalPayroll(raw:ProvisionalPayrollQuery, databa
     // Forecast is a separate hypothetical scenario. Actual records above never
     // receive invented punches, and all assumptions are local to this response.
     const forecastLogs:typeof context.logs=[];
+    const hypotheticalDays=new Set<string>();
     for (const row of summariesAll) {
       if(row.attendanceDate<today || row.attendanceDate<=asOfDate || approvedDecisionDays.has(`${row.employeeId}|${row.attendanceDate}`))continue;
       const schedule=scheduleFor(row.employeeId,row.attendanceDate);
@@ -99,6 +101,7 @@ export async function loadProvisionalPayroll(raw:ProvisionalPayrollQuery, databa
         ["OUT",gap.fromTime<start?sourceDayOffset(row.attendanceDate,1):row.attendanceDate,gap.fromTime] as ["OUT",string,string],
         ["IN",gap.toTime<start?sourceDayOffset(row.attendanceDate,1):row.attendanceDate,gap.toTime] as ["IN",string,string],
       ]),["OUT",end<=start?sourceDayOffset(row.attendanceDate,1):row.attendanceDate,end]];
+      hypotheticalDays.add(`${row.employeeId}|${row.attendanceDate}`);
       for(const [direction,date,time] of punches) {
         forecastLogs.push({id:-forecastLogs.length-1,rawLogId:-forecastLogs.length-1,employeeId:row.employeeId,employeeNo:employee.employeeNo,batchId:"forecast",sourceFileName:"Hypothetical forecast",loggedAt:new Date(`${date}T${time}+08:00`),logDate:date,logTime:time,direction,sourceLine:0,rawText:"Hypothetical forecast only",deviceId:null,siteCode:null,normalizedHash:null});
       }
@@ -109,11 +112,18 @@ export async function loadProvisionalPayroll(raw:ProvisionalPayrollQuery, databa
     const forecastAttendance=forecastAll.filter(inPeriod);
     const generatedInputs:unknown[]=[];
     async function scenario(attendance:Summary[], cutoff?:string) {
-      const generated=await calculateGeneratedDtrRows({tx,payrollPeriod:period,employeeIds:calculator.eligibleEmployees.map(e=>e.id),summaryRows:attendance,checkDateSummaryRows:cutoff?summariesAll.filter(row=>row.attendanceDate<=cutoff):forecastAll,cutoff,onInputs:inputs=>generatedInputs.push(inputs)});
+      // These exact inputs already belong to the generator's read snapshot.
+      // Reuse its public metric/status functions for explanatory penalty facts;
+      // none of these annotations are fed back into the payroll calculator.
+      let annotationInputs:{dayMetricOverrideRows:Array<{employeeId:string;attendanceDate:string;lateMinutes:number|null;undertimeMinutes:number|null;overtimeMinutes:number|null}>;dayStatusOverrideRows:Array<{employeeId:string;attendanceDate:string;status:AttendanceDtrManualStatus}>}={dayMetricOverrideRows:[],dayStatusOverrideRows:[]};
+      const generated=await calculateGeneratedDtrRows({tx,payrollPeriod:period,employeeIds:calculator.eligibleEmployees.map(e=>e.id),summaryRows:attendance,checkDateSummaryRows:cutoff?summariesAll.filter(row=>row.attendanceDate<=cutoff):forecastAll,cutoff,onInputs:inputs=>{generatedInputs.push(inputs);annotationInputs=inputs as typeof annotationInputs;}});
       const manualExceptions=calculator.payrollExceptionRows.filter(row=>!GENERATED_DTR_OVERRIDE_SOURCES.includes(row.dtrOverrideSource as typeof GENERATED_DTR_OVERRIDE_SOURCES[number]) && (!cutoff||row.attendanceDate<=cutoff));
       const exceptions=[...manualExceptions,...generated.map((row,index)=>({...row,id:`provisional-generated-${index}`,createdAt:new Date(0),updatedAt:new Date(0)} as typeof manualExceptions[number]))];
+      const generatedIds=new Set(exceptions.slice(manualExceptions.length).map(row=>row.id));
+      const explicitEmployees=new Set(attendance.filter(row=>row.calculationPolicy==="eight_hour_day").map(row=>row.employeeId));
+      const manualLinesByEmployee=new Map<string,readonly ProvisionalManualDetail[]>(calculator.manualPayrollEntryRows.map(entry=>[entry.employeeId,entry.lines]));
       const activeLeaves=cutoff?leaves.filter(leave=>(leave.leaveStartDate??leave.dateFiled)<=cutoff).map(leave=>({...leave,leaveEndDate:leave.leaveEndDate&&leave.leaveEndDate>cutoff?cutoff:leave.leaveEndDate,dayDetails:leave.dayDetails.filter(day=>day.leaveDate<=cutoff)})):leaves;
-      return calculator.calculate({attendance,payrollExceptionRows:exceptions,leaves:activeLeaves,cutoff,
+      const calculated=await calculator.calculate({attendance,payrollExceptionRows:exceptions,leaves:activeLeaves,cutoff,
         projectManual:async(entry,computation)=>{
           // Fixed monthly overrides are administrator amounts; attendance does
           // not rewrite them. Daily attendance-backed lines share refresh rules.
@@ -121,8 +131,27 @@ export async function loadProvisionalPayroll(raw:ProvisionalPayrollQuery, databa
           const latestBaseline=buildManualPayrollBaselineSnapshotFromComputation(computation,{accountCodeOptions:calculator.allAccountCodes.map(item=>({...item,code:item.accountCode}))});
           const projection=await projectManualPayrollAttendanceLinesFromBaseline({database:tx,payrollPeriodId:entry.payrollPeriodId,employeeId:entry.employeeId,latestBaseline,refreshableExceptionRowIds:[...calculator.payrollExceptionRows.filter(row=>row.employeeId===entry.employeeId&&row.dtrOverrideSource).map(row=>row.id),...exceptions.filter(row=>row.employeeId===entry.employeeId&&row.dtrOverrideSource).map(row=>row.id)]});
           if(!projection)return entry;
-          return {...projection.entry,lines:projection.lines.map((line,index)=>({...line,id:`provisional-manual-${index}`,createdAt:new Date(0),updatedAt:new Date(0)} as typeof entry.lines[number]))};
+          const projectedEntry={...projection.entry,lines:projection.lines.map((line,index)=>({...line,id:`provisional-manual-${index}`,createdAt:new Date(0),updatedAt:new Date(0)} as typeof entry.lines[number]))};
+          manualLinesByEmployee.set(entry.employeeId,projectedEntry.lines);
+          return projectedEntry;
         }});
+      const lineContexts=new Map<string,ProvisionalLineContext>();
+      for(const computation of calculated.computations) {
+        const employeeId=computation.employeeId;
+        const effective=attendance.filter(row=>row.employeeId===employeeId).map(row=>applyAttendanceDtrEffectiveStatus(applyAttendanceDtrMetricOverride(row,annotationInputs.dayMetricOverrideRows.find(item=>item.employeeId===employeeId&&item.attendanceDate===row.attendanceDate)),annotationInputs.dayStatusOverrideRows.find(item=>item.employeeId===employeeId&&item.attendanceDate===row.attendanceDate)?.status));
+        const allocation=computePolicyAttendancePay(effective,0);
+        const paid=calculator.priorPaid.employees.filter(row=>row.employeeId===employeeId);
+        lineContexts.set(employeeId,{
+          startDate:period.startDate,endDate:period.endDate,
+          exceptions:exceptions.filter(row=>row.employeeId===employeeId).map(row=>({id:row.id,attendanceDate:row.attendanceDate,scope:generatedIds.has(row.id)?explicitEmployees.has(employeeId)?"day":"period":row.dtrOverrideSource?"period":"day",attendanceGenerated:generatedIds.has(row.id),quantityMinutes:row.quantityMinutes,amountOverride:row.amountOverride,dtrOverrideSource:row.dtrOverrideSource,accountTypeSnapshot:row.accountTypeSnapshot})),
+          manualLines:manualLinesByEmployee.get(employeeId),
+          installments:calculator.inputRevisionData.installments.filter(row=>row.loan.employeeId===employeeId).map(row=>({id:row.installment.id,dueDate:row.installment.dueDate})),
+          dayAdjustments:allocation.days.map(day=>({day:(day.row as typeof effective[number]).attendanceDate,actualLateMinutes:day.row.lateMinutes,penaltyMinutes:day.penaltyMinutes})),
+          projectedDays:cutoff?undefined:new Set(attendance.filter(row=>row.employeeId===employeeId&&hypotheticalDays.has(`${employeeId}|${row.attendanceDate}`)).map(row=>row.attendanceDate)),
+          postedCreditsApplied:input.group==="Monthly"&&paid.length>0,
+        });
+      }
+      return {...calculated,lineContexts};
     }
     const recorded=await scenario(recordedAttendance,asOfDate), forecast=asOfDate>=period.endDate?recorded:await scenario(forecastAttendance);
     const recordedMap=new Map(recorded.computations.map(row=>[row.employeeId,row])),forecastMap=new Map(forecast.computations.map(row=>[row.employeeId,row]));
@@ -147,7 +176,7 @@ export async function loadProvisionalPayroll(raw:ProvisionalPayrollQuery, databa
       return {employeeId:employee.id,employeeNo:employee.employeeNo,name:employeeName(employee),departmentId:department?.departmentId??null,departmentName:department?.departmentName??null,payoutHalf,scheduledThisHalf,
         status:!scheduledThisHalf?"Not scheduled this half":!rec||!projected||warnings.some(w=>w===recorded.unavailable.get(employee.id)||w===forecast.unavailable.get(employee.id))?"Unavailable":input.group==="Daily"&&rec.grossPay===0?"No work — ₱0":"Available",
         recorded:!scheduledThisHalf?emptyAmounts():rec&&!recorded.unavailable.has(employee.id)?amounts(rec):null,forecast:!scheduledThisHalf?emptyAmounts():projected&&!forecast.unavailable.has(employee.id)?amounts(projected):null,
-        recordedLines:rec?.lines??[],forecastLines:projected?.lines??[],postedCredits:input.group==="Monthly"?money(paid.reduce((total,row)=>total+Number(row.grossPay),0)):0,
+        recordedLines:rec?withProvisionalLineDetails(rec.lines,recorded.lineContexts.get(employee.id)!):[],forecastLines:projected?withProvisionalLineDetails(projected.lines,forecast.lineContexts.get(employee.id)!):[],postedCredits:input.group==="Monthly"?money(paid.reduce((total,row)=>total+Number(row.grossPay),0)):0,
         futureScheduledMinutes:forecastAttendance.filter(row=>row.employeeId===employee.id&&row.attendanceDate>=today).reduce((total,row)=>total+row.regularMinutes,0),warnings,days};
     }).sort((a,b)=>a.name.localeCompare(b.name));
     const sum=(field:"recorded"|"forecast")=>rows.reduce((total,row)=>{const value=row[field];if(value)for(const key of Object.keys(total) as Array<keyof ProvisionalAmounts>)total[key]=money(total[key]+value[key]);return total;},emptyAmounts());

@@ -1,0 +1,67 @@
+import assert from "node:assert/strict";
+import { withProvisionalLineDetails, type ProvisionalExceptionDetail, type ProvisionalLineContext } from "@/lib/payroll/provisionalLineDetails";
+
+const context:ProvisionalLineContext={startDate:"2026-10-01",endDate:"2026-10-15",exceptions:[]};
+const line={code:"REG",description:"Regular Hours",lineType:"Earning" as const,amount:788.33,quantity:7.88,rate:100,sourceTable:"employee_payroll_exception_rows",sourceId:"generated-a"};
+const exception:ProvisionalExceptionDetail={id:line.sourceId,attendanceDate:"2026-10-07",scope:"day",attendanceGenerated:true,quantityMinutes:473,amountOverride:null,dtrOverrideSource:"DTR_WORKED",accountTypeSnapshot:"Regular Hours"};
+const details=(item=line,options:Partial<ProvisionalLineContext>={})=>withProvisionalLineDetails([item],{...context,exceptions:[exception],...options})[0].details;
+assert.deepEqual(details().formula,{quantityMinutes:473,hourlyRate:100});
+assert.equal(details().quantityMinutes,473,"Exact source minutes survive rounded quantity=7.88 hours");
+assert.equal(details().workDate,"2026-10-07");
+assert.equal(details().startDate,undefined);
+assert.equal(details({...line,sourceId:"not-present"}).scope,"period","Unmatched source cannot acquire another line's date");
+assert.equal(details({...line,description:"2026-10-07 Regular Hours",sourceId:"unknown"}).workDate,undefined,"Do not parse description or provisional ID for a date");
+assert.equal(details(line,{exceptions:[{...exception,scope:"period",attendanceDate:"2026-10-01"}]}).workDate,undefined,"Aggregate storage anchor must not appear as a workday");
+assert.equal(details(line,{exceptions:[{...exception,scope:"period"}]}).endDate,"2026-10-15","Recorded cutoff does not truncate the scope of a period total");
+assert.equal(details(line,{exceptions:[{...exception,attendanceDate:"2026-02-30"}]}).scope,"period");
+assert.equal(details(line,{exceptions:[{...exception,attendanceDate:"2026-10-31"}]}).workDate,"2026-10-31","Civil workday is retained for an overnight shift");
+assert.equal(details(line,{projectedDays:new Set(["2026-10-07"])}).projected,true);
+assert.equal(details(line,{projectedDays:new Set(["2026-10-08"])}).projected,undefined,"Actual after-cutoff and approved future dates are not hypothetical merely because this is forecast");
+assert.equal(details(line,{exceptions:[{...exception,attendanceGenerated:false,dtrOverrideSource:null,amountOverride:"100.00"}],projectedDays:new Set(["2026-10-07"])}).projected,undefined,"A saved bonus on a forecast workday is not hypothetical attendance earnings");
+assert.equal(details(line,{exceptions:[{...exception,attendanceGenerated:false}]}).formula,undefined,"A source name alone does not establish generated minute arithmetic");
+assert.equal(details(line,{exceptions:[{...exception,amountOverride:"788.33"}]}).formula,undefined);
+assert.equal(details(line,{postedCreditsApplied:true}).formula,undefined,"Posted credits alter amount without changing quantity/rate");
+assert.equal(details({...line,amount:479.95,quantity:8,rate:59.994},{exceptions:[{...exception,quantityMinutes:480}]}).formula,undefined,"Do not show an equation when the displayed two-decimal rate fails to reproduce authoritative cents");
+assert.equal(details({...line,amount:118,quantity:0.98,rate:119.999},{exceptions:[{...exception,quantityMinutes:59}]}).formula?.hourlyRate,119.999,"Verified formula retains source precision");
+
+const tardiness={...line,code:"LATE",description:"Tardiness",lineType:"Deduction" as const,amount:0,quantity:5.12,rate:0};
+const lateContext:ProvisionalLineContext={...context,exceptions:[{...exception,dtrOverrideSource:"DTR_TARDINESS",quantityMinutes:307,amountOverride:"0.00",accountTypeSnapshot:"Tardiness"}],dayAdjustments:[{day:"2026-10-07",actualLateMinutes:7,penaltyMinutes:300}]};
+const late=withProvisionalLineDetails([tardiness],lateContext)[0].details;
+assert.equal(late.actualLateMinutes,7);assert.equal(late.penaltyMinutes,300);
+assert.match(late.notes.join(" "),/already reflected in regular pay/);
+assert.match(late.notes.join(" "),/not additional lateness on this date/);
+assert.equal(late.formula,undefined);
+const custom=withProvisionalLineDetails([tardiness],{...lateContext,exceptions:[{...lateContext.exceptions[0],dtrOverrideSource:null} ]})[0].details;
+assert.doesNotMatch(custom.notes.join(" "),/already reflected/,"A code or description alone cannot imply a quantity-only adjustment");
+const wrongAllocation=withProvisionalLineDetails([tardiness],{...lateContext,dayAdjustments:[{day:"2026-10-07",actualLateMinutes:8,penaltyMinutes:300}]})[0].details;
+assert.equal(wrongAllocation.actualLateMinutes,undefined,"Conflicting evidence cannot display a fabricated lateness/penalty split");
+const unpaid=withProvisionalLineDetails([tardiness],{...context,exceptions:[{...exception,accountTypeSnapshot:"Unpaid Leaves/Absences",dtrOverrideSource:null} ]})[0].details;
+assert.match(unpaid.notes.join(" "),/this line adds no monetary deduction/);
+assert.doesNotMatch(unpaid.notes.join(" "),/already reflected/);
+
+const manual={...line,sourceTable:"manual_payroll_entry_lines",sourceId:"manual-a",amount:700,quantity:7,rate:null};
+const manualContext:ProvisionalLineContext={...context,exceptions:[exception],manualLines:[{id:"manual-a",sourceTable:"employee_payroll_exception_rows",sourceId:exception.id,hours:7,minutes:0}]};
+const manualDetails=withProvisionalLineDetails([manual],manualContext)[0].details;
+assert.equal(manualDetails.workDate,"2026-10-07");assert.equal(manualDetails.quantityMinutes,420);assert.equal(manualDetails.formula,undefined);
+assert.match(manualDetails.notes.join(" "),/saved amount is retained/);
+const missingManual=withProvisionalLineDetails([manual],context)[0].details;
+assert.equal(missingManual.scope,"period");assert.equal(missingManual.quantityMinutes,undefined);
+const loan=withProvisionalLineDetails([{...tardiness,sourceTable:"loan_installments",sourceId:"loan-a",amount:200}],{...context,installments:[{id:"loan-a",dueDate:"2026-10-20"}]})[0].details;
+assert.equal(loan.dueDate,"2026-10-20");assert.equal(loan.workDate,undefined);
+const leave=withProvisionalLineDetails([{...line,sourceTable:"employees_leave_records",sourceId:null}],context)[0].details;
+assert.equal(leave.scope,"period");assert.equal(leave.quantityUnit,"days");assert.equal(leave.quantityMinutes,undefined);
+const aggregate=withProvisionalLineDetails([{...line,sourceTable:"attendance_daily_summaries",sourceId:null},{...line,lineType:"Information" as const,code:"LATE-UT",quantity:19,sourceTable:"attendance_daily_summaries",sourceId:null}],context);
+assert.equal(aggregate[0].details.quantityUnit,"hours");assert.equal(aggregate[0].details.quantityMinutes,undefined,"Rounded aggregate hours are not converted into fabricated exact minutes");
+assert.equal(aggregate[1].details.quantityMinutes,19,"The authoritative LATE-UT quantity is minutes, not hours");
+
+// Preserve all existing properties, order, signed/zero amounts and cent totals.
+const rows=[line,tardiness,manual,{...line,code:"ADJUST",amount:-25},{...line,lineType:"Employer Contribution" as const,amount:80},{...line,lineType:"Information" as const,amount:125},{...tardiness,code:"TAX",amount:100}];
+const before=structuredClone(rows),inputBefore=structuredClone(manualContext);
+const annotated=withProvisionalLineDetails(rows,manualContext);
+const stripped=annotated.map(row=>Object.fromEntries(Object.entries(row).filter(([key])=>key!=="details")));
+assert.deepEqual(stripped,before);assert.deepEqual(rows,before);assert.deepEqual(manualContext,inputBefore);
+const sums=(values:typeof rows)=>({gross:values.filter(row=>row.lineType==="Earning").reduce((sum,row)=>sum+Math.round(row.amount*100),0),deductions:values.filter(row=>row.lineType==="Deduction").reduce((sum,row)=>sum+Math.round(row.amount*100),0)});
+assert.deepEqual(sums(annotated),sums(before));
+assert.equal(sums(annotated).deductions,10000,"Employer contribution and informational amount do not enter employee deductions");
+assert.equal(annotated[1].amount,0,"Keep verified zero audit lines");
+console.log("PASS provisional line details: exact source attribution, day/period/overnight scope, exact minutes, penalty explanation, manual provenance, loan due date, forecast distinction, credit/override/rate guards, immutable inputs and unchanged ordered financial fields/totals");
