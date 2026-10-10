@@ -4,7 +4,7 @@ import { db } from "@/db";
 import { authAccounts, department, employees, employeesGeneralInfo, employeesTimekeeping, employeeShiftAssignments, employeeWeeklyShiftPatterns, employeeWeeklyShiftPatternDays, payrollPeriods, payrollRuns, payrollRunEmployees, shiftTables, shiftTableBreaks, scheduleDecisionRevisions, scheduleWorkspaceDrafts, attendanceDailySummaries } from "@/db/schema";
 import { eq, sql, and } from "drizzle-orm";
 import { archiveWeeklySchedule, mutatePeriodSchedule, readScheduleReceipt, readScheduleWorkspace, saveWeeklySchedules, type ScheduleActor } from "@/lib/scheduling/service";
-import type { SchedulePeriodCommand } from "@/lib/scheduling/workspace-types";
+import { scheduleWeekdays, type SchedulePeriodCommand } from "@/lib/scheduling/workspace-types";
 import { resolveEmployeeScheduleForDate } from "@/lib/payroll/scheduleResolver";
 
 async function main() {
@@ -21,15 +21,24 @@ async function main() {
       const [branch] = await tx.insert(department).values({ name: `Schedule QA ${suffix}`, code: `SCH-${suffix}` }).returning();
       const people = await tx.insert(employees).values([1, 2, 3].map(index => ({ employeeNo: `SCH-${suffix}-${index}`, firstName: "Schedule", lastName: `Fixture ${index}` }))).returning();
       await tx.insert(employeesGeneralInfo).values(people.map(person => ({ employeeId: person.id, departmentId: branch.id, dateHired: "2098-09-01" })));
-      await tx.insert(employeesTimekeeping).values({ employeeId: people[2].id, hoursWorked: "8.00" });
-      const [shift] = await tx.insert(shiftTables).values({ code: `QA-${suffix}`, description: "Schedule QA shift", regularStartTime: "08:00", regularEndTime: "17:00" }).returning();
+      const [legacyProfile] = await tx.insert(employeesTimekeeping).values({ employeeId: people[2].id, hoursWorked: "8.00" }).returning();
+      const [shift] = await tx.insert(shiftTables).values({ code: `QA-${suffix}`, description: "Schedule QA shift", regularStartTime: "08:00", regularEndTime: "17:00", calculationPolicy: "eight_hour_day", punchPolicy: "outer" }).returning();
       await tx.insert(shiftTableBreaks).values({ shiftTableId: shift.id, slotKey: "mid_break", label: "Lunch", fromTime: "12:00", toTime: "13:00", deduct: true, deductHours: 1, deductMinutes: 0, sortOrder: 1 });
-      const [night] = await tx.insert(shiftTables).values({ code: `QN-${suffix}`, description: "Overnight QA", regularStartTime: "22:00", regularEndTime: "06:00" }).returning();
+      const [night] = await tx.insert(shiftTables).values({ code: `QN-${suffix}`, description: "Overnight QA", regularStartTime: "22:00", regularEndTime: "06:00", calculationPolicy: "eight_hour_day", punchPolicy: "outer" }).returning();
       const periodId = randomUUID();
       await tx.insert(payrollPeriods).values({ id: periodId, code: `SQ-${suffix}`, year: 2098, month: 9, cycle: "B", payrollTerms: "Semi-Monthly", startDate: "2098-09-28", endDate: "2098-09-30", nominalPayDate: "2098-10-05", adjustedPayDate: "2098-10-05", status: "Open" });
       const query = { departmentId: branch.id, periodId, effectiveDate: "2098-09-28" };
       let workspace = await readScheduleWorkspace(actor, query, tx);
       assert.equal(workspace.cells.length, 9); assert.equal(workspace.cells.filter(cell => cell.snapshot.kind === "unconfigured").length, 6);
+      const command = (): SchedulePeriodCommand => ({ requestId: randomUUID(), departmentId: branch.id, periodId, sourceDigest: workspace.draft?.sourceDigest ?? workspace.sourceDigest, expectedDraftRevision: workspace.draft?.revision ?? null, expectedDraftId: workspace.draft?.id ?? null, changes: [] });
+      const historicalFlexible = resolveEmployeeScheduleForDate({ attendanceDate: "2026-09-30", assignments: [], weeklyPatterns: [], legacyTimekeeping: legacyProfile });
+      assert.equal(historicalFlexible.shiftWindow.checkInTime, null); assert.equal(historicalFlexible.hoursPerDay, 8, "Historical flexible fallback remains readable");
+      await assert.rejects(() => mutatePeriodSchedule(actor, command(), "confirmed", database), /current eight-hour rule/, "Current confirmation cannot turn an undated legacy fallback into a new effective schedule");
+      assert.equal((await tx.select().from(employeeShiftAssignments).where(eq(employeeShiftAssignments.employeeId, people[2].id))).length, 0);
+      assert.equal((await tx.select().from(scheduleDecisionRevisions).where(eq(scheduleDecisionRevisions.periodId, periodId))).length, 0, "Failed whole-period confirmation rolls back even previously processed employees");
+      await saveWeeklySchedules(actor, { requestId: randomUUID(), departmentId: branch.id, sourceDigest: workspace.weeklyDigest, effectiveFrom: "2098-09-28", effectiveTo: null, employeeIds: [people[2].id], days: scheduleWeekdays.map(weekday => ({ weekday, value: String(shift.id) })) }, database);
+      assert.deepEqual((await tx.select().from(employeesTimekeeping).where(eq(employeesTimekeeping.employeeId, people[2].id)))[0], legacyProfile, "Dated repair preserves the historical profile fallback");
+      workspace = await readScheduleWorkspace(actor, query, tx);
       await saveWeeklySchedules(actor, { requestId: randomUUID(), departmentId: branch.id, sourceDigest: workspace.weeklyDigest, effectiveFrom: "2098-09-28", effectiveTo: null, employeeIds: [people[0].id], days: [{ weekday: "Sunday", value: String(shift.id) }, { weekday: "Tuesday", value: String(shift.id) }] }, database);
       workspace = await readScheduleWorkspace(actor, query, tx);
       const weekday = new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: "UTC" }).format(new Date("2098-09-28T12:00:00Z"));
@@ -37,10 +46,9 @@ async function main() {
       if (sundayCell) assert.equal(sundayCell.snapshot.shiftTableId, shift.id);
       assert.ok(workspace.employees[0].weeklyDays.some(day => day.weekday !== "Sunday" && day.value === "unconfigured"), "Partial weekdays retain Unconfigured rather than inventing rest");
       assert.ok(weekday);
-      const [originalRange] = await tx.insert(employeeShiftAssignments).values({ employeeId: people[0].id, shiftTableId: shift.id, shiftName: "Original ranged override", effectiveFrom: "2098-09-30", effectiveTo: "2098-10-02", checkInTime: "08:00", checkOutTime: "17:00", hoursPerDay: "8.00" }).returning();
+      const [originalRange] = await tx.insert(employeeShiftAssignments).values({ employeeId: people[0].id, shiftTableId: shift.id, shiftName: "Original ranged override", effectiveFrom: "2098-09-30", effectiveTo: "2098-10-02", checkInTime: "08:00", checkOutTime: "17:00", hoursPerDay: "8.00", calculationPolicy: "eight_hour_day", punchPolicy: "outer" }).returning();
       const [adjacentSummary] = await tx.insert(attendanceDailySummaries).values({ employeeId: people[0].id, attendanceDate: "2098-10-01", shiftAssignmentId: originalRange.id, workedMinutes: 480 }).returning();
       workspace = await readScheduleWorkspace(actor, query, tx);
-      const command = (): SchedulePeriodCommand => ({ requestId: randomUUID(), departmentId: branch.id, periodId, sourceDigest: workspace.draft?.sourceDigest ?? workspace.sourceDigest, expectedDraftRevision: workspace.draft?.revision ?? null, expectedDraftId: workspace.draft?.id ?? null, changes: [] });
       const draft = { ...command(), changes: [{ employeeId: people[0].id, day: "2098-09-29", value: String(shift.id) }, { employeeId: people[0].id, day: "2098-09-30", value: String(night.id) }] };
       assert.equal((await mutatePeriodSchedule(actor, draft, "draft_saved", database)).draftRevision, 1);
       assert.deepEqual(await tx.select().from(employeeShiftAssignments).where(eq(employeeShiftAssignments.employeeId, people[0].id)), [originalRange], "Saving draft has no payroll-effective assignment mutations");
@@ -57,9 +65,10 @@ async function main() {
       const assignments = await tx.select().from(employeeShiftAssignments).where(eq(employeeShiftAssignments.employeeId, people[0].id));
       const savedDay = assignments.find(row => row.effectiveFrom === "2098-09-29")!;
       assert.equal(savedDay.confirmedSchedule?.breaks[0].fromTime, "12:00:00");
-      const flexible = (await tx.select().from(employeeShiftAssignments).where(eq(employeeShiftAssignments.employeeId, people[2].id)))[0];
-      const resolvedFlexible = resolveEmployeeScheduleForDate({ attendanceDate: flexible.effectiveFrom, assignments: [flexible], weeklyPatterns: [], legacyTimekeeping: null });
-      assert.equal(resolvedFlexible.shiftWindow.checkInTime, null); assert.equal(resolvedFlexible.hoursPerDay, 8);
+      const repaired = (await tx.select().from(employeeShiftAssignments).where(eq(employeeShiftAssignments.employeeId, people[2].id)))[0];
+      const resolvedRepair = resolveEmployeeScheduleForDate({ attendanceDate: repaired.effectiveFrom, assignments: [repaired], weeklyPatterns: [], legacyTimekeeping: null });
+      assert.equal(resolvedRepair.shiftWindow.checkInTime?.slice(0, 5), "08:00"); assert.equal(resolvedRepair.hoursPerDay, 8);
+      assert.equal(repaired.confirmedSchedule?.calculationPolicy, "eight_hour_day"); assert.equal(repaired.confirmedSchedule?.punchPolicy, "outer");
       const missing = (await tx.select().from(employeeShiftAssignments).where(eq(employeeShiftAssignments.employeeId, people[1].id)))[0];
       assert.equal(resolveEmployeeScheduleForDate({ attendanceDate: missing.effectiveFrom, assignments: [missing], weeklyPatterns: [], legacyTimekeeping: null }).configured, false);
       await tx.update(shiftTableBreaks).set({ fromTime: "11:00" }).where(eq(shiftTableBreaks.shiftTableId, shift.id));
@@ -109,6 +118,6 @@ async function main() {
     });
   } catch (error) { if (error !== rollback) throw error; }
   assert.deepEqual(await fingerprint(), before, "Every fixture write rolls back");
-  console.log("PASS restored schedule workspace: draft isolation/reload, whole-period atomic confirmation, partial defaults, rest/unconfigured/flexible/overnight, frozen breaks, idempotency, stale draft, manager scope, posted protection, archive and rollback");
+  console.log("PASS restored schedule workspace: draft isolation/reload, whole-period atomic confirmation, partial defaults, rest/unconfigured/overnight, historical flexible read and rejected current capture before dated repair, frozen breaks, idempotency, stale draft, manager scope, posted protection, archive and rollback");
 }
 main().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });

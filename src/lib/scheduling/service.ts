@@ -9,6 +9,7 @@ import { currentDepartmentMemberStatusCondition } from "@/lib/employmentStatus";
 import { recordAdminAuditEvent } from "@/lib/admin";
 import { buildShiftAssignmentSnapshotFromTable, calculationPolicyFor, punchPolicyFor } from "@/lib/shifts";
 import { compareScheduleSnapshots } from "./presentation";
+import { assertOperationalSchedule, operationalScheduleSampleDates } from "./operational-rule-guard";
 import { getActiveShiftAssignmentForDate, getActiveWeeklyShiftPatternForDate, hasLegacyPaySchedule, type WeeklyShiftPatternRecord } from "@/lib/payroll/scheduleResolver";
 import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
 import { loadEffectiveAttendanceRawLogs } from "@/lib/payroll/effectiveAttendanceInputs";
@@ -301,6 +302,7 @@ export async function confirmScopedScheduleDays(actor: ScheduleActor, raw: Sched
 }
 
 async function projectConfirmedDays(tx: DbClient, actor: ScheduleActor, input: SchedulePeriodCommand, cells: ScheduleCell[], source: Sources) {
+  for (const cell of cells) assertOperationalSchedule(cell.snapshot, { startDate: cell.day, endDate: cell.day });
   const employeeId = cells[0].employeeId;
   const selected = new Set(cells.map(cell => cell.day));
   // Keep original ranges and their summary foreign keys intact. The resolver gives
@@ -368,6 +370,8 @@ export async function saveWeeklySchedules(actor: ScheduleActor, raw: ScheduleWee
         if (!snapshot) throw new Error("Choose a current shift, Rest day or Unconfigured for each selected weekday.");
         snapshots.set(day.weekday, snapshot);
       }
+      const effectiveWeekdays = new Set(operationalScheduleSampleDates({ startDate: input.effectiveFrom, endDate: input.effectiveTo }, []).map(day => weekday(day)));
+      for (const [day, snapshot] of snapshots) if (effectiveWeekdays.has(day)) assertOperationalSchedule(snapshot, { startDate: input.effectiveFrom, endDate: input.effectiveTo });
       // A new effective-dated revision wins only inside its range; older records retain their audit history.
       const [pattern] = await tx.insert(employeeWeeklyShiftPatterns).values({ employeeId, effectiveFrom: input.effectiveFrom, effectiveTo: input.effectiveTo }).returning();
       const days = await tx.insert(employeeWeeklyShiftPatternDays).values([...snapshots].map(([day, snapshot]) => ({ patternId: pattern.id, weekday: day, scheduleState: snapshot.kind, definitionSnapshot: structuredClone(snapshot), calculationPolicy: calculationPolicyFor(snapshot.calculationPolicy), punchPolicy: punchPolicyFor(snapshot.punchPolicy), shiftTableId: snapshot.shiftTableId, shiftName: snapshot.kind === "shift" ? snapshot.shiftName : null, shiftCode: snapshot.shiftCode, checkInTime: snapshot.checkInTime, checkOutTime: snapshot.checkOutTime, breakMinutes: snapshot.breakMinutes, paidBreakMinutes: snapshot.paidBreakMinutes, hoursPerDay: snapshot.hoursPerDay.toFixed(2) }))).returning();
@@ -391,6 +395,13 @@ export async function archiveWeeklySchedule(actor: ScheduleActor, raw: ScheduleA
     if (!existing || input.endDate < existing.effectiveFrom || existing.effectiveTo && input.endDate > existing.effectiveTo) throw new Error("Choose an end date within this default's effective range.");
     await tx.update(employeeWeeklyShiftPatterns).set({ effectiveTo: input.endDate, updatedAt: new Date() }).where(eq(employeeWeeklyShiftPatterns.id, input.patternId));
     const revised = { ...source, fullPatterns: source.fullPatterns.map(row => row.id === existing.id ? { ...row, effectiveTo: input.endDate } : row) };
+    const assignments = source.assignments.filter(row => row.employeeId === input.employeeId);
+    const patterns = revised.fullPatterns.filter(row => row.employeeId === input.employeeId);
+    for (const day of operationalScheduleSampleDates({ startDate: shiftDate(input.endDate, 1), endDate: existing.effectiveTo }, [...assignments, ...patterns])) {
+      if (getActiveShiftAssignmentForDate(assignments, day)) continue;
+      const successor = defaultFor(revised, input.employeeId, day);
+      if (!sameSchedule(defaultFor(source, input.employeeId, day), successor)) assertOperationalSchedule(successor, { startDate: day, endDate: day });
+    }
     await applyWeeklyImpact(tx, actor, source, input.employeeId, shiftDate(input.endDate, 1), existing.effectiveTo, day => defaultFor(revised, input.employeeId, day));
     await recordAdminAuditEvent({ actorUserId: actor.userId, entityType: "employee_weekly_shift_pattern", entityId: existing.id, action: "employee_weekly_shift_pattern.ended", details: { previousEffectiveTo: existing.effectiveTo, effectiveTo: input.endDate }, database: tx });
     return recordReceipt(tx, actor, input, { requestId: input.requestId, action: "weekly_archived", message: "Weekly default end date saved. Its history and confirmed schedules are retained.", changedCount: 1 });

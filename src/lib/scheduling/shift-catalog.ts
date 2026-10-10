@@ -104,12 +104,18 @@ export async function saveShiftCatalog(database: DbClient, actor: CatalogActor, 
     if (input.id) assertCurrent(before, input.expectedVersion);
     const effective = insertShiftTableSchema.parse({
       ...input,
-      calculationPolicy: input.calculationPolicy ?? before?.calculationPolicy ?? "legacy",
-      punchPolicy: input.punchPolicy ?? before?.punchPolicy ?? "legacy",
+      calculationPolicy: input.calculationPolicy ?? "eight_hour_day",
+      punchPolicy: input.punchPolicy ?? (before?.punchPolicy === "legacy" ? undefined : before?.punchPolicy),
       breaks: input.breaks.map(row => ({ ...row, requiresPunches: row.requiresPunches ?? (
         row.fromTime && row.toTime ? before?.breaks.find(old => old.slotKey === row.slotKey)?.requiresPunches ?? false : false
       ) })),
     });
+    if (effective.calculationPolicy !== "eight_hour_day") {
+      throw new Error("All new schedule versions use the eight-hour normal-pay rule. Reopen the schedule editor before saving.");
+    }
+    if (effective.punchPolicy !== "outer" && effective.punchPolicy !== "split_gaps") {
+      throw new Error("Choose an explicit punch policy by reviewing the work periods and split gaps before saving.");
+    }
     const [duplicate] = await tx.select({ id: shiftTables.id }).from(shiftTables)
       .where(and(eq(shiftTables.code, effective.code), isNull(shiftTables.archivedAt)));
     if (duplicate && duplicate.id !== before?.id) throw new Error(`An active schedule with code ${effective.code} already exists.`);

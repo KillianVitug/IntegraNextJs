@@ -95,7 +95,7 @@ function describe(snapshot: ScheduleSnapshot): DescribedSchedule {
     details.push(`${numberLabel(snapshot.hoursPerDay)}h scheduled`);
     if (snapshot.calculationPolicy === "eight_hour_day") {
       details.push(`${numberLabel(Math.min(8, snapshot.hoursPerDay))}h normal${snapshot.hoursPerDay > 8 ? ` + ${numberLabel(snapshot.hoursPerDay - 8)}h OT` : ""}`);
-    } else details.push("Legacy pay policy");
+    }
   } else warnings.push("Scheduled hours need review");
   if (snapshot.isFlexible) details.push("Flexible");
   if (snapshot.graceMinutes > 0) details.push(`${numberLabel(snapshot.graceMinutes)} min grace`);
@@ -134,6 +134,26 @@ function describe(snapshot: ScheduleSnapshot): DescribedSchedule {
 
 /** Labels are derived from the supplied captured values; no current template lookup. */
 export function describeSchedule(snapshot: ScheduleSnapshot): SchedulePresentation { return describe(snapshot).presentation; }
+
+/** Keep native pickers scannable; full policy/break details remain in the review. */
+export function scheduleChoiceLabels(shifts: readonly { id: number; snapshot: ScheduleSnapshot }[]) {
+  const choices = shifts.map(shift => ({ id: shift.id, ...describeSchedule(shift.snapshot) }));
+  const labels = new Map<number, string>();
+  for (const choice of choices) {
+    const peers = choices.filter(other => other.periodsLabel === choice.periodsLabel);
+    const differences = peers.length > 1
+      ? choice.details.filter(detail => peers.some(other => !other.details.includes(detail)))
+      : [];
+    labels.set(choice.id, [choice.periodsLabel,
+      ...differences,
+      ...(choice.warnings.length ? ["Check settings"] : []),
+    ].join(" · "));
+  }
+  return new Map([...labels].map(([id, label]) => {
+    const identical = [...labels].filter(([, other]) => other === label);
+    return [id, identical.length > 1 ? `${label} · Option ${identical.findIndex(([otherId]) => otherId === id) + 1}` : label];
+  }));
+}
 
 /** Numeric timeline first, policy details second. Callers must retain distinct IDs. */
 export function compareScheduleSnapshots(left: ScheduleSnapshot, right: ScheduleSnapshot) {

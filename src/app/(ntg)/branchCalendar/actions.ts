@@ -1,5 +1,6 @@
 "use server";
 import { assertNoConfirmedScheduleEdit } from "@/lib/scheduling/guards";
+import { assertOperationalAssignmentSuccessor } from "@/lib/scheduling/operational-rule-guard";
 import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
 
 import { revalidatePath } from "next/cache";
@@ -615,7 +616,7 @@ export async function saveBranchCalendarScheduleOverrideAction(input: unknown) {
   const result = await db.transaction(async (tx) => {
     await lockAttendancePayrollInput(tx);
     const selectedShiftTable = parsed.shiftTableId
-      ? await loadShiftTableForAssignment(tx, parsed.shiftTableId)
+      ? await loadShiftTableForAssignment(tx, parsed.shiftTableId, { startDate: parsed.attendanceDate, endDate: parsed.attendanceDate })
       : null;
     const selectedShiftSnapshot = selectedShiftTable
       ? buildShiftAssignmentSnapshotFromTable(selectedShiftTable)
@@ -887,6 +888,8 @@ async function revertBranchCalendarScheduleOverrideItem(args: {
     trimmedAssignmentIds.push(...clearResult.trimmedAssignmentIds);
     createdFragmentIds.push(...clearResult.createdFragmentIds);
   }
+
+  await assertOperationalAssignmentSuccessor(args.tx, { employeeId: item.employeeId, range: { startDate: item.attendanceDate, endDate: item.attendanceDate } });
 
   const latestImportedDate = await getLatestImportedAttendanceDate(
     args.tx,

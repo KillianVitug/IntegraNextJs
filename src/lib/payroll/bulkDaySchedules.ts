@@ -1,7 +1,8 @@
 import "server-only";
 import { assertNoConfirmedScheduleEdit } from "@/lib/scheduling/guards";
+import { assertOperationalSchedule, assertOperationalAssignmentSuccessor } from "@/lib/scheduling/operational-rule-guard";
 import { recordAdminAuditEvent } from "@/lib/admin";
-import { shiftTableScheduleLabel } from "@/lib/scheduling/presentation";
+import { shiftTableScheduleLabel, shiftTableScheduleSnapshot } from "@/lib/scheduling/presentation";
 import { buildShiftTableReadModel, buildShiftAssignmentSnapshotFromTable } from "@/lib/shifts";
 import { upsertEmployeeShiftAssignmentSchema } from "@/zod-schemas/employeeShiftAssignment";
 import { lockAttendancePayrollInput } from "./attendanceSourceGuard";
@@ -29,6 +30,7 @@ export async function prepareBulkDaySchedules(database:DbClient,input:unknown) {
   database.select().from(shiftTableBreaks).where(eq(shiftTableBreaks.shiftTableId,payload.shiftTableId)),
  ]);
  const period=periods[0],shift=shifts[0];if(!period||!shift||shift.archivedAt)throw new PayrollValidationError("The payroll period or schedule is unavailable.");
+ for (const target of targets) assertOperationalSchedule(shiftTableScheduleSnapshot(buildShiftTableReadModel({shiftTable:shift,breaks})), {startDate:target.day,endDate:target.day});
  const rows=targets.map(target=>{
   const found=roster.find(r=>r.employee.id===target.employeeId);
   if(!found||target.day<period.startDate||target.day>period.endDate||found.info?.dateHired&&target.day<found.info.dateHired||found.info?.separationDate&&target.day>found.info.separationDate)throw new PayrollValidationError("A selected workday is outside this period or employee's employment dates.");
@@ -61,7 +63,7 @@ export async function saveDateAssignment(tx:DbClient, actor:{userId:string}, pay
     }
     if (existingAssignment) await assertNoConfirmedScheduleEdit(tx, {employeeId: payload.employeeId, startDate: existingAssignment.effectiveFrom, endDate: existingAssignment.effectiveTo});
 
-    const selectedShiftTable = await loadShiftTableForAssignment(tx, payload.shiftTableId);
+    const selectedShiftTable = await loadShiftTableForAssignment(tx, payload.shiftTableId, { startDate: payload.effectiveFrom, endDate: normalizeEffectiveTo(payload.effectiveTo) });
     const snapshot = buildShiftAssignmentSnapshotFromTable(selectedShiftTable);
     const effectiveTo = normalizeEffectiveTo(payload.effectiveTo);
     const normalizedPayload = {
@@ -130,6 +132,7 @@ export async function saveDateAssignment(tx:DbClient, actor:{userId:string}, pay
       assignmentId = created.id;
     }
 
+    if (existingAssignment) await assertOperationalAssignmentSuccessor(tx, { employeeId: payload.employeeId, range: { startDate: existingAssignment.effectiveFrom, endDate: existingAssignment.effectiveTo }, excludedRanges: [{ effectiveFrom: payload.effectiveFrom, effectiveTo }] });
     const latestImportedDate = await getLatestImportedAttendanceDate(tx, payload.employeeId);
     const rebuildRange = getRebuildRange({
       staleRange,

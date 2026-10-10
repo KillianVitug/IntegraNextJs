@@ -1,14 +1,12 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { assertNoConfirmedScheduleEdit } from "@/lib/scheduling/guards";
 import { db } from "@/db";
 import {
   employeeShiftAssignments,
   employeeWeeklyShiftPatterns,
 } from "@/db/schema";
 import {
-  recordAdminAuditEvent,
   requireAdminActor,
 } from "@/lib/admin";
 import {
@@ -22,15 +20,7 @@ import { bulkScheduleInput, prepareBulkDaySchedules, saveDateAssignment, saveBul
 import { PayrollValidationError } from "@/lib/payroll/validation";
 import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
 import { desc, eq } from "drizzle-orm";
-import {
-  getAffectedScheduleRange,
-  getLatestImportedAttendanceDate,
-  getRebuildRange,
-  lockShiftAssignmentContext,
-  markAffectedShiftRunsStale,
-  rebuildEmployeeAttendanceSummaries,
-  withOvernightScheduleBoundary,
-} from "./shiftAssignmentHelpers";
+import { deleteDateAssignment } from "./shiftAssignmentHelpers";
 
 export async function listEmployeeShiftAssignments(employeeId: string) {
   await requireAdminActor();
@@ -96,74 +86,7 @@ export async function deleteEmployeeShiftAssignment(input: unknown) {
   const payload = deleteEmployeeShiftAssignmentSchema.parse(input);
 
   const result = await db.transaction(async (tx) => {
-    const existingAssignment = await tx.query.employeeShiftAssignments.findFirst({
-      where: eq(employeeShiftAssignments.id, payload.id),
-    });
-
-    if (!existingAssignment) {
-      throw new Error("Shift assignment not found.");
-    }
-
-    await lockShiftAssignmentContext(tx, existingAssignment.employeeId);
-    await assertNoConfirmedScheduleEdit(tx, {employeeId: existingAssignment.employeeId, startDate: existingAssignment.effectiveFrom, endDate: existingAssignment.effectiveTo});
-
-    const staleRange = await withOvernightScheduleBoundary(tx, {
-      employeeId: existingAssignment.employeeId,
-      removedAssignmentIds: [existingAssignment.id],
-      range: getAffectedScheduleRange({ existingRecord: existingAssignment }),
-    });
-
-    if (!staleRange.startDate) {
-      throw new Error("Unable to determine the affected shift-assignment date range.");
-    }
-
-    await markAffectedShiftRunsStale({
-      tx,
-      employeeId: existingAssignment.employeeId,
-      startDate: staleRange.startDate,
-      endDate: staleRange.endDate,
-      actorUserId: actor.userId,
-    });
-
-    await tx
-      .delete(employeeShiftAssignments)
-      .where(eq(employeeShiftAssignments.id, payload.id));
-
-    const latestImportedDate = await getLatestImportedAttendanceDate(
-      tx,
-      existingAssignment.employeeId
-    );
-    const rebuildRange = getRebuildRange({
-      staleRange,
-      latestImportedDate,
-    });
-    const rebuiltSummaryCount = rebuildRange
-      ? await rebuildEmployeeAttendanceSummaries({
-          tx,
-          actorUserId: actor.userId,
-          employeeId: existingAssignment.employeeId,
-          startDate: rebuildRange.startDate,
-          endDate: rebuildRange.endDate,
-        })
-      : 0;
-
-    await recordAdminAuditEvent({
-      actorUserId: actor.userId,
-      entityType: "employee_shift_assignment",
-      entityId: payload.id,
-      action: "employee_shift_assignment.deleted",
-      database: tx,
-      details: {
-        employeeId: existingAssignment.employeeId,
-        rebuiltSummaryCount,
-        rebuildRange,
-      },
-    });
-
-    return {
-      message: "Shift override deleted.",
-      rebuiltSummaryCount,
-    };
+    return deleteDateAssignment(tx, actor, payload.id);
   });
   revalidatePath("/shiftAssignments");
   return result;

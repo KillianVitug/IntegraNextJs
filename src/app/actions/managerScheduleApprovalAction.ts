@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
-import { db } from "@/db";
+import { db, type DbClient } from "@/db";
 import {
   authAccounts,
   department,
@@ -11,10 +11,10 @@ import {
   employeesGeneralInfo,
   managerScheduleChangeRequests,
 } from "@/db/schema";
-import {
-  deleteEmployeeShiftAssignment,
-  saveEmployeeShiftAssignment,
-} from "@/app/actions/shiftAssignmentAction";
+import { deleteDateAssignment } from "@/app/actions/shiftAssignmentHelpers";
+import { saveDateAssignment } from "@/lib/payroll/bulkDaySchedules";
+import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
+import { upsertEmployeeShiftAssignmentSchema } from "@/zod-schemas/employeeShiftAssignment";
 import { recordAdminAuditEvent, requireAdminActor } from "@/lib/admin";
 import { requireAdmin } from "@/lib/auth/server";
 
@@ -76,9 +76,9 @@ async function resolveAppliedCreateAssignmentId(request: {
     effectiveFrom: string;
     effectiveTo?: string | null;
   };
-}) {
+}, database: DbClient) {
   if (request.targetAssignmentId) {
-    const existing = await db.query.employeeShiftAssignments.findFirst({
+    const existing = await database.query.employeeShiftAssignments.findFirst({
       where: eq(employeeShiftAssignments.id, request.targetAssignmentId),
     });
 
@@ -90,7 +90,7 @@ async function resolveAppliedCreateAssignmentId(request: {
   }
 
   const effectiveTo = request.payload.effectiveTo ?? null;
-  const matches = await db
+  const matches = await database
     .select({ id: employeeShiftAssignments.id })
     .from(employeeShiftAssignments)
     .where(
@@ -124,13 +124,13 @@ async function resolveAppliedCreateAssignmentIds(request: {
     effectiveDates?: string[] | null;
     appliedAssignmentIds?: number[] | null;
   };
-}) {
+}, database: DbClient) {
   const appliedAssignmentIds = [
     ...new Set(request.payload.appliedAssignmentIds ?? []),
   ].filter((id) => Number.isInteger(id) && id > 0);
 
   if (appliedAssignmentIds.length > 0) {
-    const assignments = await db
+    const assignments = await database
       .select({ id: employeeShiftAssignments.id })
       .from(employeeShiftAssignments)
       .where(
@@ -153,7 +153,7 @@ async function resolveAppliedCreateAssignmentIds(request: {
     );
   }
 
-  return [await resolveAppliedCreateAssignmentId(request)];
+  return [await resolveAppliedCreateAssignmentId(request, database)];
 }
 
 export async function approveManagerScheduleChangeRequest(args: {
@@ -161,119 +161,36 @@ export async function approveManagerScheduleChangeRequest(args: {
   decisionNote?: string | null;
 }) {
   const actor = await requireAdminActor();
-  const request = await db.query.managerScheduleChangeRequests.findFirst({
-    where: and(
-      eq(managerScheduleChangeRequests.id, args.requestId),
-      eq(managerScheduleChangeRequests.status, "Pending"),
-    ),
-  });
-
-  if (!request) {
-    throw new Error("Pending schedule change request not found.");
-  }
-
-  let appliedAssignmentId: number | null = null;
-  let appliedAssignmentIds: number[] = [];
-  let nextPayload = request.payload;
-
-  if (request.action === "Delete") {
-    const assignmentId = request.targetAssignmentId ?? request.payload.id;
-    if (!assignmentId) {
-      throw new Error("Schedule deletion request is missing an assignment id.");
-    }
-    await deleteEmployeeShiftAssignment({ id: assignmentId });
-  } else {
-    const effectiveDates =
-      request.action === "Create"
-        ? getBundledEffectiveDates(request.payload)
-        : [];
-
-    if (request.action === "Create" && effectiveDates.length > 0) {
-      try {
-        for (const effectiveDate of effectiveDates) {
-          const result = await saveEmployeeShiftAssignment({
-            ...request.payload,
-            id: undefined,
-            employeeId: request.employeeId,
-            effectiveFrom: effectiveDate,
-            effectiveTo: effectiveDate,
-            appliedAssignmentIds: undefined,
-          });
-
-          if (result.assignmentId) {
-            appliedAssignmentIds.push(result.assignmentId);
-          }
-        }
-      } catch (error) {
-        for (const assignmentId of [...appliedAssignmentIds].reverse()) {
-          await deleteEmployeeShiftAssignment({ id: assignmentId });
-        }
-
-        throw error;
-      }
-
-      appliedAssignmentId = appliedAssignmentIds[0] ?? null;
-      nextPayload = {
-        ...request.payload,
-        appliedAssignmentIds,
-      };
+  await db.transaction(async tx => {
+    await lockAttendancePayrollInput(tx);
+    const [request] = await tx.select().from(managerScheduleChangeRequests).where(and(eq(managerScheduleChangeRequests.id, args.requestId), eq(managerScheduleChangeRequests.status, "Pending"))).for("update");
+    if (!request) throw new Error("Pending schedule change request not found.");
+    let appliedAssignmentId: number | null = null;
+    const appliedAssignmentIds: number[] = [];
+    let nextPayload = request.payload;
+    if (request.action === "Delete") {
+      const assignmentId = request.targetAssignmentId ?? request.payload.id;
+      if (!assignmentId) throw new Error("Schedule deletion request is missing an assignment id.");
+      await deleteDateAssignment(tx, actor, assignmentId);
     } else {
-      const result = await saveEmployeeShiftAssignment({
-        ...request.payload,
-        id:
-          request.action === "Update"
-            ? request.targetAssignmentId ?? request.payload.id
-            : undefined,
-        employeeId: request.employeeId,
-      });
-      appliedAssignmentId = result.assignmentId ?? null;
-      appliedAssignmentIds = appliedAssignmentId ? [appliedAssignmentId] : [];
-      nextPayload =
-        request.action === "Create"
-          ? {
-              ...request.payload,
-              appliedAssignmentIds,
-            }
-          : request.payload;
+      const dates = request.action === "Create" ? getBundledEffectiveDates(request.payload) : [];
+      const payloads = dates.length ? dates.map(effectiveDate => ({ ...request.payload, id: undefined, employeeId: request.employeeId, effectiveFrom: effectiveDate, effectiveTo: effectiveDate }))
+        : [{ ...request.payload, id: request.action === "Update" ? request.targetAssignmentId ?? request.payload.id : undefined, employeeId: request.employeeId }];
+      for (const payload of payloads) {
+        const result = await saveDateAssignment(tx, actor, upsertEmployeeShiftAssignmentSchema.parse(payload));
+        if (result.assignmentId) appliedAssignmentIds.push(result.assignmentId);
+      }
+      appliedAssignmentId = appliedAssignmentIds[0] ?? null;
+      if (request.action === "Create") nextPayload = { ...request.payload, appliedAssignmentIds };
     }
-  }
-
-  await db.transaction(async (tx) => {
-    await tx
-      .update(managerScheduleChangeRequests)
-      .set({
-        status: "Approved",
-        targetAssignmentId:
-          request.action === "Create"
-            ? appliedAssignmentId
-            : request.targetAssignmentId,
-        payload: nextPayload,
-        decisionNote: args.decisionNote?.trim() || null,
-        decidedByAccountId: actor.userId,
-        decidedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(eq(managerScheduleChangeRequests.id, request.id));
-
-    await recordAdminAuditEvent({
-      actorUserId: actor.userId,
-      entityType: "manager_schedule_change_request",
-      entityId: request.id,
-      action: "manager_schedule_change_request.approved",
-      details: {
-        employeeId: request.employeeId,
-        action: request.action,
-        targetAssignmentId:
-          request.action === "Create"
-            ? appliedAssignmentId
-            : request.targetAssignmentId,
-        appliedAssignmentIds,
-        effectiveDates: getBundledEffectiveDates(request.payload),
-      },
-      database: tx,
-    });
+    await tx.update(managerScheduleChangeRequests).set({
+      status: "Approved", targetAssignmentId: request.action === "Create" ? appliedAssignmentId : request.targetAssignmentId,
+      payload: nextPayload, decisionNote: args.decisionNote?.trim() || null, decidedByAccountId: actor.userId, decidedAt: new Date(), updatedAt: new Date(),
+    }).where(eq(managerScheduleChangeRequests.id, request.id));
+    await recordAdminAuditEvent({ actorUserId: actor.userId, entityType: "manager_schedule_change_request", entityId: request.id, action: "manager_schedule_change_request.approved",
+      details: { employeeId: request.employeeId, action: request.action, targetAssignmentId: request.action === "Create" ? appliedAssignmentId : request.targetAssignmentId,
+        appliedAssignmentIds, effectiveDates: getBundledEffectiveDates(request.payload) }, database: tx });
   });
-
   revalidateScheduleRequestSurfaces();
 }
 
@@ -337,12 +254,9 @@ export async function voidApprovedManagerScheduleChangeRequest(args: {
     throw new Error("A void reason is required.");
   }
 
-  const request = await db.query.managerScheduleChangeRequests.findFirst({
-    where: and(
-      eq(managerScheduleChangeRequests.id, args.requestId),
-      eq(managerScheduleChangeRequests.status, "Approved"),
-    ),
-  });
+  await db.transaction(async tx => {
+    await lockAttendancePayrollInput(tx);
+    const [request] = await tx.select().from(managerScheduleChangeRequests).where(and(eq(managerScheduleChangeRequests.id, args.requestId), eq(managerScheduleChangeRequests.status, "Approved"))).for("update");
 
   if (!request) {
     throw new Error("Approved schedule request not found.");
@@ -352,12 +266,11 @@ export async function voidApprovedManagerScheduleChangeRequest(args: {
     throw new Error("Only approved created schedule overrides can be voided.");
   }
 
-  const assignmentIds = await resolveAppliedCreateAssignmentIds(request);
+  const assignmentIds = await resolveAppliedCreateAssignmentIds(request, tx);
   for (const assignmentId of assignmentIds) {
-    await deleteEmployeeShiftAssignment({ id: assignmentId });
+    await deleteDateAssignment(tx, actor, assignmentId);
   }
 
-  await db.transaction(async (tx) => {
     const [updated] = await tx
       .update(managerScheduleChangeRequests)
       .set({

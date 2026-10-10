@@ -3,69 +3,39 @@
 import React from "react";
 import Link from "next/link";
 import { useFormContext } from "react-hook-form";
-import { enumToSelectOptions } from "@/utils/enumHelpers";
-import { shiftScheduleEnum, restDayEnum } from "@/db/schema";
 
 import { InputWithLabel } from "@/components/inputs/InputWithLabel";
-import { SelectWithLabel } from "@/components/inputs/SelectWithLabel";
-import { TimeWithLabel } from "@/components/inputs/TimeWithLabel";
 import { Button } from "@/components/ui/button";
 
 import { InsertEmployeeSchemaType } from "@/zod-schemas/employee";
 
 
 export default function TimekeepingTab({ employeeId }: { employeeId?: string }) {
-  const { control, register } = useFormContext<InsertEmployeeSchemaType>();
+  const { register, watch } = useFormContext<InsertEmployeeSchemaType>();
+  const profile = watch("timekeeping");
+  const hasSavedSchedule = Boolean(profile?.shiftSchedule || profile?.checkInTime || profile?.checkOutTime || profile?.restDay || Number(profile?.hoursWorked) || Number(profile?.minutesWorked));
 
   return (
     <div className="p-4">
-      <h3 className="font-semibold">Employee fallback schedule</h3>
-      <p className="mb-4 text-sm text-muted-foreground">These values apply when no weekly default or dated schedule is configured. Existing schedule history is retained.</p>
-      <div className="grid grid-cols-2 gap-3">
+      <h3 className="font-semibold">Attendance identification</h3>
+      <p className="mb-4 text-sm text-muted-foreground">Use Schedules to set working times, breaks and rest days for this employee.</p>
+      <div className="max-w-sm">
         <InputWithLabel
           fieldTitle="Timekeeping ID No."
           nameInSchema="timekeeping.timekeepingId"
           register={register}
         />
-        <SelectWithLabel
-          fieldTitle="Shift/Schedule"
-          nameInSchema="timekeeping.shiftSchedule"
-          control={control}
-          data={enumToSelectOptions(shiftScheduleEnum.enumValues)}
-        />
-        <TimeWithLabel
-          fieldTitle="Check-In Time"
-          nameInSchema="timekeeping.checkInTime"
-          control={control}
-        />
-        <TimeWithLabel
-          fieldTitle="Check-Out Time"
-          nameInSchema="timekeeping.checkOutTime"
-          control={control}
-        />
-        <SelectWithLabel
-          fieldTitle="Rest Day"
-          nameInSchema="timekeeping.restDay"
-          control={control}
-          data={enumToSelectOptions(restDayEnum.enumValues)}
-        />
-        <InputWithLabel
-          fieldTitle="Total Hours"
-          nameInSchema="timekeeping.hoursWorked"
-          register={register}
-          placeholder="0"
-          type="number"
-          step="any"
-        />
-        <InputWithLabel
-          fieldTitle="Total Minutes"
-          nameInSchema="timekeeping.minutesWorked"
-          register={register}
-          placeholder="0"
-          type="number"
-          step="any"
-        />
       </div>
+      {hasSavedSchedule ? <details className="mt-4 text-sm text-muted-foreground">
+        <summary className="cursor-pointer">Saved profile values</summary>
+        <p className="mt-2">Retained for schedule history. Current schedules are managed using the links below.</p>
+        <dl className="mt-2 grid grid-cols-2 gap-2">
+          <dt>Schedule</dt><dd>{profile?.shiftSchedule || "—"}</dd>
+          <dt>Times</dt><dd>{profile?.checkInTime || "—"} – {profile?.checkOutTime || "—"}</dd>
+          <dt>Rest day</dt><dd>{profile?.restDay || "—"}</dd>
+          <dt>Duration</dt><dd>{Number(profile?.hoursWorked) || 0}h {Number(profile?.minutesWorked) || 0}m</dd>
+        </dl>
+      </details> : null}
       {employeeId ? (
         <div className="mt-4 space-y-3">
           <p className="text-sm text-muted-foreground">
@@ -84,7 +54,7 @@ export default function TimekeepingTab({ employeeId }: { employeeId?: string }) 
             </Button>
           </div>
         </div>
-      ) : null}
+      ) : <p className="mt-4 text-sm text-muted-foreground">Save the employee first, then open Schedules to assign shifts.</p>}
     </div>
   );
 }
