@@ -17,7 +17,7 @@ assert.deepEqual(intended, sourceCopy);
 assert.equal(split.preview.hoursPerDay, 8.5);
 assert.equal(split.payload.punchPolicy, "split_gaps");
 assert.equal(split.payload.breaks.filter(row => row.requiresPunches).length, 1);
-assert.equal(describeSchedule(shiftTableScheduleSnapshot(split.preview)).periodsLabel, "08:00–11:00 / 15:30–21:00");
+assert.equal(describeSchedule(shiftTableScheduleSnapshot(split.preview)).periodsLabel, "08:00-11:00 / 15:30-21:00");
 assert.match(describeSchedule(shiftTableScheduleSnapshot(split.preview)).label, /8h normal \+ 0.5h OT.*4 punches required/);
 const overnight = reviewShiftEditor({ ...intended, periods: [{ fromTime: "22:00", toTime: "02:00" }, { fromTime: "03:00", toTime: "06:00" }] }, identity);
 assert.ok(insertShiftTableSchema.safeParse(overnight.payload).success);
