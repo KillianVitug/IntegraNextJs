@@ -9,7 +9,8 @@ import { payrollActionResult } from "@/lib/payroll/validation";
 import type { WorkDraft } from "@/lib/payroll/attendanceWorkbenchModel";
 import { and, eq } from "drizzle-orm";
 import { workTreatments, workHistory, workPlans } from "@/db/attendanceWorkbenchSchema";
-import { shiftTables } from "@/db/schema";
+import { fetchShiftTables } from "@/lib/queries/fetchLookupData";
+import { compareShiftTableSchedules, shiftTableScheduleLabel } from "@/lib/scheduling/presentation";
 import { adminDecision } from "@/lib/payroll/attendanceAdminDecision";
 import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
 import { PayrollValidationError } from "@/lib/payroll/validation";
@@ -71,5 +72,5 @@ export async function keepAdminAttendanceAction(periodId:string,employeeId:strin
  }));
 }
 export async function attendanceScheduleOptionsAction() {
- await requireAdminActor();return db.select({id:shiftTables.id,code:shiftTables.code,name:shiftTables.description,start:shiftTables.regularStartTime,end:shiftTables.regularEndTime}).from(shiftTables);
+ await requireAdminActor();return (await fetchShiftTables()).sort(compareShiftTableSchedules).map(row=>({id:row.id,code:row.code,name:row.description,start:row.regularStartTime,end:row.regularEndTime,label:shiftTableScheduleLabel(row)}));
 }

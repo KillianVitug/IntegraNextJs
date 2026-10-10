@@ -1,4 +1,5 @@
 "use client";
+import { shiftTableScheduleLabel } from "@/lib/scheduling/presentation";
 
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
@@ -302,7 +303,7 @@ export function WeeklyShiftPatternManager({
                       <option value="0">Off / Rest Day</option>
                       {shiftTables.map((shiftTable) => (
                         <option key={`${weekday}-${shiftTable.id}`} value={shiftTable.id}>
-                          {shiftTable.code} | {shiftTable.description}
+                          {shiftTableScheduleLabel(shiftTable)}
                         </option>
                       ))}
                     </select>
@@ -315,7 +316,7 @@ export function WeeklyShiftPatternManager({
                         return "No scheduled shift. Payroll and attendance will treat this as an off/rest day unless an override exists.";
                       }
 
-                      return `${preview.shiftTable.code} | ${preview.shiftTable.description} | ${preview.snapshot.checkInTime ?? "-"}-${preview.snapshot.checkOutTime ?? "-"} | ${preview.snapshot.hoursPerDay.toFixed(2)} hrs${preview.snapshot.breakMinutes > 0 ? ` | Break ${preview.snapshot.breakMinutes} mins` : ""}`;
+                      return shiftTableScheduleLabel(preview.shiftTable);
                     })()}
                   </div>
                 </div>

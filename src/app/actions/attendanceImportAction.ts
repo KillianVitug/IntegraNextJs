@@ -383,6 +383,7 @@ function mapApprovedCorrectionRows(
 function buildAttendanceSummaryConflictSet() {
   return {
     shiftAssignmentId: sql`excluded.shift_assignment_id`,
+    calculationPolicy: sql`excluded.calculation_policy`,
     sourceBatchId: sql`excluded.source_batch_id`,
     firstInAt: sql`excluded.first_in_at`,
     lastOutAt: sql`excluded.last_out_at`,
@@ -3896,6 +3897,8 @@ async function buildAttendanceDtrEmployees(
           scheduledInTime: row.effective.scheduledInTime,
           scheduledOutTime: row.effective.scheduledOutTime,
           scheduledMinutes: row.effective.scheduledMinutes,
+          calculationPolicy: row.effective.calculationPolicy,
+          regularMinutes: row.effective.regularMinutes,
           workedMinutes: row.effective.workedMinutes,
           lateMinutes: row.effective.lateMinutes,
           undertimeMinutes: row.effective.undertimeMinutes,
@@ -4051,6 +4054,8 @@ function buildAttendanceDtrEmployeesFromPersistedSummaries(
           scheduledInTime: effective.scheduledInTime,
           scheduledOutTime: effective.scheduledOutTime,
           scheduledMinutes: effective.scheduledMinutes,
+          calculationPolicy: effective.calculationPolicy,
+          regularMinutes: effective.regularMinutes,
           workedMinutes: effective.workedMinutes,
           lateMinutes: effective.lateMinutes,
           undertimeMinutes: effective.undertimeMinutes,
@@ -4786,7 +4791,9 @@ async function replaceGeneratedDtrExceptionRowsForEmployee(args: {
           calendarHolidayTypeByDate,
         }),
     });
-  const generatedRows = buildGeneratedDtrExceptionRows({
+  const generatedRows = summaryRows.some(row=>row.calculationPolicy==="eight_hour_day")
+    ? await calculateGeneratedDtrRows({tx:args.tx,payrollPeriod,employeeIds:[args.employeeId],summaryRows})
+    : buildGeneratedDtrExceptionRows({
     payrollPeriodId: args.payrollPeriodId,
     employeeId: args.employeeId,
     attendanceDate: args.attendanceDate,

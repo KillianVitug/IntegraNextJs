@@ -11,7 +11,9 @@ import {
 } from "@/db/schema";
 import { recordAdminAuditEvent, recordPayrollRunEvent } from "@/lib/admin";
 import { fetchConfirmedHolidayRowsForRange } from "@/lib/holidays";
-import { and, desc, eq, gte, lte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
+import { lockAttendancePayrollInput } from "./attendanceSourceGuard";
+import { refreshSchedulePayrollDerivatives } from "./scheduleRefresh";
 import { isPayrollEligibleEmploymentStatus } from "@/lib/employmentStatus";
 import { format } from "date-fns";
 import {
@@ -66,7 +68,7 @@ async function markLatestEditableRunStale(args: {
 
   let count=0;
   for(const latestRun of affectedRuns){
-  if (!["Draft","Reviewed","Approved"].includes(latestRun.status)) {
+  if (!["Draft","Reviewed"].includes(latestRun.status)) {
     continue;
   }
 
@@ -222,6 +224,7 @@ export async function getEmployeePayrollAdjustmentRows(args: {
     const workedMinutesOverride = override?.workedMinutesOverride ?? null;
     const effectiveWorkedMinutes = workedMinutesOverride ?? row.workedMinutes;
     const computedOvertimeMinutes = resolveDetectedOvertimeMinutes({
+      calculationPolicy: row.calculationPolicy,
       scheduleOvertimeMinutes: row.overtimeMinutes,
       effectiveWorkedMinutes,
     });
@@ -241,6 +244,7 @@ export async function getEmployeePayrollAdjustmentRows(args: {
     const overtimePreview =
       matchedRule && approvedOvertimeMinutes > 0
         ? computeOvertimeCompensation({
+            calculationPolicy: row.calculationPolicy,
             approvedMinutes: approvedOvertimeMinutes,
             dailyRate,
             scheduledMinutes: row.scheduledMinutes,
@@ -321,6 +325,11 @@ export async function saveEmployeePayrollOvertimeOverride(args: {
   }
 
   return db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
+    const currentPeriod=await tx.query.payrollPeriods.findFirst({where:eq(payrollPeriods.id,args.payrollPeriodId)});
+    if(currentPeriod?.status!=="Open") throw new Error("A closed payroll period cannot change overtime approval. Use the adjustment workflow.");
+    const protectedRuns=await tx.select({id:payrollRuns.id}).from(payrollRuns).where(and(payrollInputPeriodScope(args.payrollPeriodId),inArray(payrollRuns.status,["Approved","Posted"])));
+    if(protectedRuns.length) throw new Error("Approved or Posted payroll must be preserved. Use the adjustment workflow to change overtime.");
     const summaryRow = await tx.query.attendanceDailySummaries.findFirst({
       where: and(
         eq(attendanceDailySummaries.employeeId, args.employeeId),
@@ -372,6 +381,7 @@ export async function saveEmployeePayrollOvertimeOverride(args: {
       actorUserId: args.actorUserId,
       notes: "Marked stale because employee overtime approval changed.",
     });
+    if(summaryRow.calculationPolicy==="eight_hour_day") await refreshSchedulePayrollDerivatives({tx,actorUserId:args.actorUserId,employeeId:args.employeeId,startDate:args.attendanceDate,endDate:args.attendanceDate});
 
     await recordAdminAuditEvent({
       actorUserId: args.actorUserId,

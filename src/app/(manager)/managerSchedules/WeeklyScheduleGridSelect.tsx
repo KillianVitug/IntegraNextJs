@@ -1,4 +1,6 @@
 "use client";
+import { shiftTableScheduleLabel } from "@/lib/scheduling/presentation";
+import type { ShiftTableReadModel } from "@/lib/shifts";
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -8,13 +10,7 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 
-export type WeeklyScheduleShiftOption = {
-  id: number;
-  code: string;
-  description: string;
-  regularStartTime: string;
-  regularEndTime: string;
-};
+export type WeeklyScheduleShiftOption = ShiftTableReadModel;
 
 type Props = {
   name: string;
@@ -27,46 +23,16 @@ type Props = {
   resetVersion?: number;
 };
 
-function formatAmPmTime(time: string) {
-  const [rawHour, rawMinute] = time.split(":");
-  const hour = Number(rawHour);
-  const minute = Number(rawMinute);
-
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
-    return time;
-  }
-
-  const period = hour >= 12 ? "PM" : "AM";
-  const displayHour = hour % 12 || 12;
-
-  return `${displayHour}:${String(minute).padStart(2, "0")} ${period}`;
+function formatSelectedLabel(shiftTable: WeeklyScheduleShiftOption | undefined) {
+ return shiftTable ? shiftTableScheduleLabel(shiftTable) : "Off / Rest Day";
 }
-
-function formatSelectedLabel(
-  shiftTable: WeeklyScheduleShiftOption | undefined,
-  mode: "time" | "description",
-) {
-  if (!shiftTable) return "Off / Rest Day";
-
-  if (mode === "description") {
-    return shiftTable.description;
-  }
-
-  return `${formatAmPmTime(shiftTable.regularStartTime)} - ${formatAmPmTime(
-    shiftTable.regularEndTime,
-  )}`;
-}
-
-function formatOptionLabel(shiftTable: WeeklyScheduleShiftOption) {
-  return `${shiftTable.code} | ${shiftTable.description} | ${shiftTable.regularStartTime} - ${shiftTable.regularEndTime}`;
-}
+const formatOptionLabel = shiftTableScheduleLabel;
 
 export function WeeklyScheduleGridSelect({
   name,
   defaultValue,
   shiftTables,
   label,
-  selectedLabelMode = "time",
   value,
   onValueChange,
   resetVersion = 0,
@@ -124,7 +90,7 @@ export function WeeklyScheduleGridSelect({
           className="h-11 min-w-0 text-base md:h-9 md:min-w-56 md:text-sm"
         >
           <span className="truncate">
-            {formatSelectedLabel(selectedShiftTable, selectedLabelMode)}
+            {formatSelectedLabel(selectedShiftTable)}
           </span>
         </SelectTrigger>
         <SelectContent>

@@ -20,6 +20,7 @@ export default async function SchedulesPage({ searchParams }: { searchParams: Pr
   return <div className="w-full min-w-0">
     {auth.role === "ADMIN" ? <Header /> : <header className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3"><Link href="/managerHome" className="font-semibold">Integra · Manager</Link><nav aria-label="Manager navigation" className="flex gap-4 text-sm"><Link href="/managerHome">Home</Link><Link href="/managerCalendar">Calendar</Link><Link href="/managerLeaves">Leave</Link></nav></header>}
     {process.env.NEXT_PUBLIC_PAYROLL_ACCEPTANCE === "true" && <p className="bg-amber-100 p-3 text-center text-sm font-semibold text-slate-900">LOCAL ACCEPTANCE COPY · Restored database</p>}
+    <aside className="mx-auto w-full max-w-[1600px] px-3 pt-4 text-sm text-muted-foreground sm:px-5 lg:px-6">Need different work or break times? {auth.role === "ADMIN" ? <Link href="/constants/shiftTable/form" className="font-medium text-primary underline">Create or revise a reusable schedule</Link> : "Ask an administrator to add the exact work periods and breaks. Then choose that schedule here."}</aside>
     <main className="mx-auto w-full min-w-0 max-w-[1600px] p-3 sm:p-5 lg:p-6"><ScheduleWorkspaceEditor initialWorkspace={workspace} initialView={params.view === "weekly" ? "weekly" : "period"} employeeId={params.employeeId} day={params.day} payrollGroup={params.group === "Monthly" ? "Monthly" : "Daily"} canViewPayroll={auth.role==="ADMIN"&&hasPermission(auth,AUTH_PERMISSIONS.PAYROLL_COMPUTE)} /></main>
   </div>;
 }

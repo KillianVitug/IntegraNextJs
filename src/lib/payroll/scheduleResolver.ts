@@ -7,11 +7,12 @@ import {
   restDayEnum,
 } from "@/db/schema";
 import type { ShiftWindow } from "./attendance";
+import type { ScheduleSnapshot } from "@/lib/scheduling/workspace-types";
 
 type StoredAssignment = typeof employeeShiftAssignments.$inferSelect;
-export type ShiftAssignmentRecord = Omit<StoredAssignment, "confirmedSchedule" | "scheduleDecisionId"> & Partial<Pick<StoredAssignment, "confirmedSchedule" | "scheduleDecisionId">>;
+export type ShiftAssignmentRecord = Omit<StoredAssignment, "confirmedSchedule" | "scheduleDecisionId" | "calculationPolicy" | "punchPolicy"> & Partial<Pick<StoredAssignment, "confirmedSchedule" | "scheduleDecisionId" | "calculationPolicy" | "punchPolicy">>;
 type StoredWeeklyDay = typeof employeeWeeklyShiftPatternDays.$inferSelect;
-export type WeeklyShiftPatternDayRecord = Omit<StoredWeeklyDay, "scheduleState"> & Partial<Pick<StoredWeeklyDay, "scheduleState">>;
+export type WeeklyShiftPatternDayRecord = Omit<StoredWeeklyDay, "scheduleState" | "calculationPolicy" | "punchPolicy" | "definitionSnapshot"> & Partial<Pick<StoredWeeklyDay, "scheduleState" | "calculationPolicy" | "punchPolicy" | "definitionSnapshot">>;
 export type WeeklyShiftPatternRecord = typeof employeeWeeklyShiftPatterns.$inferSelect & {
   days: WeeklyShiftPatternDayRecord[];
 };
@@ -43,9 +44,10 @@ function toAmount(value: string | number | null | undefined) {
 export function scheduleVersionRecord<T extends object>(record: T | null): T | null {
   if (!record) return null;
   const copy = {...record} as Record<string, unknown>;
-  for (const key of ["confirmedSchedule", "scheduleDecisionId", "scheduleState"]) {
+  for (const key of ["confirmedSchedule", "scheduleDecisionId", "scheduleState", "definitionSnapshot"]) {
     if (copy[key] == null) delete copy[key];
   }
+  for (const key of ["calculationPolicy", "punchPolicy"]) if (copy[key] == null || copy[key] === "legacy") delete copy[key];
   return copy as T;
 }
 
@@ -58,11 +60,22 @@ function getLegacyHoursPerDay(timekeeping: LegacyTimekeepingRecord) {
   return hoursWorked > 0 ? hoursWorked : 8;
 }
 
+/** Captured definitions, including paid breaks, are authoritative calculation inputs. */
+function definitionPolicyWindow(snapshot: ScheduleSnapshot | null | undefined, stored?: {calculationPolicy?: string | null; punchPolicy?: string | null; shiftCode?: string | null; shiftName?: string | null} | null): Partial<ShiftWindow> {
+  const calculationPolicy = snapshot?.calculationPolicy ?? stored?.calculationPolicy ?? "legacy";
+  const punchPolicy = snapshot?.punchPolicy ?? stored?.punchPolicy ?? "legacy";
+  const windows = (overtime: boolean) => (snapshot?.breaks ?? []).filter(row => row.slotKey.startsWith("ot_") === overtime && row.fromTime && row.toTime).map(row => ({fromTime:row.fromTime!,toTime:row.toTime!,deductMinutes:row.deduct ? row.deductHours*60+row.deductMinutes : 0,requiresPunches:row.requiresPunches===true}));
+  return {calculationPolicy:calculationPolicy==="eight_hour_day"?"eight_hour_day":"legacy",punchPolicy:punchPolicy==="outer"||punchPolicy==="split_gaps"?punchPolicy:"legacy",
+    ...(snapshot?{regularBreakWindows:windows(false),overtimeBreakWindows:windows(true)}:{}),
+    requiresSplitPunches:punchPolicy==="split_gaps" || punchPolicy==="legacy"&&[snapshot?.shiftCode??stored?.shiftCode,snapshot?.shiftName??stored?.shiftName].some(value=>value?.toUpperCase().includes("SPLIT"))};
+}
+
 function buildOverrideShiftWindow(
   assignment: ShiftAssignmentRecord | null | undefined
 ): ShiftWindow {
   const confirmed = assignment?.confirmedSchedule;
   if (confirmed) return {
+    ...definitionPolicyWindow(confirmed, assignment),
     checkInTime: confirmed.checkInTime,
     checkOutTime: confirmed.checkOutTime,
     breakMinutes: confirmed.breakMinutes,
@@ -71,6 +84,7 @@ function buildOverrideShiftWindow(
     restDay: assignment?.restDay ?? null,
   };
   return {
+    ...definitionPolicyWindow(null, assignment),
     checkInTime: assignment?.checkInTime ?? null,
     checkOutTime: assignment?.checkOutTime ?? null,
     breakMinutes: assignment?.breakMinutes ?? 0,
@@ -85,6 +99,8 @@ function buildWeeklyPatternShiftWindow(args: {
   patternDay: WeeklyShiftPatternDayRecord | null | undefined;
 }): ShiftWindow {
   const patternDay = args.patternDay ?? null;
+  const captured = patternDay?.definitionSnapshot;
+  if (captured) return {...definitionPolicyWindow(captured,patternDay),checkInTime:captured.checkInTime,checkOutTime:captured.checkOutTime,breakMinutes:captured.breakMinutes,graceMinutes:captured.graceMinutes,hoursPerDay:captured.hoursPerDay,restDay:captured.kind==="rest"?args.dayName:null};
   if (patternDay?.scheduleState === "unconfigured") {
     return { checkInTime: null, checkOutTime: null, breakMinutes: 0, graceMinutes: 0, hoursPerDay: 0, restDay: null };
   }
@@ -106,6 +122,7 @@ function buildWeeklyPatternShiftWindow(args: {
   }
 
   return {
+    ...definitionPolicyWindow(null,patternDay),
     checkInTime: patternDay?.checkInTime ?? null,
     checkOutTime: patternDay?.checkOutTime ?? null,
     breakMinutes: patternDay?.breakMinutes ?? 0,
@@ -211,11 +228,11 @@ export function resolveEmployeeScheduleForDate(args: {
       source: "WEEKLY_PATTERN",
       dayName,
       shiftWindow,
-      hoursPerDay: toAmount(weeklyPatternDay?.hoursPerDay),
+      hoursPerDay: weeklyPatternDay?.definitionSnapshot?.hoursPerDay ?? toAmount(weeklyPatternDay?.hoursPerDay),
       overrideAssignment: null,
       weeklyPattern,
       weeklyPatternDay,
-      configured: weeklyPatternDay?.scheduleState !== "unconfigured",
+      configured: (weeklyPatternDay?.definitionSnapshot?.kind ?? weeklyPatternDay?.scheduleState) !== "unconfigured",
     };
   }
 

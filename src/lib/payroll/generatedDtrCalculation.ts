@@ -1,7 +1,7 @@
 import "server-only";
 import type { AttendanceDtrTotalsView } from "@/app/(ntg)/payroll/types";
-import { db } from "@/db";
-import { accountCode, attendanceDailySummaries, branchCalendarAccountCodeOverrides, employeeAttendanceDayStatusOverrides, employeeAttendanceDayMetricOverrides, employeeAttendanceDayTypeOverrides, employeeAttendancePeriodOverrides, employeePayrollExceptionRows, employeesGeneralInfo, holidayTypeAccountCodes, holidayYearCalendar, payrollPeriods } from "@/db/schema";
+import { db, type DbClient } from "@/db";
+import { accountCode, attendanceDailySummaries, branchCalendarAccountCodeOverrides, employeeAttendanceDayStatusOverrides, employeeAttendanceDayMetricOverrides, employeeAttendanceDayTypeOverrides, employeeAttendancePeriodOverrides, employeeDailyOvertimeOverrides, overtimeRules, employeePayrollExceptionRows, employeesGeneralInfo, holidayTypeAccountCodes, holidayYearCalendar, payrollPeriods } from "@/db/schema";
 import { and, asc, eq, gte, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import { applyAttendanceDtrEffectiveStatus, computeAccumulatedLatePenaltyMinutes, computeNetDtrWorkedMinutes, computePayrollTardinessMinutes, getAttendanceDtrDayTypeFromHolidayType, getHolidayTypeFromAttendanceDtrDayType, normalizeAttendanceDtrPeriodOverride, type AttendanceDtrDayType, type AttendanceDtrManualStatus } from "@/lib/payroll/dtrOverrides";
 import { buildHolidayTypeByDate, resolveOvertimeCategory, type OvertimeCategory, type OvertimeHolidayType } from "@/lib/payroll/overtime";
@@ -9,6 +9,8 @@ import { computeGeneratedDtrLwopMinutes } from "@/lib/payroll/dtrLwop";
 import { isGeneratedDtrHolidayCheckRequirementSatisfied, getGeneratedDtrHolidayOvertimeCapacityMinutes, getGeneratedDtrHolidayWorkedMinutes, type GeneratedDtrHolidayCheckDateAttendance, type GeneratedDtrHolidayCheckDateRequirement } from "@/lib/payroll/generatedDtrHolidays";
 import { buildBranchCalendarOverrideRowsForGeneratedDtr, buildBranchCalendarOverrideScopeMaps } from "@/lib/payroll/branchCalendarAccountCodes";
 import type { PayrollExceptionDtrOverrideSource } from "@/lib/payroll/payrollExceptions";
+import { computePolicyAttendancePay } from "./dtrOverrides";
+import { findMatchingOvertimeRule, resolveApprovedOvertimeMinutes, resolveDetectedOvertimeMinutes } from "./overtime";
 
 export type AttendanceTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -18,6 +20,8 @@ export function roundDays(value: number) {
 
 export function buildAttendanceDtrTotals(
   rows: Array<{
+    calculationPolicy?: string | null;
+    anomalyFlags?: string | string[] | null;
     scheduledMinutes: number;
     workedMinutes: number;
     regularMinutes: number;
@@ -74,10 +78,12 @@ export function buildAttendanceDtrTotals(
   }
 
   const computedPresentDays = roundDays(totals.presentDays);
+  const hasExplicitPolicy = rows.some(row=>row.calculationPolicy==="eight_hour_day");
+  const policyMinutes = hasExplicitPolicy ? computePolicyAttendancePay(rows,0).minutes : null;
   const biometricWorkedMinutes = totals.workedMinutes;
   const computed = {
     presentDays: computedPresentDays,
-    workedMinutes: computeNetDtrWorkedMinutes({
+    workedMinutes: policyMinutes ?? computeNetDtrWorkedMinutes({
       presentDays: computedPresentDays,
       lateMinutes: totals.lateMinutes,
       undertimeMinutes: totals.undertimeMinutes,
@@ -101,7 +107,7 @@ export function buildAttendanceDtrTotals(
   return {
     ...totals,
     presentDays: overrides.presentDays ?? computed.presentDays,
-    workedMinutes: computeNetDtrWorkedMinutes({
+    workedMinutes: hasExplicitPolicy ? Math.max(0,overrides.workedMinutes ?? computed.workedMinutes + computed.lateMinutes + computed.undertimeMinutes - rawEffectiveLateMinutes - effectiveUndertimeMinutes) : computeNetDtrWorkedMinutes({
       presentDays: computed.presentDays,
       lateMinutes: rawEffectiveLateMinutes,
       undertimeMinutes: effectiveUndertimeMinutes,
@@ -138,6 +144,7 @@ export function getDtrMetricOverrideBaselineWorkedMinutes(row: {
 
 export function applyAttendanceDtrMetricOverride<
   T extends {
+    calculationPolicy?: string | null;
     scheduledMinutes: number;
     workedMinutes: number;
     regularMinutes: number;
@@ -161,6 +168,10 @@ export function applyAttendanceDtrMetricOverride<
     override.overtimeMinutes == null
       ? row.overtimeMinutes
       : Math.max(0, Math.round(override.overtimeMinutes));
+  if(row.calculationPolicy==="eight_hour_day") {
+    const delta=row.lateMinutes+row.undertimeMinutes-lateMinutes-undertimeMinutes;
+    return {...row,workedMinutes:Math.max(0,row.workedMinutes+delta),regularMinutes:row.isRestDay?0:Math.min(480,Math.max(0,row.regularMinutes+delta)),lateMinutes,undertimeMinutes,overtimeMinutes};
+  }
   const workedMinutes = Math.max(
     0,
     getDtrMetricOverrideBaselineWorkedMinutes(row) - lateMinutes - undertimeMinutes
@@ -649,7 +660,7 @@ export function buildHolidayAccountByType(args: {
 }
 
 export async function fetchHolidayRowsForGeneratedDtr(args: {
-  tx: AttendanceTransaction;
+  tx: DbClient;
   startDate: string;
   endDate: string;
 }) {
@@ -690,6 +701,7 @@ export async function fetchHolidayRowsForGeneratedDtr(args: {
 }
 
 export function buildGeneratedDtrWorkedExceptionRow(args: {
+  policyWorkedMinutes?: number;
   payrollPeriodId: string;
   employeeId: string;
   attendanceDate: string;
@@ -705,7 +717,7 @@ export function buildGeneratedDtrWorkedExceptionRow(args: {
   holidayWorkedRows?: GeneratedDtrHolidayWorkedRow[];
   branchCalendarOverrideRows?: GeneratedDtrBranchCalendarOverrideRow[];
 }): GeneratedDtrExceptionRowInsert[] {
-  const effectiveWorkedMinutes = computeNetDtrWorkedMinutes({
+  const effectiveWorkedMinutes = args.overrides.workedMinutes ?? args.policyWorkedMinutes ?? computeNetDtrWorkedMinutes({
     presentDays: args.computed.presentDays,
     lateMinutes: args.overrides.lateMinutes ?? args.computed.lateMinutes,
     undertimeMinutes:
@@ -929,6 +941,8 @@ export function buildGeneratedDtrOvertimeExceptionRows(args: {
 }
 
 export function buildGeneratedDtrExceptionRows(args: {
+  policyWorkedMinutes?: number;
+  policyTardinessMinutes?: number;
   payrollPeriodId: string;
   employeeId: string;
   attendanceDate: string;
@@ -945,7 +959,7 @@ export function buildGeneratedDtrExceptionRows(args: {
 
   const lateMinutes = Math.max(
     0,
-    computePayrollTardinessMinutes(
+    args.policyTardinessMinutes ?? computePayrollTardinessMinutes(
       args.overrides.lateMinutes ?? args.computed.lateMinutes
     )
   );
@@ -1018,7 +1032,7 @@ export function buildGeneratedDtrExceptionRows(args: {
 }
 
 export async function calculateGeneratedDtrRows(args: {
-  tx: AttendanceTransaction;
+  tx: DbClient;
   payrollPeriod: Pick<typeof payrollPeriods.$inferSelect, "id" | "startDate" | "endDate">;
   employeeIds: string[];
   summaryRows?: Array<typeof attendanceDailySummaries.$inferSelect>;
@@ -1039,6 +1053,9 @@ export async function calculateGeneratedDtrRows(args: {
         lte(attendanceDailySummaries.attendanceDate, args.payrollPeriod.endDate)
       )
     );
+  const hasExplicitDefinitions = summaryRows.some(row=>row.calculationPolicy==="eight_hour_day");
+  const overtimeApprovalRows = hasExplicitDefinitions ? await args.tx.select().from(employeeDailyOvertimeOverrides).where(and(inArray(employeeDailyOvertimeOverrides.employeeId,employeeIds),gte(employeeDailyOvertimeOverrides.attendanceDate,args.payrollPeriod.startDate),lte(employeeDailyOvertimeOverrides.attendanceDate,args.payrollPeriod.endDate))) : [];
+  const policyOvertimeRules = hasExplicitDefinitions ? await args.tx.select().from(overtimeRules) : [];
   const periodOverrideRows = await args.tx
     .select()
     .from(employeeAttendancePeriodOverrides)
@@ -1210,7 +1227,7 @@ export async function calculateGeneratedDtrRows(args: {
   const metricOverrideByEmployeeDate = buildDtrMetricOverrideByEmployeeDate(
     dayMetricOverrideRows
   );
-  args.onInputs?.({periodOverrideRows,dayStatusOverrideRows,dayTypeOverrideRows,dayMetricOverrideRows,accountRows,holidayMappingRows,holidayRows,branchOverrideRows,employeeDepartmentRows,checkDateSummaryRows});
+  args.onInputs?.({periodOverrideRows,dayStatusOverrideRows,dayTypeOverrideRows,dayMetricOverrideRows,accountRows,holidayMappingRows,holidayRows,branchOverrideRows,employeeDepartmentRows,checkDateSummaryRows,overtimeApprovalRows,policyOvertimeRules});
   const generatedRows = employeeIds.flatMap((employeeId) => {
     const periodOverride = periodOverrideByEmployeeId.get(employeeId) ?? null;
     const effectiveRows = (summaryRowsByEmployeeId.get(employeeId) ?? []).filter(row => !args.cutoff || row.attendanceDate <= args.cutoff).map(
@@ -1226,6 +1243,13 @@ export async function calculateGeneratedDtrRows(args: {
             null
         )
     );
+    for (const [index,row] of effectiveRows.entries()) {
+      if (row.calculationPolicy!=="eight_hour_day") continue;
+      const approval=overtimeApprovalRows.find(item=>item.employeeId===employeeId&&item.attendanceDate===row.attendanceDate);
+      const category=approval?.category??resolveOvertimeCategory({isRestDay:row.isRestDay,holidayType:getHolidayTypeFromAttendanceDtrDayType(dayTypeOverrideByEmployeeDate.get(`${employeeId}|${row.attendanceDate}`)??getAttendanceDtrDayTypeFromHolidayType(calendarHolidayTypeByDate.get(row.attendanceDate)??null))});
+      const approved=resolveApprovedOvertimeMinutes({isApproved:approval?.isApproved===true,manualMinutes:approval?.manualMinutes,computedMinutes:resolveDetectedOvertimeMinutes({scheduleOvertimeMinutes:row.overtimeMinutes,effectiveWorkedMinutes:approval?.workedMinutesOverride??row.workedMinutes,calculationPolicy:row.calculationPolicy})});
+      effectiveRows[index]={...row,overtimeMinutes:row.workedMinutes>0&&findMatchingOvertimeRule(policyOvertimeRules,category,approved)?approved:0};
+    }
     const checkDateAttendanceByDate = buildCheckDateAttendanceByDate(
       checkDateSummaryRowsByEmployeeId.get(employeeId) ?? []
     );
@@ -1280,12 +1304,24 @@ export async function calculateGeneratedDtrRows(args: {
           }),
       });
 
+    const explicitPeriod=effectiveRows.some(row=>row.calculationPolicy==="eight_hour_day");
+    if(explicitPeriod && [totals.overrides.workedMinutes,totals.overrides.lateMinutes,totals.overrides.undertimeMinutes,totals.overrides.overtimeMinutes].some(value=>value!=null)) throw new Error("This period uses explicit shift definitions. Clear whole-period time overrides and review the affected employee-days; an aggregate override cannot safely allocate normal pay and approved overtime between schedule policies.");
+    if (explicitPeriod) {
+      const perDay=computePolicyAttendancePay(effectiveRows,0);
+      return perDay.days.flatMap(({row,minutes,penaltyMinutes})=>{
+        const day=effectiveRows.find(item=>item===row)!;
+        const dayTotals=buildAttendanceDtrTotals([day]);
+        return buildGeneratedDtrExceptionRows({payrollPeriodId:args.payrollPeriod.id,employeeId,attendanceDate:day.attendanceDate,overrides:dayTotals.overrides,computed:dayTotals.computed,policyWorkedMinutes:minutes,policyTardinessMinutes:day.lateMinutes+penaltyMinutes,absentDays:dayTotals.absentDays,accountRows,
+          holidayWorkedRows:holidayWorkedRows.filter(item=>item.attendanceDate===day.attendanceDate),holidayOvertimeRows:holidayOvertimeRows.filter(item=>item.attendanceDate===day.attendanceDate),branchCalendarOverrideRows:branchCalendarOverrideRows.filter(item=>item.attendanceDate===day.attendanceDate)}).map(item=>({...item,remarks:`${item.remarks} Explicit shift day.`}));
+      });
+    }
     return buildGeneratedDtrExceptionRows({
       payrollPeriodId: args.payrollPeriod.id,
       employeeId,
       attendanceDate: args.payrollPeriod.startDate,
       overrides: totals.overrides,
       computed: totals.computed,
+      policyWorkedMinutes: explicitPeriod?totals.workedMinutes:undefined,
       absentDays: totals.absentDays,
       accountRows,
       holidayWorkedRows,

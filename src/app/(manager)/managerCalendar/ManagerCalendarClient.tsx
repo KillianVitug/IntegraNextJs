@@ -81,14 +81,7 @@ function formatTimeRange(employee: CalendarEmployee) {
 }
 
 function formatScheduleLabel(employee: CalendarEmployee) {
-  if (employee.isRestDay) return "Rest / Off day";
-  if (employee.shiftCode && employee.shiftName) {
-    return `${employee.shiftCode} | ${employee.shiftName}`;
-  }
-  if (employee.shiftCode) return employee.shiftCode;
-  if (employee.shiftName) return employee.shiftName;
-  if (employee.source === "LEGACY") return "Legacy timekeeping";
-  return "Scheduled";
+  return employee.scheduleLabel;
 }
 
 function formatHours(value: number) {

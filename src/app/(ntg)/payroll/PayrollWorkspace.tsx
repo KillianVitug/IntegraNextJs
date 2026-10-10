@@ -2642,6 +2642,7 @@ function hasAttendancePunches(row: AttendanceDtrDayView) {
 
 function getDisplayedDtrWorkedMinutes(row: AttendanceDtrDayView) {
   return computeDisplayedDtrWorkedMinutes({
+    calculationPolicy: row.calculationPolicy,
     workedMinutes: row.workedMinutes,
     scheduledMinutes: row.scheduledMinutes,
     lateMinutes: row.lateMinutes,

@@ -8,6 +8,7 @@ import {
   employeeWeeklyShiftPatterns,
   employeeWeeklyShiftPatternDays,
   employees,
+  employeesTimekeeping,
   employeesLeaveRecords,
   payrollPeriods,
   payrollRunEmployees,
@@ -20,6 +21,11 @@ import { buildAttendanceSummaryComputations } from "@/lib/payroll/attendanceSync
 import { loadEffectiveAttendanceCorrections, loadEffectiveAttendanceRawLogs, mapEffectiveAttendanceCorrections } from "@/lib/payroll/effectiveAttendanceInputs";
 import { buildLeaveTypeMapByCode, resolveLeavePayStatus } from "@/lib/payroll/leave";
 import { buildShiftAssignmentSnapshotFromTable } from "@/lib/shifts";
+import { buildShiftTableReadModel } from "@/lib/shifts";
+import { shiftTableScheduleSnapshot } from "@/lib/scheduling/presentation";
+import { refreshSchedulePayrollDerivatives } from "@/lib/payroll/scheduleRefresh";
+import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
+import { resolveEmployeeScheduleForDate } from "@/lib/payroll/scheduleResolver";
 import {
   type UpsertEmployeeShiftAssignmentInput,
 } from "@/zod-schemas/employeeShiftAssignment";
@@ -101,7 +107,7 @@ export function getAffectedScheduleRange(args: {
     .filter((value): value is string => Boolean(value))
     .sort();
   const hasOpenEndedRange =
-    args.existingRecord?.effectiveTo == null || args.nextAssignment?.effectiveTo == null;
+    [args.existingRecord,args.nextAssignment].some(record=>record!=null&&record.effectiveTo==null);
   const ends = [args.existingRecord?.effectiveTo, args.nextAssignment?.effectiveTo]
     .filter((value): value is string => Boolean(value))
     .sort();
@@ -110,6 +116,36 @@ export function getAffectedScheduleRange(args: {
     startDate: starts[0] ?? null,
     endDate: hasOpenEndedRange ? null : ends[ends.length - 1] ?? null,
   };
+}
+
+/** A dated legacy mutation may replace, or reveal, an overnight default. Inspect
+ * the boundary under the shared lock; regular daytime changes keep their exact end. */
+export async function withOvernightScheduleBoundary(tx:DbClient,args:{employeeId:string;range:{startDate:string|null;endDate:string|null};nextWindow?:{checkInTime?:string|null;checkOutTime?:string|null;calculationPolicy?:string|null}|null;removedAssignmentIds?:number[]}) {
+  if(!args.range.startDate)return args.range;
+  const [assignments,patterns,timekeeping]=await Promise.all([
+    tx.select().from(employeeShiftAssignments).where(eq(employeeShiftAssignments.employeeId,args.employeeId)),
+    tx.query.employeeWeeklyShiftPatterns.findMany({where:eq(employeeWeeklyShiftPatterns.employeeId,args.employeeId),with:{days:true}}),
+    tx.query.employeesTimekeeping.findFirst({where:eq(employeesTimekeeping.employeeId,args.employeeId)}),
+  ]);
+  const shiftDay=(day:string,offset:number)=>format(addDays(new Date(`${day}T00:00:00`),offset),"yyyy-MM-dd");
+  const resolve=(day:string,records=assignments)=>resolveEmployeeScheduleForDate({attendanceDate:day,assignments:records,weeklyPatterns:patterns,legacyTimekeeping:timekeeping??null}).shiftWindow;
+  const crosses=async(day:string,windows:Array<typeof args.nextWindow>)=>{
+    if(windows.some(window=>window?.checkInTime&&window.checkOutTime&&window.checkOutTime.slice(0,5)<window.checkInTime.slice(0,5)))return true;
+    const explicit=windows.filter(window=>window?.calculationPolicy==="eight_hour_day"&&window.checkInTime);
+    if(!explicit.length)return false;
+    const next=shiftDay(day,1);
+    const logs=await loadEffectiveAttendanceRawLogs(tx,{employeeIds:[args.employeeId],startDate:day,endDate:next,neighborDays:"none"});
+    const prior=logs.filter(log=>log.logDate===day).sort((a,b)=>a.logTime.localeCompare(b.logTime));
+    const following=logs.filter(log=>log.logDate===next).sort((a,b)=>a.logTime.localeCompare(b.logTime));
+    return prior.at(-1)?.direction==="IN"&&following[0]?.direction==="OUT"&&explicit.some(window=>following[0].logTime.slice(0,5)<window!.checkInTime!.slice(0,5));
+  };
+  const previous=shiftDay(args.range.startDate,-1);
+  const startDate=await crosses(previous,[resolve(previous)])?previous:args.range.startDate;
+  const day=args.range.endDate;
+  if(!day)return {...args.range,startDate};
+  const revealed=args.removedAssignmentIds?.length?resolve(day,assignments.filter(row=>!args.removedAssignmentIds!.includes(row.id))):null;
+  const endDate=await crosses(day,[resolve(day),revealed,args.nextWindow])?shiftDay(day,1):day;
+  return {startDate,endDate};
 }
 
 export function getRebuildRange(args: {
@@ -136,6 +172,7 @@ export function getRebuildRange(args: {
 }
 
 export async function lockShiftAssignmentContext(tx: DbClient, employeeId: string) {
+  await lockAttendancePayrollInput(tx);
   await tx.execute(sql`select id from employees where id = ${employeeId} for update`);
   await tx.execute(
     sql`select id from employee_shift_assignments where employee_id = ${employeeId} for update`
@@ -220,8 +257,8 @@ export async function loadShiftTableForAssignment(tx: DbClient, shiftTableId: nu
     .where(eq(shiftTables.id, shiftTableId))
     .limit(1);
 
-  if (!shiftTable) {
-    throw new Error("Selected shift table was not found.");
+  if (!shiftTable || shiftTable.archivedAt) {
+    throw new Error("This shift is archived or unavailable. Choose an active shift; existing schedules are retained.");
   }
 
   const breaks = await tx
@@ -286,6 +323,9 @@ export function buildWeeklyPatternDayValues(args: {
       checkOutTime: snapshot.checkOutTime ?? shiftTable.regularEndTime,
       breakMinutes: snapshot.breakMinutes,
       paidBreakMinutes: snapshot.paidBreakMinutes,
+      calculationPolicy: snapshot.calculationPolicy,
+      punchPolicy: snapshot.punchPolicy,
+      definitionSnapshot: shiftTableScheduleSnapshot(buildShiftTableReadModel({ shiftTable, breaks: shiftTable.breaks })),
       hoursPerDay: snapshot.hoursPerDay.toFixed(2),
     } satisfies typeof employeeWeeklyShiftPatternDays.$inferInsert;
   });
@@ -318,6 +358,7 @@ export async function getLatestImportedAttendanceDate(tx: DbClient, employeeId: 
 
 export async function rebuildEmployeeAttendanceSummaries(args: {
   tx: DbClient;
+  actorUserId?: string;
   employeeId: string;
   startDate: string;
   endDate: string;
@@ -463,6 +504,9 @@ export async function rebuildEmployeeAttendanceSummaries(args: {
     await args.tx.insert(attendanceDailySummaries).values(rows);
   }
 
+  // Summary-only attendance-decision callers deliberately omit actorUserId.
+  // Schedule mutations provide it to refresh the complete derived input chain.
+  if (args.actorUserId) await refreshSchedulePayrollDerivatives({ ...args, actorUserId: args.actorUserId });
   return computations.length;
 }
 
@@ -477,6 +521,9 @@ export async function markAffectedShiftRunsStale(args: {
   if (args.endDate) {
     periodFilters.push(lte(payrollPeriods.startDate, args.endDate));
   }
+  const closedPeriods = await args.tx.select({ code: payrollPeriods.code }).from(payrollPeriods)
+    .where(and(...periodFilters, ne(payrollPeriods.status, "Open"))).limit(1);
+  if (closedPeriods.length) throw new PayrollValidationError(`Schedule changes affect closed payroll period ${closedPeriods[0].code}. Use the adjustment workflow.`);
 
   const affectedRuns = await args.tx
     .select({

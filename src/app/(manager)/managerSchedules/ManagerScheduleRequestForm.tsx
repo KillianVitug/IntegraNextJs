@@ -1,4 +1,5 @@
 "use client";
+import { shiftTableScheduleLabel } from "@/lib/scheduling/presentation";
 
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { toast } from "sonner";
@@ -89,7 +90,7 @@ function formatShiftTableLabel(
     return `Unknown shift table (#${shiftTableId})`;
   }
 
-  return `${shiftTable.code} | ${shiftTable.description}`;
+  return shiftTableScheduleLabel(shiftTable);
 }
 
 export function ManagerScheduleRequestForm({
@@ -299,7 +300,7 @@ export function ManagerScheduleRequestForm({
               <option value={0}>Select shift table</option>
               {shiftTables.map((shiftTable) => (
                 <option key={shiftTable.id} value={shiftTable.id}>
-                  {shiftTable.code} | {shiftTable.description}
+                  {shiftTableScheduleLabel(shiftTable)}
                 </option>
               ))}
             </select>

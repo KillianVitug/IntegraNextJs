@@ -19,6 +19,7 @@ const shiftBreakInputSchema = z.object({
   deduct: z.coerce.boolean().default(false),
   deductHours: z.coerce.number().int().min(0).max(23).default(0),
   deductMinutes: z.coerce.number().int().min(0).max(59).default(0),
+  requiresPunches: z.boolean().optional(),
 });
 
 const shiftBreakSelectSchema = shiftBreakInputSchema.extend({
@@ -29,6 +30,10 @@ const shiftBreakSelectSchema = shiftBreakInputSchema.extend({
 export const insertShiftTableSchema = z
   .object({
     id: z.coerce.number().int().positive().optional(),
+    requestId: z.string().uuid(),
+    expectedVersion: z.coerce.number().int().positive().optional(),
+    calculationPolicy: z.enum(["legacy", "eight_hour_day"]).optional(),
+    punchPolicy: z.enum(["legacy", "outer", "split_gaps"]).optional(),
     code: z.string().trim().min(1).max(40),
     description: z.string().trim().min(1).max(120),
     regularStartTime: z.string().min(1),
@@ -36,6 +41,14 @@ export const insertShiftTableSchema = z
     breaks: z.array(shiftBreakInputSchema).length(SHIFT_BREAK_SLOT_DEFINITIONS.length),
   })
   .superRefine((value, ctx) => {
+    if (value.id && !value.expectedVersion) ctx.addIssue({ code: "custom", path: ["expectedVersion"], message: "Reload this schedule before saving a new version." });
+    if (value.calculationPolicy === "eight_hour_day" && value.punchPolicy === "legacy") {
+      ctx.addIssue({ code: "custom", path: ["punchPolicy"], message: "Choose an explicit punch policy for an eight-hour schedule." });
+    }
+    const clock = /^([01]\d|2[0-3]):[0-5]\d(?::00)?$/;
+    if (!clock.test(value.regularStartTime) || !clock.test(value.regularEndTime) || value.regularStartTime.slice(0, 5) === value.regularEndTime.slice(0, 5)) {
+      ctx.addIssue({ code: "custom", path: ["regularStartTime"], message: "Use valid start/end times for a shift shorter than 24 hours." });
+    }
     const shiftDurationMinutes = getTimeRangeDurationMinutes(
       value.regularStartTime,
       value.regularEndTime
@@ -59,6 +72,7 @@ export const insertShiftTableSchema = z
     const isOvernight = shiftEndMinutes <= shiftStartMinutes;
     const shiftEndAbsolute = shiftStartMinutes + shiftDurationMinutes;
     let deductibleRegularMinutes = 0;
+    let regularBreakWindowMinutes = 0;
 
     const activeWindows: Array<{
       breakIndex: number;
@@ -89,6 +103,7 @@ export const insertShiftTableSchema = z
       }
 
       const hasAnyValue =
+        Boolean(breakRow.requiresPunches) ||
         Boolean(breakRow.fromTime) ||
         Boolean(breakRow.toTime) ||
         breakRow.deduct ||
@@ -129,6 +144,14 @@ export const insertShiftTableSchema = z
         continue;
       }
 
+      if (!clock.test(breakRow.fromTime) || !clock.test(breakRow.toTime) || breakRow.fromTime.slice(0, 5) === breakRow.toTime.slice(0, 5)) {
+        ctx.addIssue({ code: "custom", path: ["breaks", index, "fromTime"], message: "Use valid, different break start/end times." });
+        continue;
+      }
+      if (breakRow.requiresPunches && (definition.category !== "regular" || value.punchPolicy !== undefined && value.punchPolicy !== "split_gaps")) {
+        ctx.addIssue({ code: "custom", path: ["breaks", index, "requiresPunches"], message: "Split gaps must be regular breaks in a schedule with split-gap punches." });
+      }
+
       const fromBase = parseTimeToMinutes(breakRow.fromTime);
       const toBase = parseTimeToMinutes(breakRow.toTime);
 
@@ -148,6 +171,9 @@ export const insertShiftTableSchema = z
       const toAbsolute =
         toBaseAbsolute <= fromAbsolute ? toBaseAbsolute + 1440 : toBaseAbsolute;
       const durationMinutes = toAbsolute - fromAbsolute;
+      if (breakRow.requiresPunches && (fromAbsolute <= shiftStartMinutes || toAbsolute >= shiftEndAbsolute)) {
+        ctx.addIssue({ code: "custom", path: ["breaks", index, "fromTime"], message: "A split gap must have a working period before and after it." });
+      }
       const deductedMinutes = breakRow.deduct
         ? breakRow.deductHours * 60 + breakRow.deductMinutes
         : 0;
@@ -189,6 +215,7 @@ export const insertShiftTableSchema = z
 
       if (definition.category === "regular") {
         deductibleRegularMinutes += deductedMinutes;
+        regularBreakWindowMinutes += durationMinutes;
       }
 
       activeWindows.push({
@@ -223,17 +250,25 @@ export const insertShiftTableSchema = z
       }
     }
 
-    if (deductibleRegularMinutes > shiftDurationMinutes) {
+    if (deductibleRegularMinutes >= shiftDurationMinutes || regularBreakWindowMinutes >= shiftDurationMinutes) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["breaks", 0, "deductHours"],
-        message: "Total deductible regular breaks cannot exceed the regular shift duration.",
+        message: "The schedule must contain working time after unpaid breaks.",
       });
     }
+    const punchFlagsComplete = !value.id || value.breaks.filter(row => row.fromTime && row.toTime).every(row => row.requiresPunches !== undefined);
+    if (punchFlagsComplete && value.punchPolicy === "split_gaps" && !value.breaks.some(row => row.requiresPunches)) ctx.addIssue({ code: "custom", path: ["punchPolicy"], message: "Choose at least one split gap that requires OUT and IN." });
   });
 
 export const selectShiftTableSchema = z.object({
   id: z.coerce.number().int().positive(),
+  familyId: z.string().uuid().optional(),
+  version: z.number().int().positive().optional(),
+  archivedAt: z.string().nullable().optional(),
+  calculationPolicy: z.enum(["legacy", "eight_hour_day"]).optional(),
+  punchPolicy: z.enum(["legacy", "outer", "split_gaps"]).optional(),
+  usage: z.object({ weeklyDays: z.number(), datedAssignments: z.number(), pendingRequests: z.number() }).optional(),
   code: z.string(),
   description: z.string(),
   regularStartTime: z.string(),
@@ -246,6 +281,8 @@ export const selectShiftTableSchema = z.object({
 
 export const deleteShiftTableSchema = z.object({
   id: z.coerce.number().int().positive(),
+  requestId: z.string().uuid(),
+  expectedVersion: z.coerce.number().int().positive(),
 });
 
 export type InsertShiftTableSchemaType = z.infer<typeof insertShiftTableSchema>;

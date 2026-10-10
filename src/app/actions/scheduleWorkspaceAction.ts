@@ -7,7 +7,7 @@ import type { ScheduleActionResult, ScheduleArchiveCommand, SchedulePeriodComman
 export async function getScheduleWorkspace(query: ScheduleWorkspaceQuery = {}) { return readScheduleWorkspace(await requireScheduleActor(), query); }
 export async function getScheduleDayRepair(query: {employeeId:string;day:string;periodId?:string}) { return readScheduleDayRepair(await requireScheduleActor(), query); }
 async function run(action: () => Promise<ScheduleReceipt>): Promise<ScheduleActionResult> {
-  try { const receipt = await action(); revalidatePath("/schedules"); return { ok: true, receipt }; }
+  try { const receipt = await action(); try { revalidatePath("/schedules"); } catch { /* The committed receipt remains authoritative. */ } return { ok: true, receipt }; }
   catch (error) { return { ok: false, error: error instanceof Error ? error.message : "The schedule action failed. Check its status before retrying." }; }
 }
 export async function saveScheduleDraft(input: SchedulePeriodCommand) { return run(async () => mutatePeriodSchedule(await requireScheduleActor(), input, "draft_saved")); }

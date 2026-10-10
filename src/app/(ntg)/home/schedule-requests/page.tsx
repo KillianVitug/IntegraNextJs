@@ -16,7 +16,7 @@ export const metadata = {
 export default async function ScheduleRequestsPage() {
   const [requests, shiftTables] = await Promise.all([
     listAdminScheduleChangeRequests(),
-    fetchShiftTables(),
+    fetchShiftTables({ includeArchived: true }),
   ]);
   const pendingCount = requests.filter((request) => request.status === "Pending").length;
   const voidedCount = requests.filter((request) => request.status === "Voided").length;

@@ -2,6 +2,8 @@ import "server-only";
 
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
+import { describeResolvedSchedule } from "@/lib/scheduling/resolved-presentation";
+import type { ScheduleSnapshot } from "@/lib/scheduling/workspace-types";
 import { db } from "@/db";
 import {
   accountCode,
@@ -9,6 +11,7 @@ import {
   branchCalendarScheduleOverrideBatches,
   branchCalendarScheduleOverrideItems,
   department,
+  shiftTableBreaks,
   employeeLeaveRecordDays,
   employeeShiftAssignments,
   employeeWeeklyShiftPatterns,
@@ -515,6 +518,10 @@ export async function getBranchCalendarMonth(input: unknown) {
       ),
   ]);
 
+  const calendarShiftIds = [...new Set([...shiftAssignments.map(row => row.shiftTableId), ...weeklyPatterns.flatMap(pattern => pattern.days.map(day => day.shiftTableId))].filter((id): id is number => id != null))];
+  const calendarBreakRows = calendarShiftIds.length ? await db.select().from(shiftTableBreaks).where(inArray(shiftTableBreaks.shiftTableId, calendarShiftIds)).orderBy(asc(shiftTableBreaks.sortOrder)) : [];
+  const calendarBreaks = new Map<number, ScheduleSnapshot["breaks"]>();
+  for (const row of calendarBreakRows) calendarBreaks.set(row.shiftTableId, [...(calendarBreaks.get(row.shiftTableId) ?? []), row]);
   const assignmentsByEmployeeId = new Map<string, typeof shiftAssignments>();
   for (const assignment of shiftAssignments) {
     const current = assignmentsByEmployeeId.get(assignment.employeeId) ?? [];
@@ -587,6 +594,7 @@ export async function getBranchCalendarMonth(input: unknown) {
         confirmed: Boolean(resolvedSchedule.overrideAssignment?.scheduleDecisionId),
         shiftName,
         shiftCode,
+        scheduleLabel: describeResolvedSchedule(resolvedSchedule, calendarBreaks).label,
         checkInTime,
         checkOutTime,
         hoursPerDay: toNumber(resolvedSchedule.hoursPerDay),

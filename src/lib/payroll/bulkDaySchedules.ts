@@ -1,11 +1,12 @@
 import "server-only";
 import { assertNoConfirmedScheduleEdit } from "@/lib/scheduling/guards";
 import { recordAdminAuditEvent } from "@/lib/admin";
-import { buildShiftAssignmentSnapshotFromTable } from "@/lib/shifts";
+import { shiftTableScheduleLabel } from "@/lib/scheduling/presentation";
+import { buildShiftTableReadModel, buildShiftAssignmentSnapshotFromTable } from "@/lib/shifts";
 import { upsertEmployeeShiftAssignmentSchema } from "@/zod-schemas/employeeShiftAssignment";
 import { lockAttendancePayrollInput } from "./attendanceSourceGuard";
 import { PayrollValidationError } from "./validation";
-import { ensureNoShiftOverlap, getAffectedScheduleRange, getLatestImportedAttendanceDate, getRebuildRange, loadShiftTableForAssignment, lockShiftAssignmentContext, markAffectedShiftRunsStale, normalizeEffectiveTo, rebuildEmployeeAttendanceSummaries } from "@/app/actions/shiftAssignmentHelpers";
+import { ensureNoShiftOverlap, getAffectedScheduleRange, getLatestImportedAttendanceDate, getRebuildRange, loadShiftTableForAssignment, lockShiftAssignmentContext, markAffectedShiftRunsStale, normalizeEffectiveTo, rebuildEmployeeAttendanceSummaries, withOvernightScheduleBoundary } from "@/app/actions/shiftAssignmentHelpers";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { and, eq, inArray, isNull } from "drizzle-orm";
@@ -27,7 +28,7 @@ export async function prepareBulkDaySchedules(database:DbClient,input:unknown) {
   database.select({day:employeeWeeklyShiftPatternDays}).from(employeeWeeklyShiftPatternDays).innerJoin(employeeWeeklyShiftPatterns,eq(employeeWeeklyShiftPatterns.id,employeeWeeklyShiftPatternDays.patternId)).where(inArray(employeeWeeklyShiftPatterns.employeeId,ids)),
   database.select().from(shiftTableBreaks).where(eq(shiftTableBreaks.shiftTableId,payload.shiftTableId)),
  ]);
- const period=periods[0],shift=shifts[0];if(!period||!shift)throw new PayrollValidationError("The payroll period or schedule is unavailable.");
+ const period=periods[0],shift=shifts[0];if(!period||!shift||shift.archivedAt)throw new PayrollValidationError("The payroll period or schedule is unavailable.");
  const rows=targets.map(target=>{
   const found=roster.find(r=>r.employee.id===target.employeeId);
   if(!found||target.day<period.startDate||target.day>period.endDate||found.info?.dateHired&&target.day<found.info.dateHired||found.info?.separationDate&&target.day>found.info.separationDate)throw new PayrollValidationError("A selected workday is outside this period or employee's employment dates.");
@@ -38,7 +39,7 @@ export async function prepareBulkDaySchedules(database:DbClient,input:unknown) {
  });
  const stable=<T extends {id:string|number}>(items:T[])=>[...items].sort((a,b)=>String(a.id).localeCompare(String(b.id)));
  const digest=createHash('sha256').update(JSON.stringify({period,shift,targets,roster:roster.sort((a,b)=>a.employee.id.localeCompare(b.employee.id)),assignments:stable(assignments),patterns:stable(patterns),patternDays:stable(patternDays.map(row=>row.day)),breaks:stable(breaks)})).digest('hex');
- return {periodId:payload.periodId,shiftTableId:payload.shiftTableId,shiftLabel:`${shift.code} · ${shift.regularStartTime}–${shift.regularEndTime}`,digest,rows};
+ return {periodId:payload.periodId,shiftTableId:payload.shiftTableId,shiftLabel:shiftTableScheduleLabel(buildShiftTableReadModel({shiftTable:shift,breaks})),digest,rows};
 }
 
 export async function saveDateAssignment(tx:DbClient, actor:{userId:string}, payload:ReturnType<typeof upsertEmployeeShiftAssignmentSchema.parse>, rebuild=true) {
@@ -82,18 +83,20 @@ export async function saveDateAssignment(tx:DbClient, actor:{userId:string}, pay
       checkOutTime: snapshot.checkOutTime ?? selectedShiftTable.regularEndTime,
       breakMinutes: snapshot.breakMinutes,
       paidBreakMinutes: snapshot.paidBreakMinutes,
+      calculationPolicy: snapshot.calculationPolicy,
+      punchPolicy: snapshot.punchPolicy,
       graceMinutes: payload.graceMinutes,
       restDay: payload.restDay ?? null,
       hoursPerDay: snapshot.hoursPerDay.toFixed(2),
       isFlexible: payload.isFlexible,
     };
-    const staleRange = getAffectedScheduleRange({
+    const staleRange = await withOvernightScheduleBoundary(tx,{employeeId:payload.employeeId,nextWindow:snapshot,removedAssignmentIds:existingAssignment?[existingAssignment.id]:[],range:getAffectedScheduleRange({
       existingRecord: existingAssignment,
       nextAssignment: {
         effectiveFrom: values.effectiveFrom,
         effectiveTo: values.effectiveTo ?? null,
       },
-    });
+    })});
 
     if (!staleRange.startDate) {
       throw new PayrollValidationError("Unable to determine the affected shift-assignment date range.");
@@ -135,6 +138,7 @@ export async function saveDateAssignment(tx:DbClient, actor:{userId:string}, pay
     const rebuiltSummaryCount = rebuild && rebuildRange
       ? await rebuildEmployeeAttendanceSummaries({
           tx,
+          actorUserId: actor.userId,
           employeeId: payload.employeeId,
           startDate: rebuildRange.startDate,
           endDate: rebuildRange.endDate,
@@ -160,6 +164,7 @@ export async function saveDateAssignment(tx:DbClient, actor:{userId:string}, pay
       message: payload.id ? "Shift override updated." : "Shift override created.",
       assignmentId,
       rebuiltSummaryCount,
+      affectedRange: staleRange,
     };
 }
 
@@ -178,13 +183,14 @@ export async function saveBulkDaySchedules(actor:{userId:string},input:unknown,d
   if(recorded){if(recorded.requestContent!==requestContent)throw new PayrollValidationError("This schedule request ID was already used for different dates.");return recorded;}
   const preview=await prepareBulkDaySchedules(tx,payload);
   if(preview.digest!==digest)throw new PayrollValidationError("Schedules or employee details changed. Review the selected dates again; nothing was saved.");
-  for(const row of preview.rows)await saveDateAssignment(tx,actor,upsertEmployeeShiftAssignmentSchema.parse({id:row.existing?.id,employeeId:row.employeeId,shiftTableId:payload.shiftTableId,effectiveFrom:row.day,effectiveTo:row.day,graceMinutes:row.existing?.graceMinutes??0,restDay:row.existing?.restDay??null,isFlexible:row.existing?.isFlexible??false}),false);
+  const affected=new Map<string,string[]>();
+  for(const row of preview.rows){const saved=await saveDateAssignment(tx,actor,upsertEmployeeShiftAssignmentSchema.parse({id:row.existing?.id,employeeId:row.employeeId,shiftTableId:payload.shiftTableId,effectiveFrom:row.day,effectiveTo:row.day,graceMinutes:row.existing?.graceMinutes??0,restDay:row.existing?.restDay??null,isFlexible:row.existing?.isFlexible??false}),false);affected.set(row.employeeId,[...(affected.get(row.employeeId)??[]),saved.affectedRange.startDate??row.day,saved.affectedRange.endDate??row.day]);}
   let rebuiltSummaryCount=0;
   for(const employeeId of [...new Set(preview.rows.map(r=>r.employeeId))]){
-   const days=preview.rows.filter(r=>r.employeeId===employeeId).map(r=>r.day).sort();
+   const days=affected.get(employeeId)!.sort();
    const latestImportedDate=await getLatestImportedAttendanceDate(tx,employeeId);
    const range=getRebuildRange({staleRange:{startDate:days[0],endDate:days.at(-1)!},latestImportedDate});
-   if(range)rebuiltSummaryCount+=await rebuildEmployeeAttendanceSummaries({tx,employeeId,...range});
+   if(range)rebuiltSummaryCount+=await rebuildEmployeeAttendanceSummaries({tx,actorUserId:actor.userId,employeeId,...range});
   }
   await recordAdminAuditEvent({actorUserId:actor.userId,entityType:"bulk_schedule_request",entityId:payload.requestId,action:"employee_shift_assignment.bulk_dates_saved",database:tx,details:{requestId:payload.requestId,requestContent,saved:preview.rows.length,targets:payload.targets,shiftTableId:payload.shiftTableId,reviewedDigest:digest,rebuiltSummaryCount}});
   return {saved:preview.rows.length,rebuiltSummaryCount};

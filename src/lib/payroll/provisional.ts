@@ -93,8 +93,8 @@ export async function loadProvisionalPayroll(raw:ProvisionalPayrollQuery, databa
       const start=schedule.shiftWindow.checkInTime,end=schedule.shiftWindow.checkOutTime;
       if(!confirmed || !schedule.configured || isResolvedScheduleRestDay(schedule) || !start || !end || row.paidLeaveMinutes>0 || row.unpaidLeaveMinutes>0)continue;
       const employee=employeeById.get(row.employeeId)!;
-      const split=[schedule.overrideAssignment?.shiftCode,schedule.overrideAssignment?.shiftName].some(value=>value?.toUpperCase().includes("SPLIT"));
-      const gaps=split?buildDeductibleRegularBreakWindows(schedule.overrideAssignment?.confirmedSchedule?.breaks??[]):[];
+      const split=schedule.shiftWindow.requiresSplitPunches===true;
+      const gaps=schedule.shiftWindow.punchPolicy==="split_gaps"?(schedule.shiftWindow.regularBreakWindows??[]).filter(gap=>gap.requiresPunches):split?buildDeductibleRegularBreakWindows(schedule.overrideAssignment?.confirmedSchedule?.breaks??[]):[];
       const punches:Array<["IN"|"OUT",string,string]>=[["IN",row.attendanceDate,start],...gaps.flatMap(gap=>[
         ["OUT",gap.fromTime<start?sourceDayOffset(row.attendanceDate,1):row.attendanceDate,gap.fromTime] as ["OUT",string,string],
         ["IN",gap.toTime<start?sourceDayOffset(row.attendanceDate,1):row.attendanceDate,gap.toTime] as ["IN",string,string],

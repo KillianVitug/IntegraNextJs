@@ -1,4 +1,5 @@
 import type { ScheduleSnapshot, ScheduleCell } from "./workspace-types";
+import { describeSchedule } from "./presentation";
 
 export function scheduleDateRange(from: string, to: string) {
   const days: string[] = [];
@@ -11,13 +12,7 @@ export function scheduleDateRange(from: string, to: string) {
 export function shiftDate(day: string, delta: number) {
   const date = new Date(`${day}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + delta); return date.toISOString().slice(0, 10);
 }
-export function scheduleLabel(snapshot: ScheduleSnapshot) {
-  if (snapshot.kind === "unconfigured") return "Unconfigured";
-  if (snapshot.kind === "rest") return "Rest day";
-  return snapshot.checkInTime && snapshot.checkOutTime
-    ? `${snapshot.shiftCode ?? snapshot.shiftName} · ${snapshot.checkInTime.slice(0, 5)}–${snapshot.checkOutTime.slice(0, 5)}`
-    : `${snapshot.shiftName} · ${snapshot.hoursPerDay}h flexible`;
-}
+export function scheduleLabel(snapshot: ScheduleSnapshot) { return describeSchedule(snapshot).label; }
 export function scheduleValue(snapshot: ScheduleSnapshot) {
   return snapshot.kind === "shift" ? snapshot.shiftTableId ? String(snapshot.shiftTableId) : "captured" : snapshot.kind;
 }
@@ -35,8 +30,8 @@ export function withDateScheduleTimes(base: ScheduleSnapshot, times: {start:stri
   const minutes=(value:string)=>{if(!/^([01]\d|2[0-3]):[0-5]\d(?::00)?$/.test(value))throw new Error("Enter valid start and end times.");return Number(value.slice(0,2))*60+Number(value.slice(3,5));};
   const start=minutes(times.start),end=minutes(times.end),duration=(end-start+1440)%1440;
   if(!duration||base.breakMinutes>=duration)throw new Error("The shift must have working time after its unpaid breaks.");
-  for(const slot of base.breaks){const from=(minutes(slot.fromTime)-start+1440)%1440,to=from+(minutes(slot.toTime)-minutes(slot.fromTime)+1440)%1440;if(from>=duration||to>duration||to<=from)throw new Error(`The ${slot.label} break falls outside these times. Choose a shift with the appropriate breaks.`);}
-  return {...structuredClone(base),shiftTableId:null,shiftCode:null,shiftName:"Custom date schedule",checkInTime:times.start.slice(0,5)+":00",checkOutTime:times.end.slice(0,5)+":00",hoursPerDay:Math.round((duration-base.breakMinutes)/60*100)/100,isFlexible:false};
+  for(const slot of base.breaks.filter(row => !row.slotKey.startsWith("ot_break"))){const from=(minutes(slot.fromTime)-start+1440)%1440,to=from+(minutes(slot.toTime)-minutes(slot.fromTime)+1440)%1440;if(from>=duration||to>duration||to<=from)throw new Error(`The ${slot.label} break falls outside these times. Choose a shift with the appropriate breaks.`);}
+  return {...structuredClone(base),shiftTableId:null,shiftCode:base.shiftCode,shiftName:base.shiftName,checkInTime:times.start.slice(0,5)+":00",checkOutTime:times.end.slice(0,5)+":00",hoursPerDay:Math.round((duration-base.breakMinutes)/60*100)/100,isFlexible:false};
 }
 export function applyScheduleChanges(cells: ScheduleCell[], changes: Array<{employeeId:string;day:string;value:string;customTimes?:{start:string;end:string}}>, templates: Map<string,ScheduleSnapshot>) {
   const result = structuredClone(cells);
@@ -51,6 +46,7 @@ export function applyScheduleChanges(cells: ScheduleCell[], changes: Array<{empl
     let snapshot = change.value === "default" ? cell.defaultSnapshot
       : change.value === "latest-default" ? cell.latestDefaultSnapshot ?? cell.defaultSnapshot
       : change.value === "rest" || change.value === "unconfigured" ? emptySchedule(change.value)
+      : change.value === "saved" ? cell.snapshot
       : change.value === "captured" ? cell.baselineSnapshot : templates.get(change.value) ?? (change.value === cell.baselineValue ? cell.baselineSnapshot : undefined);
     if (!snapshot) throw new Error("The selected shift is no longer available.");
     if(change.customTimes)snapshot=withDateScheduleTimes(snapshot,change.customTimes);

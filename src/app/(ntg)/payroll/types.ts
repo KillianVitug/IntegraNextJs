@@ -85,6 +85,8 @@ export type AttendanceImportBatchDiagnosticsView = {
 };
 
 export type AttendanceDtrDayView = {
+  calculationPolicy?: string | null;
+  regularMinutes?: number;
   attendanceDate: string;
   dayName: string;
   rawPunches: string[];

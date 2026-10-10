@@ -38,6 +38,8 @@ export const ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG =
   "SPLIT_SHIFT_INCOMPLETE_PUNCHES";
 
 export type ShiftWindow = {
+  calculationPolicy?: "legacy" | "eight_hour_day" | null;
+  punchPolicy?: "legacy" | "outer" | "split_gaps" | null;
   checkInTime: string | null;
   checkOutTime: string | null;
   breakMinutes?: number;
@@ -45,6 +47,7 @@ export type ShiftWindow = {
   hoursPerDay?: number;
   restDay?: string | null;
   regularBreakWindows?: ShiftBreakWindow[];
+  overtimeBreakWindows?: ShiftBreakWindow[];
   requiresSplitPunches?: boolean;
 };
 
@@ -52,9 +55,11 @@ export type ShiftBreakWindow = {
   fromTime: string;
   toTime: string;
   deductMinutes: number;
+  requiresPunches?: boolean;
 };
 
 export type DailyAttendanceSummarySeed = {
+  calculationPolicy?: "legacy" | "eight_hour_day";
   attendanceDate: string;
   firstInAt: Date | null;
   lastOutAt: Date | null;
@@ -1349,6 +1354,110 @@ function hasInvalidSplitPunchSequence(logs: ParsedAttendanceLog[]) {
   );
 }
 
+/** Explicit definitions use actual payable minutes. Legacy rounding stays below. */
+function summarizeDefinedEmployeeDay(
+  attendanceDate: string, logs: ParsedAttendanceLog[], shift: ShiftWindow,
+  paidLeaveMinutes: number, unpaidLeaveMinutes: number
+): DailyAttendanceSummarySeed {
+  const originals = [...logs].sort((a, b) => attendanceWallClockTime(a) - attendanceWallClockTime(b));
+  const ordered = originals.map(log => ({...log, loggedAt: new Date(attendanceWallClockTime(log))}));
+  const segments = getWorkedSegments(ordered);
+  const start = parseTimeToMinutes(shift.checkInTime);
+  const duration = getShiftDurationMinutes(shift.checkInTime, shift.checkOutTime);
+  const end = start != null && duration != null ? start + duration : null;
+  const minute = (value: Date) => Math.round((value.getTime()-Date.parse(`${attendanceDate}T00:00:00Z`))/60_000);
+  const worked = mergeTimelineWindows(segments.map(segment => ({startMinutes: minute(segment.inAt), endMinutes: minute(segment.outAt)})));
+  const first = segments[0]?.inAt ?? ordered.find(log => log.direction !== "OUT")?.loggedAt ?? null;
+  const last = segments.at(-1)?.outAt ?? null;
+  const original = (date: Date | null) => date == null ? null : originals[ordered.findIndex(log => log.loggedAt === date)]?.loggedAt ?? null;
+  const rest = shift.restDay === format(new Date(`${attendanceDate}T00:00:00`), "EEEE");
+  const flags: string[] = [];
+  if (ordered.length % 2) flags.push("ODD_PUNCH_COUNT");
+  let opened = false, missingIn = false, missingOut = false;
+  if (ordered.some(log => log.direction !== "UNSPECIFIED")) {
+    for (const log of ordered) {
+      if (log.direction === "IN") { if (opened) missingOut = true; opened = true; }
+      else if (log.direction === "OUT") { if (!opened) missingIn = true; opened = false; }
+      else { missingIn = true; missingOut = true; }
+    }
+    if (opened) missingOut = true;
+  } else if (ordered.length % 2) missingOut = true;
+  if (missingIn) flags.push("MISSING_IN");
+  if (missingOut) flags.push("MISSING_OUT");
+  if (missingIn || missingOut) flags.push("INCOMPLETE_SEQUENCE");
+  const timelineBreaks = (rows: ShiftBreakWindow[], overtime=false) => rows.flatMap(row => {
+    if (start == null) return [];
+    const from = mapTimeValueToAttendanceMinutes({timeValue: row.fromTime, shift, scheduledInMinutes: start});
+    const to = mapTimeValueToAttendanceMinutes({timeValue: row.toTime, shift, scheduledInMinutes: start});
+    if (from == null || to == null) return [];
+    const until = to <= from ? to + 1440 : to;
+    const offset=overtime&&from<start?1440:0;
+    return [{startMinutes: from+offset, endMinutes: until+offset, deduction: Math.min(until - from, Math.max(0, row.deductMinutes)), requiresPunches: row.requiresPunches === true}];
+  });
+  const regularBreaks = timelineBreaks(shift.regularBreakWindows ?? []).filter(row => start != null && end != null && row.startMinutes >= start && row.endMinutes <= end);
+  const gaps = shift.punchPolicy === "split_gaps" ? regularBreaks.filter(row => row.requiresPunches).sort((a,b) => a.startMinutes-b.startMinutes) : [];
+  const gapPairs = gaps.map(gap => worked.findIndex((left, index) => {
+    const right = worked[index + 1];
+    return !!right && left.startMinutes < gap.startMinutes && left.endMinutes <= gap.endMinutes && right.startMinutes >= gap.startMinutes && right.endMinutes > gap.endMinutes;
+  }));
+  if (!rest && ordered.length && shift.punchPolicy === "split_gaps" && (ordered.some(log=>log.direction==="UNSPECIFIED") || gaps.length === 0 || gapPairs.some(index => index < 0) || new Set(gapPairs).size !== gapPairs.length)) flags.push(ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG);
+  const overlap = (a: TimelineWindow, b: TimelineWindow) => Math.max(0, Math.min(a.endMinutes,b.endMinutes)-Math.max(a.startMinutes,b.startMinutes));
+  const actualMinutes = (from: number, until: number, breaks: ReturnType<typeof timelineBreaks>) => {
+    const bounds = {startMinutes: from, endMinutes: until};
+    let total = worked.reduce((sum,row) => sum + overlap(row,bounds),0);
+    // The deducted part is represented once, even when an OUT/IN already excludes it.
+    const deductions = mergeTimelineWindows(breaks.filter(row=>row.deduction>0).map(row => ({startMinutes:row.startMinutes,endMinutes:row.startMinutes+row.deduction})));
+    for (const deduction of deductions) for (const row of worked) total -= overlap({startMinutes:Math.max(row.startMinutes,from),endMinutes:Math.min(row.endMinutes,until)},deduction);
+    // Capturing a paid/part-paid break must not erase its paid allowance. Credit
+    // only when actual paired work exists on both sides; never invent an IN/OUT.
+    for (const row of breaks) {
+      const paid = {startMinutes:Math.max(from,row.startMinutes+row.deduction),endMinutes:Math.min(until,row.endMinutes)};
+      if (paid.endMinutes <= paid.startMinutes) continue;
+      const bracketed = worked.some(segment=>segment.startMinutes < row.startMinutes) && worked.some(segment=>segment.endMinutes > row.endMinutes);
+      if (bracketed) total += Math.max(0,paid.endMinutes-paid.startMinutes-worked.reduce((sum,segment)=>sum+overlap(segment,paid),0));
+    }
+    return Math.max(0,Math.round(total));
+  };
+  const scheduled = start != null && end != null ? Math.max(0,end-start-regularBreaks.reduce((sum,row)=>sum+row.deduction,0)) : Math.max(0,Math.round((shift.hoursPerDay??0)*60));
+  const within = start != null && end != null ? actualMinutes(start,end,regularBreaks) : worked.reduce((sum,row)=>sum+row.endMinutes-row.startMinutes,0);
+  const lastMinute = last ? minute(last) : 0;
+  let overtimeStart = end ?? lastMinute;
+  if(start!=null && end!=null && within>480) {
+    let low=start,high=end;
+    while(low<high) {const midpoint=Math.floor((low+high)/2);if(actualMinutes(start,midpoint,regularBreaks)>=480)high=midpoint;else low=midpoint+1;}
+    overtimeStart=low;
+  }
+  const overtimeBreaks = timelineBreaks(shift.overtimeBreakWindows ?? [],true).flatMap(row=>{
+    const from=Math.max(overtimeStart,row.startMinutes);
+    return row.endMinutes>from?[{...row,startMinutes:from,deduction:Math.max(0,row.startMinutes+row.deduction-from)}]:[];
+  });
+  const overtimeMinutes = lastMinute>overtimeStart?actualMinutes(overtimeStart,lastMinute,[...regularBreaks,...overtimeBreaks]):0;
+  let nightMinutes=0;
+  if(start!=null) for(let midnight=0;midnight<=lastMinute;midnight+=1440) {
+    nightMinutes+=actualMinutes(Math.max(start,midnight),Math.min(lastMinute,midnight+360),[...regularBreaks,...overtimeBreaks]);
+    nightMinutes+=actualMinutes(Math.max(start,midnight+1320),Math.min(lastMinute,midnight+1440),[...regularBreaks,...overtimeBreaks]);
+  }
+  const scheduledPayable=(from:number,until:number)=>{
+    const bounds={startMinutes:from,endMinutes:until};
+    const deductions=mergeTimelineWindows(regularBreaks.map(row=>({startMinutes:row.startMinutes,endMinutes:row.startMinutes+row.deduction})));
+    return Math.max(0,until-from-deductions.reduce((sum,row)=>sum+overlap(bounds,row),0));
+  };
+  let late = start != null && first ? scheduledPayable(start+(shift.graceMinutes??0),minute(first)) : 0;
+  let undertime = end != null && last ? scheduledPayable(lastMinute,end) : 0;
+  for (const [index,gap] of gaps.entries()) {
+    const pair = gapPairs[index];
+    if (pair < 0) continue;
+    undertime += scheduledPayable(worked[pair].endMinutes,gap.startMinutes);
+    late += scheduledPayable(gap.endMinutes,worked[pair+1].startMinutes);
+  }
+  if (rest) {late=0;undertime=0;}
+  if (!first && !rest && scheduled>0 && !paidLeaveMinutes && !unpaidLeaveMinutes) flags.push("NO_LOGS");
+  return {calculationPolicy:"eight_hour_day",attendanceDate,firstInAt:original(first),lastOutAt:original(last),scheduledInTime:shift.checkInTime,scheduledOutTime:shift.checkOutTime,
+    scheduledMinutes:Math.min(480,scheduled),workedMinutes:Math.min(480,within)+overtimeMinutes,regularMinutes:rest?0:Math.min(480,within),lateMinutes:Math.round(late),undertimeMinutes:Math.min(480,Math.round(undertime)),
+    overtimeMinutes,nightMinutes,
+    paidLeaveMinutes,unpaidLeaveMinutes,absentMinutes:!rest&&!first?Math.max(0,Math.min(480,scheduled)-paidLeaveMinutes-unpaidLeaveMinutes):0,isRestDay:rest,anomalyFlags:flags};
+}
+
 export function summarizeEmployeeDay(
   attendanceDate: string,
   logs: ParsedAttendanceLog[],
@@ -1356,6 +1465,9 @@ export function summarizeEmployeeDay(
   paidLeaveMinutes = 0,
   unpaidLeaveMinutes = 0
 ): DailyAttendanceSummarySeed {
+  if (shift.calculationPolicy === "eight_hour_day") {
+    return summarizeDefinedEmployeeDay(attendanceDate, logs, shift, paidLeaveMinutes, unpaidLeaveMinutes);
+  }
   const originalLogs = [...logs].sort(
     (left, right) => attendanceWallClockTime(left) - attendanceWallClockTime(right)
   );
@@ -1580,8 +1692,9 @@ export function groupLogsByEmployeeAndAttendanceDate(
 ) {
   const grouped = new Map<string, ParsedAttendanceLog[]>();
 
-  for (const log of logs) {
+  for (const log of [...logs].sort((a,b)=>attendanceWallClockTime(a)-attendanceWallClockTime(b))) {
     let attendanceDate = log.logDate;
+    const identity = log.employeeId?.trim() || log.employeeNo;
 
     if (resolveShiftWindow) {
       const previousDate = new Date(
@@ -1590,18 +1703,25 @@ export function groupLogsByEmployeeAndAttendanceDate(
       const previousShift = resolveShiftWindow(log, previousDate);
       const previousOutMinutes = parseTimeToMinutes(previousShift?.checkOutTime ?? null);
       const currentLogMinutes = parseTimeToMinutes(log.logTime)!;
+      const previousInMinutes = parseTimeToMinutes(previousShift?.checkInTime ?? null);
+      const previousLogs = grouped.get(`${identity}|${previousDate}`) ?? [];
+      const currentLogs = grouped.get(`${identity}|${log.logDate}`) ?? [];
+      // An explicit OUT before the next start can close actual work continuing
+      // past midnight. Require a preceding open IN, never infer missing punches.
+      const closesExplicitPreviousDay = previousShift?.calculationPolicy === "eight_hour_day"
+        && log.direction === "OUT" && previousLogs.at(-1)?.direction === "IN"
+        && currentLogs.length === 0
+        && previousInMinutes != null && currentLogMinutes < previousInMinutes;
 
       if (
         previousShift &&
-        isOvernightShiftWindow(previousShift) &&
-        previousOutMinutes != null &&
-        currentLogMinutes <= previousOutMinutes
+        (closesExplicitPreviousDay || (isOvernightShiftWindow(previousShift) &&
+        previousOutMinutes != null && currentLogMinutes <= previousOutMinutes))
       ) {
         attendanceDate = previousDate;
       }
     }
 
-    const identity = log.employeeId?.trim() || log.employeeNo;
     const key = `${identity}|${attendanceDate}`;
     const current = grouped.get(key) ?? [];
     current.push(log);

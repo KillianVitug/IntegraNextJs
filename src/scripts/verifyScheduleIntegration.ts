@@ -35,7 +35,7 @@ assert.deepEqual(scheduleVersionRecord({...base, confirmedSchedule: null, schedu
 assert.deepEqual(scheduleVersionRecord(confirmed), confirmed, "Real reviewed revisions remain part of the version");
 assert.deepEqual(scheduleVersionRecord({id: 1, scheduleState: null}), {id: 1});
 const regularSnapshot = {...snapshot, checkInTime: "08:00:00", checkOutTime: "17:00:00", hoursPerDay: 8,
-  breaks: [{slotKey: "mid_break" as const, label: "Lunch", fromTime: "12:00:00", toTime: "13:00:00", deduct: true, deductHours: 1, deductMinutes: 0, sortOrder: 0}]};
+  breaks: [{requiresPunches: false, slotKey: "mid_break" as const, label: "Lunch", fromTime: "12:00:00", toTime: "13:00:00", deduct: true, deductHours: 1, deductMinutes: 0, sortOrder: 0}]};
 const frozen = {...confirmed, checkInTime: "08:00:00", checkOutTime: "17:00:00", hoursPerDay: "8.00", confirmedSchedule: regularSnapshot};
 const logs = parseAttendanceBuffer(Buffer.from(`EmployeeNo,DateTime,Direction\nF1,${day} 08:00:00,IN\nF1,${day} 17:00:00,OUT`), "fixture.csv").logs.map(row => ({...row, employeeId}));
 const summaryInput = {employees: [{id: employeeId, employeeNo: "F1", timekeeping: null}], logs, approvedLeaves: [], shiftAssignments: [frozen], weeklyPatterns: [], shiftTableBreaksByShiftTableId: new Map(), allowedAttendanceDateRange: {startDate: day, endDate: day}};

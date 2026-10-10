@@ -1,5 +1,24 @@
 import { ATTENDANCE_SPLIT_SHIFT_INCOMPLETE_PUNCHES_FLAG } from "./attendance";
 
+export type PolicyAttendanceDay = {calculationPolicy?: string | null; scheduledMinutes:number; workedMinutes:number; regularMinutes:number; lateMinutes:number; undertimeMinutes:number; isRestDay:boolean; anomalyFlags?:string|string[]|null};
+export function policyNormalMinutes(row: PolicyAttendanceDay) {
+  if (row.isRestDay) return 0;
+  if (row.calculationPolicy === "eight_hour_day") return Math.min(480, Math.max(0,row.regularMinutes));
+  const minutes = Math.max(0,(row.workedMinutes>0||row.regularMinutes>0?480:0)-row.lateMinutes-row.undertimeMinutes);
+  return normalizeAttendanceDtrAnomalyFlags(row.anomalyFlags).includes("PARTIAL_VALID_WORK") ? Math.min(minutes,row.regularMinutes) : minutes;
+}
+
+/** Used only for periods containing explicit definitions; all-legacy runs keep their existing path. */
+export function computePolicyAttendancePay(rows: PolicyAttendanceDay[], dailyRate:number, fallbackHoursPerDay=8) {
+  const days = rows.map(row => ({row,minutes:policyNormalMinutes(row),penaltyMinutes:0,hourlyRate:dailyRate/(row.calculationPolicy==="eight_hour_day"?8:row.scheduledMinutes>0?row.scheduledMinutes/60:fallbackHoursPerDay||8)}));
+  // Actual shortfall is already reflected in normal minutes. Preserve the
+  // existing additional accumulated-lateness penalty once across the period.
+  let penalty = computeAccumulatedLatePenaltyMinutes(rows.reduce((sum,row)=>sum+row.lateMinutes,0));
+  for (const day of days) {const deduction=Math.min(day.minutes,penalty);day.minutes-=deduction;day.penaltyMinutes=deduction;penalty-=deduction;}
+  if(days.length) days[days.length-1].penaltyMinutes+=penalty;
+  return {minutes:days.reduce((sum,day)=>sum+day.minutes,0),amount:days.reduce((sum,day)=>sum+(day.row.calculationPolicy==="eight_hour_day"?day.minutes/60:Math.round(day.minutes/60*100)/100)*day.hourlyRate,0),days};
+}
+
 export const attendanceDtrManualStatusValues = [
   "Present",
   "Absent",
@@ -166,12 +185,14 @@ export function computeNetDtrWorkedMinutes(args: {
 }
 
 export function computeDisplayedDtrWorkedMinutes(args: {
+  calculationPolicy?: string | null;
   workedMinutes: number | null | undefined;
   scheduledMinutes?: number | null;
   lateMinutes?: number | null;
   undertimeMinutes?: number | null;
 }) {
   const workedMinutes = Math.max(0, Math.round(args.workedMinutes ?? 0));
+  if(args.calculationPolicy==="eight_hour_day") return workedMinutes;
   const lateMinutes = Math.max(0, Math.round(args.lateMinutes ?? 0));
   const undertimeMinutes = Math.max(
     0,

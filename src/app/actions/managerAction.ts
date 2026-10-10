@@ -3,9 +3,12 @@
 import { revalidatePath } from "next/cache";
 import { and, asc, desc, eq, gte, inArray, isNull, lte, or } from "drizzle-orm";
 import { z } from "zod";
+import { describeResolvedSchedule } from "@/lib/scheduling/resolved-presentation";
+import type { ScheduleSnapshot } from "@/lib/scheduling/workspace-types";
 import { db } from "@/db";
 import {
   department,
+  shiftTableBreaks,
   employeeLeaveApprovalEvents,
   employeeLeaveRecordDays,
   employeeShiftAssignments,
@@ -496,6 +499,10 @@ export async function getManagerCalendarMonth(input: unknown) {
       ),
   ]);
 
+  const calendarShiftIds = [...new Set([...shiftAssignments.map(row => row.shiftTableId), ...weeklyPatterns.flatMap(pattern => pattern.days.map(day => day.shiftTableId))].filter((id): id is number => id != null))];
+  const calendarBreakRows = calendarShiftIds.length ? await db.select().from(shiftTableBreaks).where(inArray(shiftTableBreaks.shiftTableId, calendarShiftIds)).orderBy(asc(shiftTableBreaks.sortOrder)) : [];
+  const calendarBreaks = new Map<number, ScheduleSnapshot["breaks"]>();
+  for (const row of calendarBreakRows) calendarBreaks.set(row.shiftTableId, [...(calendarBreaks.get(row.shiftTableId) ?? []), row]);
   const assignmentsByEmployeeId = new Map<
     string,
     typeof shiftAssignments
@@ -566,6 +573,7 @@ export async function getManagerCalendarMonth(input: unknown) {
         source: resolvedSchedule.source,
         shiftName,
         shiftCode,
+        scheduleLabel: describeResolvedSchedule(resolvedSchedule, calendarBreaks).label,
         checkInTime,
         checkOutTime,
         hoursPerDay: toNumber(resolvedSchedule.hoursPerDay),

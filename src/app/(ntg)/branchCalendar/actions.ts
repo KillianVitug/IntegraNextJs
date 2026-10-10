@@ -1,5 +1,6 @@
 "use server";
 import { assertNoConfirmedScheduleEdit } from "@/lib/scheduling/guards";
+import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
 
 import { revalidatePath } from "next/cache";
 import { addDays, format } from "date-fns";
@@ -26,6 +27,7 @@ import {
   lockShiftAssignmentContext,
   markAffectedShiftRunsStale,
   rebuildEmployeeAttendanceSummaries,
+  withOvernightScheduleBoundary,
 } from "@/app/actions/shiftAssignmentHelpers";
 import {
   refreshGeneratedDtrRowsForBranchCalendarAccountCodeOverride,
@@ -88,6 +90,8 @@ function cloneAssignmentForInsert(
     checkOutTime: assignment.checkOutTime,
     breakMinutes: assignment.breakMinutes,
     paidBreakMinutes: assignment.paidBreakMinutes,
+    calculationPolicy: assignment.calculationPolicy,
+    punchPolicy: assignment.punchPolicy,
     graceMinutes: assignment.graceMinutes,
     restDay: assignment.restDay,
     hoursPerDay: assignment.hoursPerDay,
@@ -111,6 +115,8 @@ function buildAssignmentSnapshot(
     checkOutTime: assignment.checkOutTime,
     breakMinutes: assignment.breakMinutes,
     paidBreakMinutes: assignment.paidBreakMinutes,
+    calculationPolicy: assignment.calculationPolicy,
+    punchPolicy: assignment.punchPolicy,
     graceMinutes: assignment.graceMinutes,
     restDay: assignment.restDay,
     hoursPerDay: assignment.hoursPerDay,
@@ -607,6 +613,7 @@ export async function saveBranchCalendarScheduleOverrideAction(input: unknown) {
   );
 
   const result = await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
     const selectedShiftTable = parsed.shiftTableId
       ? await loadShiftTableForAssignment(tx, parsed.shiftTableId)
       : null;
@@ -684,16 +691,17 @@ export async function saveBranchCalendarScheduleOverrideAction(input: unknown) {
                 "00:00",
               breakMinutes: selectedShiftSnapshot?.breakMinutes ?? 0,
               paidBreakMinutes: selectedShiftSnapshot?.paidBreakMinutes ?? 0,
+              calculationPolicy: selectedShiftSnapshot?.calculationPolicy,
+              punchPolicy: selectedShiftSnapshot?.punchPolicy,
               graceMinutes: parsed.graceMinutes,
               restDay: null,
               hoursPerDay: (selectedShiftSnapshot?.hoursPerDay ?? 0).toFixed(2),
               isFlexible: parsed.isFlexible,
             };
 
-      const staleStartDate =
-        existingAssignment?.effectiveFrom ?? parsed.attendanceDate;
-      const staleEndDate =
-        existingAssignment?.effectiveTo ?? (existingAssignment ? null : parsed.attendanceDate);
+      const boundary=await withOvernightScheduleBoundary(tx,{employeeId,range:{startDate:parsed.attendanceDate,endDate:parsed.attendanceDate},nextWindow:scheduleValues});
+      const staleStartDate = boundary.startDate ?? parsed.attendanceDate;
+      const staleEndDate = boundary.endDate;
 
       await markAffectedShiftRunsStale({
         tx,
@@ -762,6 +770,7 @@ export async function saveBranchCalendarScheduleOverrideAction(input: unknown) {
       if (rebuildRange) {
         rebuiltSummaryCount += await rebuildEmployeeAttendanceSummaries({
           tx,
+          actorUserId: actor.userId,
           employeeId,
           startDate: rebuildRange.startDate,
           endDate: rebuildRange.endDate,
@@ -817,6 +826,7 @@ async function revertBranchCalendarScheduleOverrideItem(args: {
   actorUserId: string;
   auditSource: "single" | "day";
 }) {
+  await lockAttendancePayrollInput(args.tx);
   const [row] = await args.tx
     .select({
       item: branchCalendarScheduleOverrideItems,
@@ -845,14 +855,6 @@ async function revertBranchCalendarScheduleOverrideItem(args: {
   await lockShiftAssignmentContext(args.tx, item.employeeId);
   await assertNoConfirmedScheduleEdit(args.tx, {employeeId: item.employeeId, startDate: item.attendanceDate, endDate: item.attendanceDate});
 
-  await markAffectedShiftRunsStale({
-    tx: args.tx,
-    employeeId: item.employeeId,
-    startDate: item.attendanceDate,
-    endDate: item.attendanceDate,
-    actorUserId: args.actorUserId,
-  });
-
   const currentOverlappingAssignments = await args.tx
     .select()
     .from(employeeShiftAssignments)
@@ -867,6 +869,9 @@ async function revertBranchCalendarScheduleOverrideItem(args: {
       )
     )
     .orderBy(asc(employeeShiftAssignments.effectiveFrom), asc(employeeShiftAssignments.id));
+
+  const boundary=await withOvernightScheduleBoundary(args.tx,{employeeId:item.employeeId,range:{startDate:item.attendanceDate,endDate:item.attendanceDate},removedAssignmentIds:currentOverlappingAssignments.map(row=>row.id)});
+  await markAffectedShiftRunsStale({tx:args.tx,employeeId:item.employeeId,startDate:boundary.startDate ?? item.attendanceDate,endDate:boundary.endDate,actorUserId:args.actorUserId});
 
   const clearedAssignmentIds: number[] = [];
   const trimmedAssignmentIds: number[] = [];
@@ -889,14 +894,15 @@ async function revertBranchCalendarScheduleOverrideItem(args: {
   );
   const rebuildRange = getRebuildRange({
     staleRange: {
-      startDate: item.attendanceDate,
-      endDate: item.attendanceDate,
+      startDate: boundary.startDate ?? item.attendanceDate,
+      endDate: boundary.endDate,
     },
     latestImportedDate,
   });
   const rebuiltSummaryCount = rebuildRange
     ? await rebuildEmployeeAttendanceSummaries({
         tx: args.tx,
+        actorUserId: args.actorUserId,
         employeeId: item.employeeId,
         startDate: rebuildRange.startDate,
         endDate: rebuildRange.endDate,

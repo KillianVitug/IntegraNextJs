@@ -97,15 +97,7 @@ function formatEmployeeName(employee: CalendarEmployee) {
 }
 
 function formatScheduleLabel(employee: CalendarEmployee) {
-  if (!employee.configured) return "No schedule configured";
-  if (employee.isRestDay) return "Rest / Off day";
-  if (employee.shiftCode && employee.shiftName) {
-    return `${employee.shiftCode} | ${employee.shiftName}`;
-  }
-  if (employee.shiftCode) return employee.shiftCode;
-  if (employee.shiftName) return employee.shiftName;
-  if (employee.source === "LEGACY") return "Employee fallback schedule";
-  return "Scheduled";
+  return employee.scheduleLabel;
 }
 
 function sourceLabel(employee: CalendarEmployee) {

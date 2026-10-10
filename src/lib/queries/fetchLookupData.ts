@@ -15,8 +15,6 @@ import {
     pagibigContributionRates,
     philhealthContributionRates,
     position,
-    shiftTableBreaks,
-    shiftTables,
     slvlGroup,
     sssContributionBrackets,
     statutoryRuleVersions,
@@ -25,7 +23,8 @@ import {
 } from "@/db/schema";
 import { and, asc, desc, eq } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { buildShiftTableReadModel } from "@/lib/shifts";
+import { readShiftCatalog } from "@/lib/scheduling/shift-catalog";
+import { requireAuthenticatedUser } from "@/lib/auth/server";
 import {
   fetchHolidayTemplates,
   fetchHolidayYearCalendar,
@@ -266,35 +265,13 @@ export const fetchHolidayTypeAccountCodes = unstable_cache(
   { tags: ["holiday-type-account-codes"] }
 );
 
-export const fetchShiftTables = unstable_cache(
-  async () => {
-    const [shiftRows, breakRows] = await Promise.all([
-      db.select().from(shiftTables).orderBy(asc(shiftTables.code)),
-      db
-        .select()
-        .from(shiftTableBreaks)
-        .orderBy(asc(shiftTableBreaks.shiftTableId), asc(shiftTableBreaks.sortOrder)),
-    ]);
-
-    const breaksByShiftTableId = new Map<number, typeof shiftTableBreaks.$inferSelect[]>();
-
-    for (const breakRow of breakRows) {
-      const current = breaksByShiftTableId.get(breakRow.shiftTableId) ?? [];
-      current.push(breakRow);
-      breaksByShiftTableId.set(breakRow.shiftTableId, current);
-    }
-
-    return shiftRows.map((shiftTable) =>
-      buildShiftTableReadModel({
-        shiftTable,
-        breaks: breaksByShiftTableId.get(shiftTable.id) ?? [],
-      })
-    );
-  },
-  ["shift-tables"],
-  { tags: ["shift-tables"] }
-);
-
+// Fresh private catalog: active choices by default, full version history only for Admin.
+export async function fetchShiftTables(options: { includeArchived?: boolean; includeUsage?: boolean } = {}) {
+  const auth = await requireAuthenticatedUser();
+  if (auth.role !== "ADMIN" && auth.role !== "MANAGER") throw new Error("Forbidden.");
+  if ((options.includeArchived || options.includeUsage) && auth.role !== "ADMIN") throw new Error("Forbidden.");
+  return readShiftCatalog(db, options);
+}
 export const fetchUndertimeRules = unstable_cache(
   async () => {
     const rows = await db
