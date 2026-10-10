@@ -1,10 +1,11 @@
 "use client";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ProvisionalPayroll, ProvisionalAmounts, ProvisionalEmployee, ProvisionalLine, ProvisionalGroup, ProvisionalDay } from "@/lib/payroll/provisionalTypes";
+import type { ProvisionalPayroll, ProvisionalAmounts, ProvisionalEmployee, ProvisionalGroup, ProvisionalDay } from "@/lib/payroll/provisionalTypes";
 import { formatWorkday } from "@/lib/payroll/dateDisplay";
 import { DaySchedule } from "../attendance-source/day-schedule";
 import { DayCorrection } from "./day-correction";
+import { CalculationLines } from "./calculation-lines";
 import { PayrollWorkspaceNav } from "../PayrollPageNav";
 
 const button = "inline-flex min-h-11 items-center justify-center rounded-lg border px-3 py-2 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 disabled:opacity-50";
@@ -20,7 +21,6 @@ function needsAttention(day: ProvisionalDay) { return !["Future", "In progress"]
 function attendanceAction(day: ProvisionalDay) { return day.attendance?.canConfirmExisting ? "Review existing punches" : day.attendance?.missingDirection ? `Add missing ${day.attendance.missingDirection}` : day.status === "Incomplete" ? "Review attendance issue" : "View attendance"; }
 function attendanceNote(value: string) { const labels: Record<string, string> = { MISSING_IN: "Missing IN", MISSING_OUT: "Missing OUT", ODD_PUNCH_COUNT: "Unpaired punch", INCOMPLETE_SEQUENCE: "Incomplete IN/OUT sequence", MISSING_SCHEDULE: "Set this day’s schedule to calculate work", NO_SCHEDULE: "Set this day’s schedule to calculate work" }; return labels[value] || value.replaceAll("_", " ").toLowerCase().replace(/^./, char => char.toUpperCase()); }
 function sum(rows: ProvisionalEmployee[], scenario: "recorded" | "forecast"): ProvisionalAmounts { return rows.reduce((total, row) => { const amount = row[scenario]; return amount ? { gross: total.gross + amount.gross, deductions: total.deductions + amount.deductions, net: total.net + amount.net, shortfall: total.shortfall + amount.shortfall } : total; }, { gross: 0, deductions: 0, net: 0, shortfall: 0 }); }
-function Lines({ lines }: { lines: ProvisionalLine[] }) { return <ul className="divide-y">{lines.map((line, index) => <li key={`${line.code}:${index}`} className="flex min-w-0 items-start justify-between gap-4 py-2 text-sm"><span className="min-w-0 break-words">{line.description || line.code}<small className="block text-muted-foreground">{line.code} · {line.lineType}{line.quantity != null ? ` · ${line.quantity} × ${money(line.rate)}` : ""}</small></span><span className="shrink-0 tabular-nums">{money(line.amount)}</span></li>)}</ul>; }
 
 export function ProvisionalWorkspace({ periods, departments, initial, today }: Props) {
   const lastCompletedDay=new Date(Date.parse(`${today}T00:00:00Z`)-86400000).toISOString().slice(0,10);
@@ -99,7 +99,7 @@ export function ProvisionalWorkspace({ periods, departments, initial, today }: P
           <AmountCards group={group} recorded={employee.recorded} forecast={employee.forecast} />
           {employee.postedCredits > 0 && <p className="text-sm">Previously posted earnings: {money(employee.postedCredits)}. Posted payments are preserved.</p>}
           {!!employee.warnings.length && <ul className="list-inside list-disc rounded-lg border border-amber-400 p-3 text-sm">{employee.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>}
-          <div className="grid gap-3 lg:grid-cols-2"><details className="rounded-lg border p-3"><summary className="flex min-h-11 cursor-pointer items-center font-semibold">Recorded calculation and deductions</summary><Lines lines={employee.recordedLines} /></details><details className="rounded-lg border p-3"><summary className="flex min-h-11 cursor-pointer items-center font-semibold">Forecast calculation and deductions</summary><p className="text-xs text-muted-foreground">{current.forecastAssumption}</p><Lines lines={employee.forecastLines} /></details></div>
+          <div className="grid gap-3 lg:grid-cols-2"><details className="rounded-lg border p-3"><summary className="flex min-h-11 cursor-pointer items-center font-semibold">Recorded calculation and deductions</summary><CalculationLines lines={employee.recordedLines} period={current.period} asOfDate={current.asOfDate} availableWorkDates={employee.days.map(day => day.date)} scenario="recorded" onOpenDay={day => navigate({ day, edit: "attendance" }, true)} /></details><details className="rounded-lg border p-3"><summary className="flex min-h-11 cursor-pointer items-center font-semibold">Forecast calculation and deductions</summary><p className="text-xs text-muted-foreground">{current.forecastAssumption}</p><CalculationLines lines={employee.forecastLines} period={current.period} asOfDate={current.asOfDate} availableWorkDates={employee.days.map(day => day.date)} scenario="forecast" onOpenDay={day => navigate({ day, edit: "attendance" }, true)} /></details></div>
           <h3 className="font-semibold">Workdays</h3><p className="text-xs text-muted-foreground">{group === "Monthly" ? "Fixed monthly salary is not reduced by missing logs. " : ""}No recorded work requires no correction. Future schedules are a forecast.</p>
           <div className="space-y-2">{employee.days.map(day => <WorkdayCard key={day.date} day={day} holdHref={holdHref(employee.employeeId,day.date)} onOpen={edit => navigate({ day: day.date, edit }, true)} />)}</div>
         </>}

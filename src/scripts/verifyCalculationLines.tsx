@@ -1,0 +1,25 @@
+import assert from "node:assert/strict";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { CalculationLines } from "@/app/(ntg)/payroll/provisional/calculation-lines";
+import { sampleCalculationLines } from "./calculationDetailsPreview";
+
+const props = {period:{startDate:"2026-10-01",endDate:"2026-10-15"},asOfDate:"2026-10-09",scenario:"recorded" as const,availableWorkDates:["2026-10-07"],onOpenDay:()=>{}};
+const html = renderToStaticMarkup(<CalculationLines {...props} lines={sampleCalculationLines}/>);
+assert.ok(html.indexOf('dateTime="2026-10-07"') < html.indexOf('dateTime="2026-10-08"'),"Day groups must be chronological");
+assert.ok(html.includes("7h 40m at ₱75.00/hour"),"Use exact minutes");
+assert.ok(!html.includes("7.67 ×"),"Do not show rounded arithmetic as equality");
+assert.ok(html.includes("no additional deduction") && html.includes("Actual lateness: 20m"));
+assert.ok(html.includes("View attendance for Wed, Oct 7, 2026"));
+assert.ok(!html.includes("View attendance for Thu, Oct 8, 2026"),"No broken action outside loaded workdays");
+assert.ok(html.includes("-₱25.00"),"Retain signed manual amount");
+assert.ok(html.includes("Paid by the employer; not deducted from employee pay"));
+assert.ok(html.indexOf("Employer contributions") > html.indexOf("Period earnings and deductions"));
+const empty = renderToStaticMarkup(<CalculationLines {...props} lines={[]}/>);
+assert.ok(empty.includes("No calculation entries") && !empty.includes("Show accounting details"));
+const forecast = renderToStaticMarkup(<CalculationLines {...props} scenario="forecast" lines={[{...sampleCalculationLines[0],details:{...sampleCalculationLines[0].details!,projected:true}}]}/>);
+assert.ok(forecast.includes("Projected work"));
+const monthly = renderToStaticMarkup(<CalculationLines {...props} lines={[{code:"BASE",description:"Monthly salary",lineType:"Earning",amount:24000,quantity:1,rate:30000,details:{scope:"period",startDate:"2026-10-01",endDate:"2026-10-31",notes:["Remaining after posted credits."]}}]}/>);
+assert.ok(monthly.includes("Sat, Oct 31, 2026") && !monthly.includes("Thu, Oct 15, 2026"),"Monthly line uses its earning month, not the selected payout half");
+assert.ok(!monthly.includes("×") && monthly.includes("Remaining after posted credits"),"Do not assert unreduced monthly quantity/rate arithmetic");
+console.log("PASS CalculationLines: chronological dates, exact minutes, zero deductions, scoped links, signed amounts, employer separation, empty and forecast");

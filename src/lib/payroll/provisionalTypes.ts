@@ -1,7 +1,21 @@
 import type { AttendanceDayInput } from "./attendanceDayInput";
 export type ProvisionalGroup = "Daily" | "Monthly";
 export type ProvisionalAmounts = { gross: number; deductions: number; net: number; shortfall: number };
-export type ProvisionalLine = { code: string; description: string; lineType: "Earning" | "Deduction" | "Employer Contribution" | "Information"; amount: number; quantity?: number | null; rate?: number | null };
+export type ProvisionalLineDetails = {
+  scope: "day" | "period" | "range";
+  workDate?: string;
+  startDate?: string;
+  endDate?: string;
+  dueDate?: string;
+  quantityMinutes?: number;
+  quantityUnit?: "hours" | "days" | "units";
+  actualLateMinutes?: number;
+  penaltyMinutes?: number;
+  notes: string[];
+  projected?: boolean;
+  formula?: { quantityMinutes: number; hourlyRate: number };
+};
+export type ProvisionalLine = { code: string; description: string; lineType: "Earning" | "Deduction" | "Employer Contribution" | "Information"; amount: number; quantity?: number | null; rate?: number | null; details?: ProvisionalLineDetails };
 export type ProvisionalDay = {
   attendance?: AttendanceDayInput;
   payrollHold?: boolean;
