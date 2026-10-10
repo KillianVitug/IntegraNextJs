@@ -30,7 +30,7 @@ function timeLabel(value: number) {
   const remainder = clock % 60;
   return `${hours}:${minutes}${remainder ? `:${String(remainder).padStart(2, "0")}` : ""}${day ? ` (+${day} day${day === 1 ? "" : "s"})` : ""}`;
 }
-function rangeLabel(range: TimelineRange) { return `${timeLabel(range.start)}–${timeLabel(range.end)}`; }
+function rangeLabel(range: TimelineRange) { return `${timeLabel(range.start)}-${timeLabel(range.end)}`; }
 function regularRange(item: DisplayBreak, shift: TimelineRange | null): TimelineRange | null {
   const from = clockMinutes(item.fromTime), to = clockMinutes(item.toTime);
   if (from === null || to === null) return null;
@@ -44,7 +44,7 @@ function deduction(item: DisplayBreak) {
   return Number.isFinite(value) && value >= 0 ? value : null;
 }
 function describeBreak(item: DisplayBreak, range: TimelineRange | null) {
-  const time = range ? rangeLabel(range) : `${item.fromTime || "?"}–${item.toTime || "?"}`;
+  const time = range ? rangeLabel(range) : `${item.fromTime || "?"}-${item.toTime || "?"}`;
   const unpaid = deduction(item), duration = range ? range.end - range.start : null;
   if (unpaid === null || duration === null || unpaid > duration) return `${time} (deduction needs review)`;
   const paid = duration - unpaid;
@@ -134,6 +134,11 @@ function describe(snapshot: ScheduleSnapshot): DescribedSchedule {
 
 /** Labels are derived from the supplied captured values; no current template lookup. */
 export function describeSchedule(snapshot: ScheduleSnapshot): SchedulePresentation { return describe(snapshot).presentation; }
+
+/** Accept typed hyphens and pasted time ranges with typographic dashes. */
+export function normalizeScheduleSearch(value: string) {
+  return value.toLocaleLowerCase().replace(/[\u2010-\u2015\u2212]/g, "-").replace(/\s*([-\/])\s*/g, "$1").trim();
+}
 
 /** Keep native pickers scannable; full policy/break details remain in the review. */
 export function scheduleChoiceLabels(shifts: readonly { id: number; snapshot: ScheduleSnapshot }[]) {
