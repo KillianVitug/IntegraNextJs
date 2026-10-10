@@ -29,6 +29,8 @@ import {
 } from "@/zod-schemas/employee";
 import { normalizeSalaryForDb } from "@/lib/payroll/salaryNormalization";
 import { markEmployeePayrollRunsStale } from "@/lib/payroll/staleRuns";
+import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
+import { assertProfileScheduleUnchanged, ProfileScheduleChangeError } from "@/lib/scheduling/profile-schedule-guard";
 
 type EmployeeOwnedTable =
   | typeof employeesGeneralInfo
@@ -183,9 +185,19 @@ export const saveEmployeeAction = actionClient
 
     try {
       return await db.transaction(async (tx) => {
+        await lockAttendancePayrollInput(tx);
         await acquireAccountLifecycleLockTx(tx);
         await assertAccountAdminTx(tx, auth);
         let employeeId = id;
+
+        if (timekeeping) {
+          const currentTimekeeping = employeeId
+            ? await tx.query.employeesTimekeeping.findFirst({
+                where: eq(employeesTimekeeping.employeeId, employeeId),
+              })
+            : null;
+          assertProfileScheduleUnchanged(currentTimekeeping, timekeeping);
+        }
 
         if (!employeeId) {
           const finalEmployeeType = canChooseEmployeeType
@@ -327,6 +339,9 @@ export const saveEmployeeAction = actionClient
         };
       });
     } catch (error) {
+      if (error instanceof ProfileScheduleChangeError) {
+        return { serverError: error.message };
+      }
       if (error instanceof InvalidEmployeeNoError) {
         return {
           serverError: error.message,

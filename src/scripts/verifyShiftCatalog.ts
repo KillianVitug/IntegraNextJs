@@ -150,21 +150,19 @@ async function main() {
     await assert.rejects(archiveShiftCatalog(client, actor, { id: created.shiftTableId }));
     checks++;
 
-    // Validate hydrated policies, while preserving safe omission compatibility.
+    // New writes cannot reintroduce a second calculation rule or guess split punches.
     const legacyInput = { ...input, requestId: randomUUID(), code: "LEGACY-OMITTED", calculationPolicy: undefined,
       punchPolicy: undefined, breaks: input.breaks.map(row => ({ ...row, requiresPunches: undefined })) };
-    const legacyCreated = await saveShiftCatalog(client, actor, legacyInput);
-    const legacyRow = (await readShiftCatalog(client)).find(row => row.id === legacyCreated.shiftTableId)!;
-    assert.equal(legacyRow.calculationPolicy, "legacy"); assert.equal(legacyRow.punchPolicy, "legacy");
     const beforeInvalidPolicy = await counts();
+    await assert.rejects(saveShiftCatalog(client, actor, legacyInput), /explicit punch policy/);
+    await assert.rejects(saveShiftCatalog(client, actor, { ...input, requestId: randomUUID(), code: "OLD-RULE", calculationPolicy: "legacy" }), /eight-hour normal-pay rule/);
     for (const punchPolicy of ["legacy", undefined]) {
       await assert.rejects(saveShiftCatalog(client, actor, { ...legacyInput, requestId: randomUUID(), code: "INVALID-POLICY",
         calculationPolicy: "eight_hour_day", punchPolicy }), /explicit punch policy/);
     }
-    await assert.rejects(saveShiftCatalog(client, actor, { ...legacyInput, requestId: randomUUID(),
-      id: legacyCreated.shiftTableId, expectedVersion: 1, calculationPolicy: "eight_hour_day" }), /explicit punch policy/);
     assert.deepEqual(await counts(), beforeInvalidPolicy);
-    assert.equal((await readShiftCatalog(client)).find(row => row.id === legacyCreated.shiftTableId)?.archivedAt, null);
+    const standard = await saveShiftCatalog(client, actor, { ...input, requestId: randomUUID(), code: "ONE-RULE", calculationPolicy: undefined });
+    assert.equal((await readShiftCatalog(client)).find(row => row.id === standard.shiftTableId)?.calculationPolicy, "eight_hour_day");
     assert.equal(await protectedRows(), baseline); checks++;
     console.log(JSON.stringify({ passed: true, groups: checks, migration: "0127_shift_catalog_versions", fixture: "fresh in-memory PGlite; fictional data only" }));
   } finally {

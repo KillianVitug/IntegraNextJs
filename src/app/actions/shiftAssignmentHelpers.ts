@@ -1,4 +1,6 @@
 import { PayrollValidationError } from "@/lib/payroll/validation";
+import { assertOperationalSchedule, assertOperationalAssignmentSuccessor, type OperationalScheduleRange } from "@/lib/scheduling/operational-rule-guard";
+import { assertNoConfirmedScheduleEdit } from "@/lib/scheduling/guards";
 import { addDays, format } from "date-fns";
 import type { DbClient } from "@/db";
 import {
@@ -16,7 +18,7 @@ import {
   shiftTableBreaks,
   shiftTables,
 } from "@/db/schema";
-import { recordPayrollRunEvent } from "@/lib/admin";
+import { recordAdminAuditEvent, recordPayrollRunEvent } from "@/lib/admin";
 import { buildAttendanceSummaryComputations } from "@/lib/payroll/attendanceSync";
 import { loadEffectiveAttendanceCorrections, loadEffectiveAttendanceRawLogs, mapEffectiveAttendanceCorrections } from "@/lib/payroll/effectiveAttendanceInputs";
 import { buildLeaveTypeMapByCode, resolveLeavePayStatus } from "@/lib/payroll/leave";
@@ -250,7 +252,7 @@ export async function ensureNoWeeklyPatternOverlap(
   }
 }
 
-export async function loadShiftTableForAssignment(tx: DbClient, shiftTableId: number) {
+export async function loadShiftTableForAssignment(tx: DbClient, shiftTableId: number, range?: OperationalScheduleRange) {
   const [shiftTable] = await tx
     .select()
     .from(shiftTables)
@@ -267,6 +269,7 @@ export async function loadShiftTableForAssignment(tx: DbClient, shiftTableId: nu
     .where(eq(shiftTableBreaks.shiftTableId, shiftTableId))
     .orderBy(asc(shiftTableBreaks.sortOrder));
 
+  if (range) assertOperationalSchedule(shiftTableScheduleSnapshot(buildShiftTableReadModel({ shiftTable, breaks })), range);
   return {
     ...shiftTable,
     breaks,
@@ -580,4 +583,79 @@ export async function markAffectedShiftRunsStale(args: {
       notes: "Marked stale because employee schedule data changed.",
     });
   }
+}
+
+/** Reused by single-date actions and atomic manager request decisions. */
+export async function deleteDateAssignment(tx: DbClient, actor: { userId: string }, assignmentId: number) {
+  await lockAttendancePayrollInput(tx);
+  const existingAssignment = await tx.query.employeeShiftAssignments.findFirst({
+    where: eq(employeeShiftAssignments.id, assignmentId),
+  });
+
+  if (!existingAssignment) {
+    throw new Error("Shift assignment not found.");
+  }
+
+  await lockShiftAssignmentContext(tx, existingAssignment.employeeId);
+  await assertNoConfirmedScheduleEdit(tx, {employeeId: existingAssignment.employeeId, startDate: existingAssignment.effectiveFrom, endDate: existingAssignment.effectiveTo});
+
+  const staleRange = await withOvernightScheduleBoundary(tx, {
+    employeeId: existingAssignment.employeeId,
+    removedAssignmentIds: [existingAssignment.id],
+    range: getAffectedScheduleRange({ existingRecord: existingAssignment }),
+  });
+
+  if (!staleRange.startDate) {
+    throw new Error("Unable to determine the affected shift-assignment date range.");
+  }
+
+  await markAffectedShiftRunsStale({
+    tx,
+    employeeId: existingAssignment.employeeId,
+    startDate: staleRange.startDate,
+    endDate: staleRange.endDate,
+    actorUserId: actor.userId,
+  });
+
+  await tx
+    .delete(employeeShiftAssignments)
+    .where(eq(employeeShiftAssignments.id, assignmentId));
+
+  await assertOperationalAssignmentSuccessor(tx, { employeeId: existingAssignment.employeeId, range: { startDate: existingAssignment.effectiveFrom, endDate: existingAssignment.effectiveTo } });
+
+  const latestImportedDate = await getLatestImportedAttendanceDate(
+    tx,
+    existingAssignment.employeeId
+  );
+  const rebuildRange = getRebuildRange({
+    staleRange,
+    latestImportedDate,
+  });
+  const rebuiltSummaryCount = rebuildRange
+    ? await rebuildEmployeeAttendanceSummaries({
+        tx,
+        actorUserId: actor.userId,
+        employeeId: existingAssignment.employeeId,
+        startDate: rebuildRange.startDate,
+        endDate: rebuildRange.endDate,
+      })
+    : 0;
+
+  await recordAdminAuditEvent({
+    actorUserId: actor.userId,
+    entityType: "employee_shift_assignment",
+    entityId: assignmentId,
+    action: "employee_shift_assignment.deleted",
+    database: tx,
+    details: {
+      employeeId: existingAssignment.employeeId,
+      rebuiltSummaryCount,
+      rebuildRange,
+    },
+  });
+
+  return {
+    message: "Shift override deleted.",
+    rebuiltSummaryCount,
+  };
 }

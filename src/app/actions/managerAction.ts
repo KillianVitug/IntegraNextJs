@@ -1187,8 +1187,17 @@ export async function updateManagerScheduleChangeRequest(input: unknown) {
       reason: payload.reason?.trim() || null,
       updatedAt: new Date(),
     })
-    .where(eq(managerScheduleChangeRequests.id, existing.id))
+    .where(and(
+      eq(managerScheduleChangeRequests.id, existing.id),
+      eq(managerScheduleChangeRequests.requestedByAccountId, auth.accountId),
+      eq(managerScheduleChangeRequests.status, "Pending"),
+      eq(managerScheduleChangeRequests.action, "Create"),
+    ))
     .returning();
+
+  if (!request) {
+    throw new Error("This schedule request is no longer pending. Reload to see its current status; no changes were saved.");
+  }
 
   revalidatePath("/managerSchedules");
   revalidatePath("/home/schedule-requests");
@@ -1224,8 +1233,17 @@ export async function cancelManagerScheduleChangeRequest(input: unknown) {
       status: "Cancelled",
       updatedAt: new Date(),
     })
-    .where(eq(managerScheduleChangeRequests.id, existing.id))
+    .where(and(
+      eq(managerScheduleChangeRequests.id, existing.id),
+      eq(managerScheduleChangeRequests.requestedByAccountId, auth.accountId),
+      eq(managerScheduleChangeRequests.status, "Pending"),
+      eq(managerScheduleChangeRequests.action, "Create"),
+    ))
     .returning();
+
+  if (!request) {
+    throw new Error("This schedule request is no longer pending. Reload to see its current status; no changes were saved.");
+  }
 
   revalidatePath("/managerSchedules");
   revalidatePath("/home/schedule-requests");

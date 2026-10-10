@@ -24,6 +24,8 @@ import { requireAdmin, syncLinkedAccountEmailTx } from "@/lib/auth/server";
 import { acquireAccountLifecycleLockTx, assertAccountAdminTx, assertEmployeeConfidentialityChangeTx } from "@/lib/auth/lifecycle";
 import { DEFAULT_EMPLOYEE_TYPE } from "@/utils/employeeCode";
 import { InvalidEmployeeNoError, normalizeEmployeeNoForSave } from "@/utils/employeeNo";
+import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
+import { assertProfileScheduleUnchanged, ProfileScheduleChangeError } from "@/lib/scheduling/profile-schedule-guard";
 
 type RawCsvRow = Record<string, unknown>;
 
@@ -243,6 +245,7 @@ export async function importEmployeesFromCsv(
   };
 
   await db.transaction(async (tx) => {
+    await lockAttendancePayrollInput(tx);
     await acquireAccountLifecycleLockTx(tx);
     await assertAccountAdminTx(tx, actor);
     const lookups = await buildLookupMaps(tx);
@@ -265,6 +268,27 @@ export async function importEmployeesFromCsv(
 
     for (const row of importRows) {
       const existingEmployee = employeeByNo.get(row.employeeNo);
+      const timekeepingData = withNewEmployeeDefaults(
+        !existingEmployee,
+        { hoursWorked: "0", minutesWorked: "0" },
+        pickDefined(row, [
+          "timekeepingId", "shiftSchedule", "checkInTime", "checkOutTime",
+          "restDay", "hoursWorked", "minutesWorked",
+        ]),
+      );
+      const currentTimekeeping = existingEmployee
+        ? await tx.query.employeesTimekeeping.findFirst({
+            where: eq(employeesTimekeeping.employeeId, existingEmployee.id),
+          })
+        : null;
+      try {
+        assertProfileScheduleUnchanged(currentTimekeeping, timekeepingData);
+      } catch (error) {
+        if (error instanceof ProfileScheduleChangeError) {
+          throw new EmployeeCsvImportError([`Row ${row.rowNumber}: ${error.message}`]);
+        }
+        throw error;
+      }
       const employeeId = existingEmployee
         ? existingEmployee.id
         : await createEmployee(tx, row);
@@ -370,19 +394,7 @@ export async function importEmployeesFromCsv(
         tx,
         employeesTimekeeping,
         employeeId,
-        withNewEmployeeDefaults(
-          !existingEmployee,
-          { hoursWorked: "0", minutesWorked: "0" },
-          pickDefined(row, [
-            "timekeepingId",
-            "shiftSchedule",
-            "checkInTime",
-            "checkOutTime",
-            "restDay",
-            "hoursWorked",
-            "minutesWorked",
-          ]),
-        ),
+        timekeepingData,
       );
     }
   });
