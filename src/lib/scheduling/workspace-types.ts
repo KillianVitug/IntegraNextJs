@@ -1,4 +1,4 @@
-import type { ShiftBreakSlotKey } from "@/lib/shifts";
+import type { ShiftBreakSlotKey, ShiftCalculationPolicy, ShiftPunchPolicy } from "@/lib/shifts";
 
 export const scheduleWeekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"] as const;
 export type ScheduleWeekday = (typeof scheduleWeekdays)[number];
@@ -14,7 +14,9 @@ export type ScheduleSnapshot = {
   graceMinutes: number;
   hoursPerDay: number;
   isFlexible: boolean;
-  breaks: Array<{ slotKey: ShiftBreakSlotKey; label: string; fromTime: string; toTime: string; deduct: boolean; deductHours: number; deductMinutes: number; sortOrder: number }>;
+  calculationPolicy?: ShiftCalculationPolicy;
+  punchPolicy?: ShiftPunchPolicy;
+  breaks: Array<{ slotKey: ShiftBreakSlotKey; label: string; fromTime: string; toTime: string; deduct: boolean; deductHours: number; deductMinutes: number; sortOrder: number; requiresPunches?: boolean }>;
 };
 export type ScheduleCell = {
   employeeId: string;

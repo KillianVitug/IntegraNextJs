@@ -1,8 +1,13 @@
+export type ShiftCalculationPolicy = "legacy" | "eight_hour_day";
+export type ShiftPunchPolicy = "legacy" | "outer" | "split_gaps";
+export const calculationPolicyFor = (value?: string | null): ShiftCalculationPolicy => value === "eight_hour_day" ? value : "legacy";
+export const punchPolicyFor = (value?: string | null): ShiftPunchPolicy => value === "outer" || value === "split_gaps" ? value : "legacy";
+
 export const SHIFT_BREAK_SLOT_DEFINITIONS = [
   {
     slotKey: "mid_break",
     label: "Mid Breaktime",
-    required: true,
+    required: false,
     category: "regular",
     sortOrder: 1,
   },
@@ -59,6 +64,7 @@ export type ShiftBreakInputLike = {
   deduct?: boolean | null;
   deductHours?: number | string | null;
   deductMinutes?: number | string | null;
+  requiresPunches?: boolean | null;
 };
 
 export type ShiftTableLike = {
@@ -67,6 +73,8 @@ export type ShiftTableLike = {
   regularStartTime: string;
   regularEndTime: string;
   breaks?: ShiftBreakInputLike[] | null;
+  calculationPolicy?: string | null;
+  punchPolicy?: string | null;
 };
 
 export type ShiftAssignmentLike = {
@@ -77,6 +85,8 @@ export type ShiftAssignmentLike = {
   breakMinutes?: number | string | null;
   paidBreakMinutes?: number | string | null;
   hoursPerDay?: number | string | null;
+  calculationPolicy?: string | null;
+  punchPolicy?: string | null;
 };
 
 export type ShiftAssignmentSnapshot = {
@@ -87,6 +97,8 @@ export type ShiftAssignmentSnapshot = {
   breakMinutes: number;
   paidBreakMinutes: number;
   hoursPerDay: number;
+  calculationPolicy?: ShiftCalculationPolicy;
+  punchPolicy?: ShiftPunchPolicy;
 };
 
 export type DeductibleRegularBreakWindow = {
@@ -98,6 +110,12 @@ export type DeductibleRegularBreakWindow = {
 
 export type ShiftTableReadModel = {
   id: number;
+  familyId?: string;
+  version?: number;
+  archivedAt?: string | null;
+  calculationPolicy?: ShiftCalculationPolicy;
+  punchPolicy?: ShiftPunchPolicy;
+  usage?: { weeklyDays: number; datedAssignments: number; pendingRequests: number };
   code: string;
   description: string;
   regularStartTime: string;
@@ -111,6 +129,7 @@ export type ShiftTableReadModel = {
     deductHours: number;
     deductMinutes: number;
     sortOrder: number;
+    requiresPunches?: boolean;
   }>;
   deductibleBreakMinutes: number;
   paidBreakMinutes: number;
@@ -165,6 +184,7 @@ export function buildShiftBreakRows(
       deduct: Boolean(current?.deduct),
       deductHours: Math.max(0, toNumber(current?.deductHours)),
       deductMinutes: Math.max(0, toNumber(current?.deductMinutes)),
+      requiresPunches: Boolean(current?.requiresPunches),
       sortOrder: definition.sortOrder,
     };
   });
@@ -326,6 +346,8 @@ export function buildShiftAssignmentSnapshotFromTable(
     breakMinutes: metrics.breakMinutes,
     paidBreakMinutes: metrics.paidBreakMinutes,
     hoursPerDay: metrics.hoursPerDay,
+    calculationPolicy: calculationPolicyFor(shiftTable.calculationPolicy),
+    punchPolicy: punchPolicyFor(shiftTable.punchPolicy),
   };
 }
 
@@ -346,12 +368,19 @@ export function resolveShiftAssignmentSnapshot(args: {
     breakMinutes: toNumber(args.assignment.breakMinutes),
     paidBreakMinutes: toNumber(args.assignment.paidBreakMinutes),
     hoursPerDay: roundToTwo(toNumber(args.assignment.hoursPerDay)),
+    calculationPolicy: calculationPolicyFor(args.assignment.calculationPolicy),
+    punchPolicy: punchPolicyFor(args.assignment.punchPolicy),
   };
 }
 
 export function buildShiftTableReadModel(args: {
   shiftTable: {
     id: number;
+    familyId?: string;
+    version?: number;
+    archivedAt?: Date | string | null;
+    calculationPolicy?: string | null;
+    punchPolicy?: string | null;
     code: string;
     description: string;
     regularStartTime: string;
@@ -370,6 +399,11 @@ export function buildShiftTableReadModel(args: {
 
   return {
     id: args.shiftTable.id,
+    familyId: args.shiftTable.familyId,
+    version: args.shiftTable.version,
+    archivedAt: args.shiftTable.archivedAt instanceof Date ? args.shiftTable.archivedAt.toISOString() : args.shiftTable.archivedAt ?? null,
+    calculationPolicy: calculationPolicyFor(args.shiftTable.calculationPolicy),
+    punchPolicy: punchPolicyFor(args.shiftTable.punchPolicy),
     code: args.shiftTable.code,
     description: args.shiftTable.description,
     regularStartTime: normalizeTimeValue(args.shiftTable.regularStartTime) ?? "",

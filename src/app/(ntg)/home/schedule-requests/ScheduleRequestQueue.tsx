@@ -1,4 +1,5 @@
 "use client";
+import { shiftTableScheduleLabel } from "@/lib/scheduling/presentation";
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
@@ -35,7 +36,7 @@ function formatShiftTableLabel(
     return `Unknown shift table (#${shiftTableId})`;
   }
 
-  return `${shiftTable.code} | ${shiftTable.description}`;
+  return shiftTableScheduleLabel(shiftTable);
 }
 
 function formatCoverage(request: RequestRow | null) {
@@ -100,6 +101,8 @@ export function ScheduleRequestQueue({
   const selectedRequest =
     requests.find((request) => request.id === selectedRequestId) ?? null;
   const canDecide = selectedRequest?.status === "Pending";
+  const selectedShift = selectedRequest ? shiftTableMap.get(selectedRequest.payload.shiftTableId) : null;
+  const unavailableShift = Boolean(canDecide && selectedRequest?.action !== "Delete" && (!selectedShift || selectedShift.archivedAt));
   const canVoid =
     selectedRequest?.status === "Approved" && selectedRequest.action === "Create";
   const canEditDecisionNote = canDecide || canVoid;
@@ -115,7 +118,7 @@ export function ScheduleRequestQueue({
   }
 
   function approve() {
-    if (!selectedRequest || !canDecide) return;
+    if (!selectedRequest || !canDecide || unavailableShift) return;
 
     startTransition(async () => {
       try {
@@ -291,8 +294,9 @@ export function ScheduleRequestQueue({
           </div>
         </div>
 
+        {unavailableShift && <p role="status" className="mt-3 text-sm text-amber-700 dark:text-amber-300">This request uses an archived or unavailable schedule version. Its original details are retained. Deny it with an explanation, then prepare the replacement in <a className="underline" href="/schedules">Schedules</a>.</p>}
         <div className="mt-4 flex gap-2">
-          <Button type="button" disabled={!canDecide || isPending} onClick={approve}>
+          <Button type="button" disabled={!canDecide || unavailableShift || isPending} onClick={approve}>
             Approve
           </Button>
           <Button

@@ -67,7 +67,7 @@ import {
   getMappedLeavePayrollAccountCode,
   resolveLeavePayStatus,
 } from "./leave";
-import { buildHolidayTypeByDate, type OvertimeHolidayType } from "./overtime";
+import { buildHolidayTypeByDate, computeOvertimeCompensation, findMatchingOvertimeRule, type OvertimeHolidayType } from "./overtime";
 import {
   getPrimaryResolvedScheduleForPeriod,
   isResolvedScheduleRestDay,
@@ -118,6 +118,7 @@ import {
   applyAttendanceDtrEffectiveStatus,
   computeAccumulatedLatePenaltyMinutes,
   computeNetDtrWorkedMinutes,
+  computePolicyAttendancePay,
   computePayrollTardinessMinutes,
   getAttendanceDtrDayTypeFromHolidayType,
   isAttendanceDtrNonWorkingDayType,
@@ -1081,6 +1082,7 @@ function buildPayrollExceptionLines(args: {
   hourlyRate: number;
   fallbackHoursPerDay: number;
   fallbackMinutesPerDay: number;
+  usePerDayPolicyRates?: boolean;
   accountCodes: Map<string, typeof accountCode.$inferSelect>;
 }) {
   const lines: PayrollLineDraft[] = [];
@@ -1117,7 +1119,7 @@ function buildPayrollExceptionLines(args: {
       scheduledMinutes: summary?.scheduledMinutes ?? args.fallbackMinutesPerDay,
       dailyRate: args.dailyRate,
       payComputationMode: args.payComputationMode,
-      hourlyRate: args.hourlyRate,
+      hourlyRate: args.usePerDayPolicyRates && summary && row.remarks?.includes("Explicit shift day") ? args.dailyRate/(summary.calculationPolicy==="eight_hour_day"?8:summary.scheduledMinutes>0?summary.scheduledMinutes/60:args.fallbackHoursPerDay) : args.hourlyRate,
       accountDailyRate: mappedAccount?.dailyRate ?? null,
       accountMonthlyRate: mappedAccount?.monthlyRate ?? null,
       fallbackHoursPerDay: args.fallbackHoursPerDay,
@@ -1129,6 +1131,15 @@ function buildPayrollExceptionLines(args: {
       isRestDay,
       dtrOverrideSource: row.dtrOverrideSource,
     });
+    if(summary?.calculationPolicy==="eight_hour_day" && row.dtrOverrideSource==="DTR_WORKED" && row.remarks?.includes("Explicit shift day") && row.amountOverride==null && !preview.error) {
+      const multiplier=getManualPayrollAccountRateMultiplier({account:{accountType,dailyRate:mappedAccount?.dailyRate,monthlyRate:mappedAccount?.monthlyRate},rateContext:{payComputationMode:args.payComputationMode,hourlyRate:args.dailyRate/8}});
+      preview.amount=roundMoney((row.quantityMinutes??0)/60*(args.dailyRate/8)*multiplier);
+    }
+    if(summary?.calculationPolicy==="eight_hour_day" && row.dtrOverrideSource==="DTR_REGULAR_OVERTIME" && row.remarks?.includes("Explicit shift day") && row.amountOverride==null) {
+      const rule=findMatchingOvertimeRule(args.overtimeRuleRows,row.overtimeCategory??"REGULAR_DAY",row.quantityMinutes??0);
+      const compensation=rule?computeOvertimeCompensation({approvedMinutes:row.quantityMinutes??0,dailyRate:args.dailyRate,scheduledMinutes:summary.scheduledMinutes,fallbackHoursPerDay:8,calculationPolicy:"eight_hour_day",rateMultiplier:rule.rateMultiplier}):null;
+      preview.amount=compensation?.amount??0;preview.rate=compensation?.overtimeRate??null;preview.error=null;
+    }
 
     if (preview.error) {
       throw new Error(`${preview.error} (${row.accountCodeSnapshot})`);
@@ -1600,6 +1611,7 @@ export async function computeEmployeePayroll({
     if (attendanceByDate.has(attendanceDate)) continue;
 
     attendanceByDate.set(attendanceDate, {
+      calculationPolicy: resolveEmployeeScheduleForDate({attendanceDate,assignments:shiftAssignments,weeklyPatterns,legacyTimekeeping:employee.timekeeping??null}).shiftWindow.calculationPolicy ?? "legacy",
       id: `manual-${employee.id}-${attendanceDate}`,
       employeeId: employee.id,
       shiftAssignmentId: null,
@@ -1713,21 +1725,25 @@ export async function computeEmployeePayroll({
   );
   const presentDays = periodOverride.presentDays ?? attendanceSummary.presentDays;
   const regularOvertimeMinutes =
-    periodOverride.overtimeMinutes ?? attendanceSummary.overtimeMinutes;
+    periodOverride.overtimeMinutes ?? effectiveAttendance.filter(row=>row.calculationPolicy!=="eight_hour_day").reduce((sum,row)=>sum+row.overtimeMinutes,0);
   const effectiveLateMinutes =
     periodOverride.lateMinutes ?? attendanceSummary.lateMinutes;
   const effectiveUndertimeMinutes =
     periodOverride.undertimeMinutes ?? attendanceSummary.undertimeMinutes;
   const partialOverstatement=effectiveAttendance.filter(row=>normalizeAttendanceDtrAnomalyFlags(row.anomalyFlags).includes("PARTIAL_VALID_WORK")).reduce((total,row)=>total+Math.max(0,480-row.lateMinutes-row.undertimeMinutes-row.regularMinutes),0);
-  const effectiveWorkedMinutes = Math.max(0,computeNetDtrWorkedMinutes({
+  const hasExplicitPolicy = effectiveAttendance.some(row=>row.calculationPolicy==="eight_hour_day");
+  if(hasExplicitPolicy && [periodOverride.workedMinutes,periodOverride.lateMinutes,periodOverride.undertimeMinutes,periodOverride.overtimeMinutes].some(value=>value!=null)) throw new PayrollValidationError("This period uses explicit shift definitions. Clear whole-period time overrides and review affected employee-days so normal pay and approved overtime retain their daily policy.");
+  const perDayPolicyPay = computePolicyAttendancePay(effectiveAttendance,dailyRate,hoursPerDay);
+  const effectiveWorkedMinutes = hasExplicitPolicy ? Math.max(0,periodOverride.workedMinutes ?? perDayPolicyPay.minutes + attendanceSummary.lateMinutes + attendanceSummary.undertimeMinutes - effectiveLateMinutes - effectiveUndertimeMinutes) : Math.max(0,computeNetDtrWorkedMinutes({
     presentDays: attendanceSummary.presentDays,
     lateMinutes: effectiveLateMinutes,
     undertimeMinutes: effectiveUndertimeMinutes,
     workedMinutesOverride: periodOverride.workedMinutes,
   })-(periodOverride.workedMinutes==null?partialOverstatement:0));
-  const regularPayMinutes = Math.max(0, effectiveWorkedMinutes);
+  const hasPeriodMinuteOverride = periodOverride.workedMinutes!=null || periodOverride.lateMinutes!=null || periodOverride.undertimeMinutes!=null;
+  const regularPayMinutes = Math.max(0, hasExplicitPolicy && !hasPeriodMinuteOverride ? perDayPolicyPay.minutes : effectiveWorkedMinutes);
   const regularPayHours = roundMoney(regularPayMinutes / 60);
-  const hourlyRate = hoursPerDay > 0 ? dailyRate / hoursPerDay : 0;
+  const hourlyRate = hasExplicitPolicy && perDayPolicyPay.minutes>0 ? perDayPolicyPay.amount/(perDayPolicyPay.minutes/60) : primaryResolvedSchedule.shiftWindow.calculationPolicy==="eight_hour_day" ? dailyRate/8 : hoursPerDay > 0 ? dailyRate / hoursPerDay : 0;
   const useRecordBackedLeaveDays = resolvedApprovedLeaves.length > 0;
   const paidLeaveDays = roundMoney(
     useRecordBackedLeaveDays ? paidLeaveDaysFromRecords : attendanceSummary.paidLeaveDays
@@ -1765,7 +1781,7 @@ export async function computeEmployeePayroll({
     salary?.ignoreContributionDeduction === true;
   const regularPayLineAmount = isMonthlyEmployee
     ? roundMoney(monthlyRate / (monthlyOnce?1:2))
-    : roundMoney(regularPayHours * hourlyRate);
+    : hasExplicitPolicy && !hasPeriodMinuteOverride ? perDayPolicyPay.amount : roundMoney(regularPayHours * hourlyRate);
   const paidLeavePay = isMonthlyEmployee
     ? 0
     : roundMoney(dailyRate * paidLeaveDays);
@@ -1954,6 +1970,7 @@ export async function computeEmployeePayroll({
         hourlyRate,
         fallbackHoursPerDay: hoursPerDay,
         fallbackMinutesPerDay: scheduledMinutesPerDay,
+        usePerDayPolicyRates: hasExplicitPolicy,
         accountCodes,
       })
     );

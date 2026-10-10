@@ -1,8 +1,7 @@
 "use server";
 
 import { revalidatePath, revalidateTag } from "next/cache";
-import { db, type DbClient } from "@/db";
-import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
+import { db } from "@/db";
 import {
   accountCode,
   holidayTypeAccountCodes,
@@ -10,23 +9,16 @@ import {
   holidayYearCalendar,
   leavePolicies,
   leaveTypes,
-  employeeShiftAssignments,
-  employeeWeeklyShiftPatternDays,
   employeesLeaveRecords,
   overtimeRules,
-  shiftTableBreaks,
-  shiftTables,
   tardinessRules,
   undertimeRules,
 } from "@/db/schema";
 import { recordAdminAuditEvent, requireAdminActor } from "@/lib/admin";
-import {
-  SHIFT_BREAK_SLOT_DEFINITIONS,
-  buildShiftAssignmentSnapshotFromTable,
-} from "@/lib/shifts";
+import { archiveShiftCatalog, saveShiftCatalog } from "@/lib/scheduling/shift-catalog";
 import { actionClient } from "@/lib/safe-action";
 import { flattenValidationErrors } from "next-safe-action";
-import { and, eq, inArray, isNotNull, isNull, ne, or } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, ne, or } from "drizzle-orm";
 import {
   deleteHolidayCalendarSchema,
   deleteHolidayTemplateSchema,
@@ -220,92 +212,6 @@ async function deleteTimeRule(args: {
   });
 
   return { message: `${args.label} deleted.` };
-}
-
-async function ensureUniqueShiftTableCode(id: number | undefined, code: string) {
-  const existing = await db.query.shiftTables.findFirst({
-    where: id
-      ? and(eq(shiftTables.code, code), ne(shiftTables.id, id))
-      : eq(shiftTables.code, code),
-  });
-
-  if (existing) {
-    throw new Error(`Shift table code ${code} already exists.`);
-  }
-}
-
-function buildPersistedShiftBreakRows(
-  shiftTableId: number,
-  breaks: InsertShiftTableSchemaType["breaks"]
-) {
-  return SHIFT_BREAK_SLOT_DEFINITIONS.flatMap((definition, index) => {
-    const breakRow = breaks[index];
-    if (!breakRow?.fromTime || !breakRow?.toTime) return [];
-
-    return [
-      {
-        shiftTableId,
-        slotKey: definition.slotKey,
-        label: definition.label,
-        fromTime: breakRow.fromTime,
-        toTime: breakRow.toTime,
-        deduct: breakRow.deduct,
-        deductHours: breakRow.deduct ? breakRow.deductHours : 0,
-        deductMinutes: breakRow.deduct ? breakRow.deductMinutes : 0,
-        sortOrder: definition.sortOrder,
-      } satisfies typeof shiftTableBreaks.$inferInsert,
-    ];
-  });
-}
-
-async function syncLinkedShiftAssignments(
-  database: DbClient,
-  shiftTableId: number,
-  payload: Pick<
-    InsertShiftTableSchemaType,
-    "code" | "description" | "regularStartTime" | "regularEndTime" | "breaks"
-  >
-) {
-  const snapshot = buildShiftAssignmentSnapshotFromTable(payload);
-
-  await database
-    .update(employeeShiftAssignments)
-    .set({
-      shiftName: snapshot.shiftName,
-      shiftCode: snapshot.shiftCode,
-      checkInTime: snapshot.checkInTime ?? payload.regularStartTime,
-      checkOutTime: snapshot.checkOutTime ?? payload.regularEndTime,
-      breakMinutes: snapshot.breakMinutes,
-      paidBreakMinutes: snapshot.paidBreakMinutes,
-      hoursPerDay: snapshot.hoursPerDay.toFixed(2),
-      updatedAt: new Date(),
-    })
-    .where(and(eq(employeeShiftAssignments.shiftTableId, shiftTableId), isNull(employeeShiftAssignments.scheduleDecisionId)));
-}
-
-async function syncLinkedWeeklyPatternDays(
-  database: DbClient,
-  shiftTableId: number,
-  payload: Pick<
-    InsertShiftTableSchemaType,
-    "code" | "description" | "regularStartTime" | "regularEndTime" | "breaks"
-  >
-) {
-  const snapshot = buildShiftAssignmentSnapshotFromTable(payload);
-
-  await database
-    .update(employeeWeeklyShiftPatternDays)
-    .set({
-      shiftName: snapshot.shiftName,
-      shiftCode: snapshot.shiftCode,
-      checkInTime: snapshot.checkInTime ?? payload.regularStartTime,
-      checkOutTime: snapshot.checkOutTime ?? payload.regularEndTime,
-      breakMinutes: snapshot.breakMinutes,
-      paidBreakMinutes: snapshot.paidBreakMinutes,
-      hoursPerDay: snapshot.hoursPerDay.toFixed(2),
-      updatedAt: new Date(),
-    })
-    .where(eq(employeeWeeklyShiftPatternDays.shiftTableId, shiftTableId));
 }
 
 export const saveLeaveTypeAction = actionClient
@@ -935,105 +841,21 @@ export const saveShiftTableAction = actionClient
   })
   .action(async ({ parsedInput }: { parsedInput: InsertShiftTableSchemaType }) => {
     const actor = await requireAdminActor();
-    await ensureUniqueShiftTableCode(parsedInput.id, parsedInput.code);
-
-    const basePayload: typeof shiftTables.$inferInsert = {
-      code: parsedInput.code,
-      description: parsedInput.description,
-      regularStartTime: parsedInput.regularStartTime,
-      regularEndTime: parsedInput.regularEndTime,
-    };
-
-    if (parsedInput.id) {
-      await db.transaction(async (tx) => {
-        await lockAttendancePayrollInput(tx);
-        await tx
-          .update(shiftTables)
-          .set({
-            ...basePayload,
-            updatedAt: new Date(),
-          })
-          .where(eq(shiftTables.id, parsedInput.id!));
-
-        await tx
-          .delete(shiftTableBreaks)
-          .where(eq(shiftTableBreaks.shiftTableId, parsedInput.id!));
-
-        const breakRows = buildPersistedShiftBreakRows(parsedInput.id!, parsedInput.breaks);
-        if (breakRows.length > 0) {
-          await tx.insert(shiftTableBreaks).values(breakRows);
-        }
-        await syncLinkedShiftAssignments(tx, parsedInput.id!, parsedInput);
-        await syncLinkedWeeklyPatternDays(tx, parsedInput.id!, parsedInput);
-      });
-
-      await recordAdminAuditEvent({
-        actorUserId: actor.userId,
-        entityType: "shift_table",
-        entityId: parsedInput.id,
-        action: "shift_table.updated",
-        details: {
-          code: parsedInput.code,
-          description: parsedInput.description,
-        },
-      });
-
-      revalidateTag("shift-tables");
-      return { message: `Shift table ${parsedInput.code} updated.` };
-    }
-
-    const created = await db.transaction(async (tx) => {
-      await lockAttendancePayrollInput(tx);
-      const [createdShiftTable] = await tx
-        .insert(shiftTables)
-        .values(basePayload)
-        .returning({ id: shiftTables.id });
-
-      const breakRows = buildPersistedShiftBreakRows(createdShiftTable.id, parsedInput.breaks);
-      if (breakRows.length > 0) {
-        await tx.insert(shiftTableBreaks).values(breakRows);
-      }
-
-      return createdShiftTable;
-    });
-
-    await recordAdminAuditEvent({
-      actorUserId: actor.userId,
-      entityType: "shift_table",
-      entityId: created.id,
-      action: "shift_table.created",
-      details: {
-        code: parsedInput.code,
-        description: parsedInput.description,
-      },
-    });
-
-    revalidateTag("shift-tables");
-    return { message: `Shift table ${parsedInput.code} created.` };
+    const receipt = await saveShiftCatalog(db, { ...actor, role: "ADMIN" }, parsedInput);
+    try { revalidateTag("shift-tables"); } catch (error) { console.error("Schedule saved; catalog cache refresh failed.", error); }
+    return receipt;
   });
 
+// Keep the existing action name for callers; catalog removal now archives a version.
 export const deleteShiftTableAction = actionClient
   .metadata({ actionName: "deleteShiftTableAction" })
   .schema(deleteShiftTableSchema)
   .action(async ({ parsedInput }) => {
     const actor = await requireAdminActor();
-
-    await db.transaction(async tx => {
-      await lockAttendancePayrollInput(tx);
-      await tx.delete(shiftTables).where(eq(shiftTables.id, parsedInput.id));
-    });
-
-    await recordAdminAuditEvent({
-      actorUserId: actor.userId,
-      entityType: "shift_table",
-      entityId: parsedInput.id,
-      action: "shift_table.deleted",
-    });
-
-    revalidateTag("shift-tables");
-    return { message: "Shift table deleted." };
+    const receipt = await archiveShiftCatalog(db, { ...actor, role: "ADMIN" }, parsedInput);
+    try { revalidateTag("shift-tables"); } catch (error) { console.error("Schedule archived; catalog cache refresh failed.", error); }
+    return receipt;
   });
-
 export const saveUndertimeRuleAction = actionClient
   .metadata({ actionName: "saveUndertimeRuleAction" })
   .schema(insertUndertimeRuleSchema, {

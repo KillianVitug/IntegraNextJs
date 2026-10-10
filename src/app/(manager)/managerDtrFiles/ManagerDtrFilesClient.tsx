@@ -241,6 +241,7 @@ function getDisplayedDtrWorkedMinutes(
   row: AttendanceDtrView["employees"][number]["rows"][number]
 ) {
   return computeDisplayedDtrWorkedMinutes({
+    calculationPolicy: row.calculationPolicy,
     workedMinutes: row.workedMinutes,
     scheduledMinutes: row.scheduledMinutes,
     lateMinutes: row.lateMinutes,

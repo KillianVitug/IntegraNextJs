@@ -146,6 +146,7 @@ export function resolveApprovedOvertimeMinutes(args: {
 export function resolveDetectedOvertimeMinutes(args: {
   scheduleOvertimeMinutes: number;
   effectiveWorkedMinutes: number;
+  calculationPolicy?: string | null;
 }) {
   const detectedMinutes = Math.max(
     0,
@@ -153,7 +154,7 @@ export function resolveDetectedOvertimeMinutes(args: {
     args.effectiveWorkedMinutes - WORKED_HOURS_OT_THRESHOLD_MINUTES
   );
 
-  return roundDtrOvertimeMinutes(detectedMinutes);
+  return args.calculationPolicy === "eight_hour_day" ? Math.round(detectedMinutes) : roundDtrOvertimeMinutes(detectedMinutes);
 }
 
 export function computeOvertimeCompensation(args: {
@@ -162,9 +163,10 @@ export function computeOvertimeCompensation(args: {
   scheduledMinutes: number;
   fallbackHoursPerDay: number;
   rateMultiplier: number | string;
+  calculationPolicy?: string | null;
 }) {
   const hoursPerDay =
-    args.scheduledMinutes > 0
+    args.calculationPolicy === "eight_hour_day" ? 8 : args.scheduledMinutes > 0
       ? args.scheduledMinutes / 60
       : args.fallbackHoursPerDay > 0
         ? args.fallbackHoursPerDay
@@ -172,7 +174,7 @@ export function computeOvertimeCompensation(args: {
   const baseHourlyRate =
     hoursPerDay > 0 ? roundMoney(args.dailyRate / hoursPerDay) : 0;
   const overtimeRate = roundMoney(baseHourlyRate * toAmount(args.rateMultiplier));
-  const amount = roundMoney((Math.max(0, args.approvedMinutes) / 60) * overtimeRate);
+  const amount = roundMoney((Math.max(0, args.approvedMinutes) / 60) * (args.calculationPolicy==="eight_hour_day" ? args.dailyRate/8*toAmount(args.rateMultiplier) : overtimeRate));
 
   return {
     hoursPerDay,

@@ -52,6 +52,7 @@ export type AttendanceSummaryComputation = Pick<
   | "scheduledInTime"
   | "scheduledOutTime"
   | "scheduledMinutes"
+  | "calculationPolicy"
   | "workedMinutes"
   | "regularMinutes"
   | "lateMinutes"
@@ -66,6 +67,7 @@ export type AttendanceSummaryComputation = Pick<
 >;
 
 export type AttendancePeriodDetailRow = {
+  calculationPolicy?: "legacy" | "eight_hour_day";
   employeeId: string;
   attendanceDate: string;
   dayName: string;
@@ -173,22 +175,26 @@ function resolveShiftWindow(args: {
     legacyTimekeeping,
   });
   const hoursPerDay =
-    resolvedSchedule.source === "LEGACY"
+    resolvedSchedule.shiftWindow.calculationPolicy === "eight_hour_day" ? 8 : resolvedSchedule.source === "LEGACY"
       ? getHoursPerDay(legacyTimekeeping)
       : Math.max(0, resolvedSchedule.hoursPerDay);
   const resolvedShiftTableId =
     resolvedSchedule.source === "OVERRIDE"
       ? resolvedSchedule.overrideAssignment?.shiftTableId ?? null
       : resolvedSchedule.weeklyPatternDay?.shiftTableId ?? null;
-  const confirmedBreaks = resolvedSchedule.overrideAssignment?.confirmedSchedule?.breaks;
-  const regularBreakWindows = confirmedBreaks
+  const confirmedBreaks = resolvedSchedule.overrideAssignment?.confirmedSchedule?.breaks ?? resolvedSchedule.weeklyPatternDay?.definitionSnapshot?.breaks;
+  const definitionBreaks=confirmedBreaks ?? (resolvedShiftTableId!=null?args.shiftTableBreaksByShiftTableId.get(resolvedShiftTableId)??[]:[]);
+  const explicitBreakWindows=(overtime:boolean)=>definitionBreaks.filter(row=>row.slotKey.startsWith("ot_")===overtime && row.fromTime && row.toTime).map(row=>({fromTime:row.fromTime!,toTime:row.toTime!,deductMinutes:row.deduct?row.deductHours*60+row.deductMinutes:0,requiresPunches:row.requiresPunches===true}));
+  const regularBreakWindows = resolvedSchedule.shiftWindow.calculationPolicy === "eight_hour_day"
+    ? resolvedSchedule.shiftWindow.regularBreakWindows ?? explicitBreakWindows(false)
+    : confirmedBreaks
     ? buildDeductibleRegularBreakWindows(confirmedBreaks)
     : resolvedShiftTableId != null
       ? buildDeductibleRegularBreakWindows(
           args.shiftTableBreaksByShiftTableId.get(resolvedShiftTableId) ?? []
         )
       : [];
-  const requiresSplitPunches =
+  const requiresSplitPunches = resolvedSchedule.shiftWindow.punchPolicy && resolvedSchedule.shiftWindow.punchPolicy !== "legacy" ? resolvedSchedule.shiftWindow.punchPolicy === "split_gaps" :
     resolvedSchedule.source === "OVERRIDE"
       ? isSplitShiftSchedule(
           resolvedSchedule.overrideAssignment?.shiftCode,
@@ -209,6 +215,7 @@ function resolveShiftWindow(args: {
       resolvedSchedule.overrideAssignment?.isFlexible !== true,
     hoursPerDay,
     shiftWindow: {
+      ...resolvedSchedule.shiftWindow,
       checkInTime: resolvedSchedule.shiftWindow.checkInTime,
       checkOutTime: resolvedSchedule.shiftWindow.checkOutTime,
       breakMinutes: resolvedSchedule.shiftWindow.breakMinutes ?? 60,
@@ -216,6 +223,7 @@ function resolveShiftWindow(args: {
       hoursPerDay,
       restDay: resolvedSchedule.shiftWindow.restDay,
       regularBreakWindows,
+      overtimeBreakWindows: resolvedSchedule.shiftWindow.calculationPolicy === "eight_hour_day" ? resolvedSchedule.shiftWindow.overtimeBreakWindows ?? explicitBreakWindows(true) : undefined,
       requiresSplitPunches,
     },
   };
@@ -496,6 +504,7 @@ export function buildAttendancePeriodDetailRows(args: {
         scheduledInTime: summary.scheduledInTime,
         scheduledOutTime: summary.scheduledOutTime,
         scheduledMinutes: summary.scheduledMinutes,
+        calculationPolicy: summary.calculationPolicy ?? "legacy",
         workedMinutes: summary.workedMinutes,
         regularMinutes: summary.regularMinutes,
         lateMinutes: summary.lateMinutes,
@@ -594,6 +603,7 @@ export function buildAttendanceSummaryComputations(args: {
         scheduledInTime: summary.scheduledInTime,
         scheduledOutTime: summary.scheduledOutTime,
         scheduledMinutes: summary.scheduledMinutes,
+        calculationPolicy: summary.calculationPolicy ?? "legacy",
         workedMinutes: summary.workedMinutes,
         regularMinutes: summary.regularMinutes,
         lateMinutes: summary.lateMinutes,

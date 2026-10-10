@@ -18,6 +18,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
 import type { ScheduleCell, ScheduleSnapshot, ScheduleReceipt } from "@/lib/scheduling/workspace-types";
+import type { ShiftCatalogReceipt } from "@/lib/scheduling/shift-catalog-types";
 import {
   attendanceDtrDayTypeValues,
   attendanceDtrManualStatusValues,
@@ -1705,17 +1706,29 @@ export const shiftTables = pgTable(
   "shift_tables",
   {
     id: serial("id").primaryKey(),
-    code: varchar("code", { length: 40 }).notNull().unique(),
+    code: varchar("code", { length: 40 }).notNull(),
     description: varchar("description", { length: 120 }).notNull(),
     regularStartTime: time("regular_start_time").notNull(),
     regularEndTime: time("regular_end_time").notNull(),
+    familyId: uuid("family_id").notNull().defaultRandom(),
+    version: integer("version").notNull().default(1),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    calculationPolicy: text("calculation_policy").notNull().default("legacy"),
+    punchPolicy: text("punch_policy").notNull().default("legacy"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()
       .defaultNow()
       .$onUpdate(() => new Date()),
   },
-  (table) => [uniqueIndex("uq_shift_table_code").on(table.code)]
+  (table) => [
+    uniqueIndex("uq_shift_table_active_code").on(table.code).where(sql`${table.archivedAt} is null`),
+    uniqueIndex("uq_shift_table_family_version").on(table.familyId, table.version),
+    uniqueIndex("uq_shift_table_active_family").on(table.familyId).where(sql`${table.archivedAt} is null`),
+    check("shift_table_positive_version", sql`${table.version} > 0`),
+    check("shift_table_calculation_policy", sql`${table.calculationPolicy} in ('legacy', 'eight_hour_day')`),
+    check("shift_table_punch_policy", sql`${table.punchPolicy} in ('legacy', 'outer', 'split_gaps')`),
+  ]
 );
 
 export const shiftTableBreaks = pgTable(
@@ -1730,6 +1743,7 @@ export const shiftTableBreaks = pgTable(
     fromTime: time("from_time").notNull(),
     toTime: time("to_time").notNull(),
     deduct: boolean("deduct").notNull().default(false),
+    requiresPunches: boolean("requires_punches").notNull().default(false),
     deductHours: integer("deduct_hours").notNull().default(0),
     deductMinutes: integer("deduct_minutes").notNull().default(0),
     sortOrder: integer("sort_order").notNull(),
@@ -1780,6 +1794,9 @@ export const employeeWeeklyShiftPatternDays = pgTable(
       .references(() => employeeWeeklyShiftPatterns.id, { onDelete: "cascade" }),
     weekday: restDayEnum("weekday").notNull(),
     scheduleState: varchar("schedule_state", { length: 20 }),
+    calculationPolicy: text("calculation_policy").notNull().default("legacy"),
+    punchPolicy: text("punch_policy").notNull().default("legacy"),
+    definitionSnapshot: jsonb("definition_snapshot").$type<ScheduleSnapshot>(),
     shiftTableId: integer("shift_table_id").references(() => shiftTables.id, {
       onDelete: "set null",
     }),
@@ -1833,6 +1850,8 @@ export const employeeShiftAssignments = pgTable(
     isFlexible: boolean("is_flexible").notNull().default(false),
     scheduleDecisionId: uuid("schedule_decision_id"),
     confirmedSchedule: jsonb("confirmed_schedule").$type<ScheduleSnapshot>(),
+    calculationPolicy: text("calculation_policy").notNull().default("legacy"),
+    punchPolicy: text("punch_policy").notNull().default("legacy"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()
@@ -1854,6 +1873,8 @@ export const employeeShiftAssignments = pgTable(
 );
 
 export type BranchCalendarScheduleOverrideAssignmentSnapshot = {
+  calculationPolicy?: string;
+  punchPolicy?: string;
   id: number;
   employeeId: string;
   shiftTableId: number | null;
@@ -2116,6 +2137,7 @@ export const attendanceRawLogs = pgTable(
 export const attendanceDailySummaries = pgTable(
   "attendance_daily_summaries",
   {
+    calculationPolicy: text("calculation_policy").notNull().default("legacy"),
     id: uuid("id").defaultRandom().primaryKey(),
     employeeId: uuid("employee_id")
       .notNull()
@@ -4598,5 +4620,13 @@ export const scheduleRequestReceipts = pgTable("schedule_request_receipts", {
   actorUserId: varchar("actor_user_id", { length: 255 }).notNull(),
   requestDigest: varchar("request_digest", { length: 64 }).notNull(),
   receipt: jsonb("receipt").$type<ScheduleReceipt>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const shiftCatalogReceipts = pgTable("shift_catalog_receipts", {
+  requestId: uuid("request_id").primaryKey(),
+  actorUserId: varchar("actor_user_id", { length: 255 }).notNull(),
+  requestDigest: varchar("request_digest", { length: 64 }).notNull(),
+  receipt: jsonb("receipt").$type<ShiftCatalogReceipt>().notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

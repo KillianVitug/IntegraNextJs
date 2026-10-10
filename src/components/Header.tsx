@@ -146,7 +146,7 @@ export async function Header() {
                     href: "/constants/holidayCode/form",
                   },
                   {
-                    title: "Shift Table",
+                    title: "Shift definitions",
                     href: "/constants/shiftTable/form",
                   },
                   {

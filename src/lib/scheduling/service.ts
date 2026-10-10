@@ -7,9 +7,11 @@ import { department, employees, employeesGeneralInfo, employeesTimekeeping, empl
 import { getManagerDepartmentIds, requireAuthenticatedUser } from "@/lib/auth/server";
 import { currentDepartmentMemberStatusCondition } from "@/lib/employmentStatus";
 import { recordAdminAuditEvent } from "@/lib/admin";
-import { buildShiftAssignmentSnapshotFromTable } from "@/lib/shifts";
+import { buildShiftAssignmentSnapshotFromTable, calculationPolicyFor, punchPolicyFor } from "@/lib/shifts";
+import { compareScheduleSnapshots } from "./presentation";
 import { getActiveShiftAssignmentForDate, getActiveWeeklyShiftPatternForDate, hasLegacyPaySchedule, type WeeklyShiftPatternRecord } from "@/lib/payroll/scheduleResolver";
 import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard";
+import { loadEffectiveAttendanceRawLogs } from "@/lib/payroll/effectiveAttendanceInputs";
 import { lockShiftAssignmentContext, markAffectedShiftRunsStale, rebuildEmployeeAttendanceSummaries, getLatestImportedAttendanceDate, getRebuildRange } from "@/app/actions/shiftAssignmentHelpers";
 import { applyScheduleChanges, emptySchedule, sameSchedule, scheduleDateRange, scheduleLabel, scheduleValue, shiftDate } from "./model";
 import { scheduleWeekdays, type ScheduleCell, type ScheduleSnapshot, type ScheduleWorkspace, type ScheduleWorkspaceQuery, type ScheduleReceipt, type SchedulePeriodCommand, type ScheduleWeeklyCommand, type ScheduleArchiveCommand, type ScheduleWeekday, type ScheduleDayRepair } from "./workspace-types";
@@ -21,7 +23,7 @@ export async function requireScheduleActor(): Promise<ScheduleActor> {
   return { userId: auth.accountId, role: auth.role };
 }
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => { const parsed = new Date(`${value}T00:00:00Z`); return Number.isFinite(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value; }, "Enter a valid date.");
-const value = z.string().regex(/^(rest|unconfigured|captured|default|latest-default|[1-9]\d*)$/);
+const value = z.string().regex(/^(rest|unconfigured|saved|captured|default|latest-default|[1-9]\d*)$/);
 const clockTime=z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 const periodCommand = z.object({ requestId: z.string().uuid(), departmentId: z.number().int().positive(), periodId: z.string().uuid(), sourceDigest: z.string().length(64), expectedDraftRevision: z.number().int().positive().nullable(), expectedDraftId: z.string().uuid().nullable(), changes: z.array(z.object({ employeeId: z.string().uuid(), day: date, value, customTimes:z.object({start:clockTime,end:clockTime}).optional() })).max(10000) });
 const weeklyCommand = z.object({ requestId: z.string().uuid(), departmentId: z.number().int().positive(), sourceDigest: z.string().length(64), effectiveFrom: date, effectiveTo: date.nullable(), employeeIds: z.array(z.string().uuid()).min(1).max(100), days: z.array(z.object({ weekday: z.enum(scheduleWeekdays), value })).min(1).max(7) }).refine(input => !input.effectiveTo || input.effectiveTo >= input.effectiveFrom, "The end date must be on or after the start date.");
@@ -64,13 +66,14 @@ async function loadSources(actor: ScheduleActor, query: ScheduleWorkspaceQuery, 
   const decisionIds = assignments.flatMap(row => row.scheduleDecisionId ? [row.scheduleDecisionId] : []);
   const confirmedRevisions = decisionIds.length ? await database.select().from(scheduleDecisionRevisions).where(inArray(scheduleDecisionRevisions.id, [...new Set(decisionIds)])) : [];
   const templates = new Map(shifts.map(shift => {
-    const shiftBreaks = breaks.filter(row => row.shiftTableId === shift.id).map(({ slotKey, label, fromTime, toTime, deduct, deductHours, deductMinutes, sortOrder }) => ({ slotKey, label, fromTime, toTime, deduct, deductHours, deductMinutes, sortOrder }));
+    const shiftBreaks = breaks.filter(row => row.shiftTableId === shift.id).map(({ slotKey, label, fromTime, toTime, deduct, deductHours, deductMinutes, sortOrder, requiresPunches }) => ({ slotKey, label, fromTime, toTime, deduct, deductHours, deductMinutes, sortOrder, requiresPunches }));
     const snap = buildShiftAssignmentSnapshotFromTable({ ...shift, breaks: shiftBreaks });
     return [String(shift.id), { ...snap, kind: "shift" as const, shiftTableId: shift.id, graceMinutes: 0, isFlexible: false, breaks: shiftBreaks }];
   }));
+  const activeTemplates = new Map([...templates].filter(([id]) => !shifts.find(shift => String(shift.id) === id)?.archivedAt));
   const weeklyDigest = digest({ roster, patterns, patternDays, timekeeping, shifts, breaks });
   const sourceDigest = digest({ weeklyDigest, selected, assignments });
-  return { departments, departmentId, periods, selected, effectiveDate, roster, assignments, fullPatterns, timekeeping, draft: draftRows[0] ?? null, history, confirmedRevisions, templates, weeklyDigest, sourceDigest };
+  return { departments, departmentId, periods, selected, effectiveDate, roster, assignments, fullPatterns, timekeeping, draft: draftRows[0] ?? null, history, confirmedRevisions, templates, activeTemplates, weeklyDigest, sourceDigest };
 }
 type Sources = Awaited<ReturnType<typeof loadSources>>;
 
@@ -84,9 +87,10 @@ function defaultFor(source: Sources, employeeId: string, day: string, dayName = 
 }
 function patternDaySnapshot(source: Sources, pattern: WeeklyShiftPatternRecord, dayName: ScheduleWeekday): ScheduleSnapshot {
   const day = pattern.days.find(row => row.weekday === dayName);
+  if (day?.definitionSnapshot) return structuredClone(day.definitionSnapshot);
   if (day?.scheduleState === "unconfigured") return emptySchedule("unconfigured");
   if (!day || (!day.checkInTime && !day.checkOutTime && !Number(day.hoursPerDay))) return emptySchedule("rest");
-  return { kind: "shift", shiftTableId: day.shiftTableId, shiftName: day.shiftName ?? "Weekly default", shiftCode: day.shiftCode, checkInTime: day.checkInTime, checkOutTime: day.checkOutTime, breakMinutes: day.breakMinutes, paidBreakMinutes: day.paidBreakMinutes, graceMinutes: 0, hoursPerDay: Number(day.hoursPerDay), isFlexible: !day.checkInTime || !day.checkOutTime, breaks: structuredClone(source.templates.get(String(day.shiftTableId))?.breaks ?? []) };
+  return { kind: "shift", shiftTableId: day.shiftTableId, shiftName: day.shiftName ?? "Weekly default", shiftCode: day.shiftCode, checkInTime: day.checkInTime, checkOutTime: day.checkOutTime, breakMinutes: day.breakMinutes, paidBreakMinutes: day.paidBreakMinutes, graceMinutes: 0, hoursPerDay: Number(day.hoursPerDay), isFlexible: !day.checkInTime || !day.checkOutTime, calculationPolicy: calculationPolicyFor(day.calculationPolicy), punchPolicy: punchPolicyFor(day.punchPolicy), breaks: structuredClone(source.templates.get(String(day.shiftTableId))?.breaks ?? []) };
 }
 function cellsFor(source: Sources): ScheduleCell[] {
   if (!source.selected) return [];
@@ -94,7 +98,7 @@ function cellsFor(source: Sources): ScheduleCell[] {
   return source.roster.flatMap(({ employee, info }) => days.filter(day => (!info.dateHired || day >= info.dateHired) && (!info.separationDate || day <= info.separationDate)).map(day => {
     const base = defaultFor(source, employee.id, day);
     const assignment = getActiveShiftAssignmentForDate(source.assignments.filter(row => row.employeeId === employee.id), day);
-    const snapshot: ScheduleSnapshot = assignment?.confirmedSchedule ?? (assignment ? assignment.restDay === weekday(day) ? emptySchedule("rest") : { kind: "shift", shiftTableId: assignment.shiftTableId, shiftName: assignment.shiftName, shiftCode: assignment.shiftCode, checkInTime: assignment.checkInTime, checkOutTime: assignment.checkOutTime, breakMinutes: assignment.breakMinutes, paidBreakMinutes: assignment.paidBreakMinutes, graceMinutes: assignment.graceMinutes, hoursPerDay: Number(assignment.hoursPerDay), isFlexible: assignment.isFlexible, breaks: structuredClone(source.templates.get(String(assignment.shiftTableId))?.breaks ?? []) } : base);
+    const snapshot: ScheduleSnapshot = assignment?.confirmedSchedule ?? (assignment ? assignment.restDay === weekday(day) ? emptySchedule("rest") : { kind: "shift", shiftTableId: assignment.shiftTableId, shiftName: assignment.shiftName, shiftCode: assignment.shiftCode, checkInTime: assignment.checkInTime, checkOutTime: assignment.checkOutTime, breakMinutes: assignment.breakMinutes, paidBreakMinutes: assignment.paidBreakMinutes, graceMinutes: assignment.graceMinutes, hoursPerDay: Number(assignment.hoursPerDay), isFlexible: assignment.isFlexible, calculationPolicy: calculationPolicyFor(assignment.calculationPolicy), punchPolicy: punchPolicyFor(assignment.punchPolicy), breaks: structuredClone(source.templates.get(String(assignment.shiftTableId))?.breaks ?? []) } : base);
     const revision = assignment?.scheduleDecisionId ? source.confirmedRevisions.find(row => row.id === assignment.scheduleDecisionId) : null;
     const defaultSnapshot = revision?.defaultSnapshot ?? base;
     return { employeeId: employee.id, day, value: scheduleValue(snapshot), label: scheduleLabel(snapshot), source: assignment?.scheduleDecisionId ? "Confirmed period schedule" : assignment ? "Date exception" : snapshot.kind === "unconfigured" ? "Unconfigured" : source.fullPatterns.some(pattern => pattern.employeeId === employee.id && pattern.effectiveFrom <= day && (!pattern.effectiveTo || pattern.effectiveTo >= day)) ? "Weekly default" : "Employee default schedule", defaultValue: scheduleValue(defaultSnapshot), defaultLabel: scheduleLabel(defaultSnapshot), baselineValue: scheduleValue(snapshot), baselineLabel: scheduleLabel(snapshot), snapshot, defaultSnapshot, baselineSnapshot: snapshot, latestDefaultSnapshot: base };
@@ -113,7 +117,7 @@ export async function readScheduleWorkspace(actor: ScheduleActor, query: Schedul
   }
   return {
     departments: source.departments, departmentId: source.departmentId, periods: source.periods.map(({ id, code, startDate, endDate, status }) => ({ id, code, startDate, endDate, status })), periodId: source.selected?.id ?? null,
-    shifts: [...source.templates].map(([id, snapshot]) => ({ id: Number(id), label: scheduleLabel(snapshot), checkInTime: snapshot.checkInTime ?? "", checkOutTime: snapshot.checkOutTime ?? "", snapshot })), effectiveDate: source.effectiveDate,
+    shifts: [...source.activeTemplates].map(([id, snapshot]) => ({ id: Number(id), label: scheduleLabel(snapshot), checkInTime: snapshot.checkInTime ?? "", checkOutTime: snapshot.checkOutTime ?? "", snapshot })).sort((a, b) => compareScheduleSnapshots(a.snapshot, b.snapshot) || a.id - b.id), effectiveDate: source.effectiveDate,
     employees: source.roster.map(({ employee }) => ({ id: employee.id, employeeNo: employee.employeeNo, name: `${employee.lastName}, ${employee.firstName}`, weeklyDays: scheduleWeekdays.map(day => { const snapshot = defaultFor(source, employee.id, source.effectiveDate, day); return { weekday: day, value: scheduleValue(snapshot), label: scheduleLabel(snapshot) }; }), weeklyHistory: source.fullPatterns.filter(row => row.employeeId === employee.id).reverse().map(({ id, effectiveFrom, effectiveTo }) => ({ id, effectiveFrom, effectiveTo })) })),
     dates: source.selected ? scheduleDateRange(source.selected.startDate, source.selected.endDate) : [], cells,
     draft: source.draft ? { id: source.draft.id, revision: source.draft.revision, cells: source.draft.cells, sourceDigest: source.draft.sourceDigest, updatedAt: source.draft.updatedAt.toISOString() } : null,
@@ -140,12 +144,86 @@ async function receiptFor(tx: DbClient, actor: ScheduleActor, requestId: string,
 }
 export async function readScheduleReceipt(actor: ScheduleActor, requestId: string, database: DbClient = db) { return receiptFor(database, actor, z.string().uuid().parse(requestId)); }
 async function recordReceipt(tx: DbClient, actor: ScheduleActor, input: unknown, receipt: ScheduleReceipt) {
-  await tx.insert(scheduleRequestReceipts).values({ requestId: receipt.requestId, actorUserId: actor.userId, requestDigest: digest(input), receipt });
-  await recordAdminAuditEvent({ actorUserId: actor.userId, entityType: "schedule_workspace", entityId: receipt.requestId, action: `schedule_workspace.${receipt.action}`, details: receipt, database: tx });
-  return receipt;
+  // Match JSONB's absent optional fields on both first response and replay.
+  const storedReceipt = JSON.parse(JSON.stringify(receipt)) as ScheduleReceipt;
+  await tx.insert(scheduleRequestReceipts).values({ requestId: receipt.requestId, actorUserId: actor.userId, requestDigest: digest(input), receipt: storedReceipt });
+  await recordAdminAuditEvent({ actorUserId: actor.userId, entityType: "schedule_workspace", entityId: receipt.requestId, action: `schedule_workspace.${receipt.action}`, details: storedReceipt, database: tx });
+  return storedReceipt;
 }
 async function lockRequest(tx: DbClient, requestId: string) { await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`schedule-request:${requestId}`}))`); }
 async function lockScope(tx: DbClient, departmentId: number, periodId: string) { await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`schedule-scope:${departmentId}:${periodId}`}))`); }
+
+type ScheduleTarget = { employeeId: string; day: string };
+const overnight = (snapshot: ScheduleSnapshot) => snapshot.kind === "shift" && snapshot.checkInTime && snapshot.checkOutTime && snapshot.checkOutTime.slice(0, 5) <= snapshot.checkInTime.slice(0, 5);
+async function scheduleTargets(tx: DbClient, source: Sources, cells: Array<Pick<ScheduleCell, "employeeId" | "day" | "snapshot" | "baselineSnapshot">>): Promise<ScheduleTarget[]> {
+  if (!cells.length) return [];
+  const days = cells.map(cell => cell.day).sort();
+  const logs = await loadEffectiveAttendanceRawLogs(tx, { employeeIds: [...new Set(cells.map(cell => cell.employeeId))], startDate: shiftDate(days[0], -1), endDate: shiftDate(days.at(-1)!, 1), neighborDays: "none" });
+  const byDay = new Map<string, typeof logs>();
+  for (const log of logs) {
+    const key = `${log.employeeId}|${log.logDate}`;
+    byDay.set(key, [...(byDay.get(key) ?? []), log]);
+  }
+  for (const rows of byDay.values()) rows.sort((a, b) => a.logTime.localeCompare(b.logTime));
+  // Align with attendance grouping: only an unambiguous first OUT may close a
+  // preceding open IN. Inspect both saved and proposed policies before mutation.
+  const crosses = (employeeId: string, day: string, snapshot: ScheduleSnapshot) => overnight(snapshot) || snapshot.kind === "shift" && snapshot.calculationPolicy === "eight_hour_day" && snapshot.checkInTime
+    && byDay.get(`${employeeId}|${day}`)?.at(-1)?.direction === "IN"
+    && byDay.get(`${employeeId}|${shiftDate(day, 1)}`)?.[0]?.direction === "OUT"
+    && byDay.get(`${employeeId}|${shiftDate(day, 1)}`)![0].logTime.slice(0, 5) < snapshot.checkInTime.slice(0, 5);
+  const existingSnapshot = (employeeId: string, day: string): ScheduleSnapshot => {
+    const assignment = getActiveShiftAssignmentForDate(source.assignments.filter(row => row.employeeId === employeeId), day);
+    if (!assignment) return defaultFor(source, employeeId, day);
+    if (assignment.confirmedSchedule) return assignment.confirmedSchedule;
+    if (assignment.restDay === weekday(day)) return emptySchedule("rest");
+    return { ...defaultFor(source, employeeId, day), kind: "shift", checkInTime: assignment.checkInTime, checkOutTime: assignment.checkOutTime, calculationPolicy: calculationPolicyFor(assignment.calculationPolicy) };
+  };
+  const targets = new Map<string, ScheduleTarget>();
+  const proposed = new Map(cells.map(cell => [`${cell.employeeId}|${cell.day}`, cell.snapshot]));
+  for (const cell of cells) {
+    targets.set(`${cell.employeeId}|${cell.day}`, { employeeId: cell.employeeId, day: cell.day });
+    if (crosses(cell.employeeId, cell.day, cell.snapshot) || crosses(cell.employeeId, cell.day, cell.baselineSnapshot)) {
+      const day = shiftDate(cell.day, 1);
+      targets.set(`${cell.employeeId}|${day}`, { employeeId: cell.employeeId, day });
+    }
+    const previousDay = shiftDate(cell.day, -1);
+    const previousProposed = proposed.get(`${cell.employeeId}|${previousDay}`);
+    if (crosses(cell.employeeId, previousDay, existingSnapshot(cell.employeeId, previousDay)) || previousProposed && crosses(cell.employeeId, previousDay, previousProposed)) {
+      targets.set(`${cell.employeeId}|${previousDay}`, { employeeId: cell.employeeId, day: previousDay });
+    }
+  }
+  return [...targets.values()];
+}
+async function assertWritableTargets(tx: DbClient, source: Sources, targets: ScheduleTarget[]) {
+  if (!targets.length) return;
+  if (targets.some(target => source.periods.some(period => period.status !== "Open" && period.startDate <= target.day && period.endDate >= target.day))) {
+    throw new Error("A closed payroll period includes this employee-day or its overnight neighbor. Use the adjustment workflow; no schedule was changed.");
+  }
+  const protectedRuns = await tx.select({ employeeId: payrollRunEmployees.employeeId, startDate: payrollPeriods.startDate, endDate: payrollPeriods.endDate }).from(payrollRuns)
+    .innerJoin(payrollPeriods, eq(payrollRuns.payrollPeriodId, payrollPeriods.id)).innerJoin(payrollRunEmployees, eq(payrollRunEmployees.payrollRunId, payrollRuns.id))
+    .where(and(inArray(payrollRuns.status, ["Approved", "Posted"]), inArray(payrollRunEmployees.employeeId, [...new Set(targets.map(row => row.employeeId))])));
+  if (targets.some(target => protectedRuns.some(run => run.employeeId === target.employeeId && run.startDate <= target.day && run.endDate >= target.day))) {
+    throw new Error("An Approved or Posted payroll includes this employee-day or its overnight neighbor. Use the adjustment workflow; no schedule was changed.");
+  }
+}
+async function invalidateTargets(tx: DbClient, actor: ScheduleActor, targets: ScheduleTarget[]) {
+  for (const range of targetRanges(targets)) await markAffectedShiftRunsStale({ tx, ...range, actorUserId: actor.userId });
+}
+function targetRanges(targets: ScheduleTarget[]) {
+  const ranges: Array<{ employeeId: string; startDate: string; endDate: string }> = [];
+  for (const target of [...targets].sort((a, b) => a.employeeId.localeCompare(b.employeeId) || a.day.localeCompare(b.day))) {
+    const last = ranges.at(-1);
+    if (last?.employeeId === target.employeeId && shiftDate(last.endDate, 1) === target.day) last.endDate = target.day;
+    else ranges.push({ employeeId: target.employeeId, startDate: target.day, endDate: target.day });
+  }
+  return ranges;
+}
+async function rebuildTargets(tx: DbClient, actor: ScheduleActor, targets: ScheduleTarget[]) {
+  let count = 0;
+  const cutoff = today();
+  for (const range of targetRanges(targets.filter(target => target.day <= cutoff))) count += await rebuildEmployeeAttendanceSummaries({ tx, ...range, actorUserId: actor.userId });
+  return count;
+}
 
 export async function mutatePeriodSchedule(actor: ScheduleActor, raw: SchedulePeriodCommand, action: "draft_saved" | "confirmed" | "draft_deleted", database: typeof db = db) {
   const input = periodCommand.parse(raw);
@@ -161,7 +239,7 @@ export async function mutatePeriodSchedule(actor: ScheduleActor, raw: SchedulePe
       return recordReceipt(tx, actor, request, { requestId: input.requestId, action, message: "Unused draft deleted. Confirmed schedules are unchanged.", changedCount: 0 });
     }
     if (source.sourceDigest !== input.sourceDigest || source.draft && source.draft.sourceDigest !== source.sourceDigest) throw new Error("Schedules or employee details changed. Reload and prepare a fresh review; no schedule was changed.");
-    const cells = applyScheduleChanges(source.draft?.cells ?? cellsFor(source), input.changes, source.templates);
+    const cells = applyScheduleChanges(source.draft?.cells ?? cellsFor(source), input.changes, source.activeTemplates);
     if (!cells.length) throw new Error("There are no employed workdays in this branch and period.");
     const changed = cells.filter(cell => !sameSchedule(cell.snapshot, cell.baselineSnapshot));
     if (action === "draft_saved") {
@@ -169,26 +247,21 @@ export async function mutatePeriodSchedule(actor: ScheduleActor, raw: SchedulePe
       await tx.insert(scheduleWorkspaceDrafts).values({ departmentId: input.departmentId, periodId: input.periodId, revision, cells, sourceDigest: source.sourceDigest, updatedByUserId: actor.userId }).onConflictDoUpdate({ target: [scheduleWorkspaceDrafts.departmentId, scheduleWorkspaceDrafts.periodId], set: { revision, cells, sourceDigest: source.sourceDigest, updatedByUserId: actor.userId, updatedAt: new Date() } });
       return recordReceipt(tx, actor, request, { requestId: input.requestId, action, message: "Draft saved. Effective schedules and payroll are unchanged.", changedCount: changed.length, draftRevision: revision });
     }
-    for (const { employee } of source.roster) {
-      const edits = changed.filter(cell => cell.employeeId === employee.id).map(cell => cell.day).sort();
-      if (edits.length) await markAffectedShiftRunsStale({ tx, employeeId: employee.id, startDate: edits[0], endDate: edits.at(-1)!, actorUserId: actor.userId });
-    }
+    if (source.selected?.status !== "Open") throw new Error("This payroll period is closed. Use the adjustment workflow for a posted period.");
     const toConfirm = cells.filter(cell => {
       const current = getActiveShiftAssignmentForDate(source.assignments.filter(row => row.employeeId === cell.employeeId), cell.day);
       return !current?.scheduleDecisionId || !sameSchedule(cell.snapshot, cell.baselineSnapshot);
     });
-    for (const { employee } of source.roster) {
-      const rows = toConfirm.filter(cell => cell.employeeId === employee.id);
-      if (!rows.length) continue;
-      await projectConfirmedDays(tx, actor, input, rows, source);
-      const effectiveEdits = changed.filter(cell => cell.employeeId === employee.id).map(cell => cell.day).sort();
-      if (effectiveEdits.length) {
-        const range = getRebuildRange({ staleRange: { startDate: effectiveEdits[0], endDate: effectiveEdits.at(-1)! }, latestImportedDate: await getLatestImportedAttendanceDate(tx, employee.id) });
-        if (range) await rebuildEmployeeAttendanceSummaries({ tx, employeeId: employee.id, ...range });
-      }
+    // First capture also changes input provenance, even if the clock times are unchanged.
+    const targets = await scheduleTargets(tx, source, toConfirm);
+    await assertWritableTargets(tx, source, targets);
+    await invalidateTargets(tx, actor, targets);
+    for (const employeeId of [...new Set(toConfirm.map(row => row.employeeId))]) {
+      await projectConfirmedDays(tx, actor, input, toConfirm.filter(row => row.employeeId === employeeId), source);
     }
+    const summariesRebuilt = await rebuildTargets(tx, actor, targets);
     if (source.draft) await tx.delete(scheduleWorkspaceDrafts).where(eq(scheduleWorkspaceDrafts.id, source.draft.id));
-    return recordReceipt(tx, actor, request, { requestId: input.requestId, action, message: `${toConfirm.length} employee-days confirmed; ${changed.length} effective changes. Payroll was not posted.`, changedCount: toConfirm.length });
+    return recordReceipt(tx, actor, request, { requestId: input.requestId, action, message: `${toConfirm.length} employee-days confirmed; ${changed.length} effective changes. Payroll was not posted.`, changedCount: toConfirm.length, affectedTargets: targets, affectedPeriodIds: source.periods.filter(period => targets.some(target => period.startDate <= target.day && period.endDate >= target.day)).map(period => period.id), summariesRebuilt });
   });
 }
 
@@ -205,28 +278,13 @@ export async function confirmScopedScheduleDays(actor: ScheduleActor, raw: Sched
     if ((source.draft?.id ?? null) !== input.expectedDraftId || (source.draft?.revision ?? null) !== input.expectedDraftRevision) throw new Error("Another administrator changed the branch draft. Reload this day before confirming; no changes were applied.");
     if (source.selected?.status !== "Open") throw new Error("This payroll period is closed. Use the adjustment workflow for a posted period.");
     const keys = new Set(input.changes.map(row => `${row.employeeId}|${row.day}`));
-    const cells = applyScheduleChanges(cellsFor(source), input.changes, source.templates).filter(row => keys.has(`${row.employeeId}|${row.day}`));
-    const changed = cells.filter(row => !sameSchedule(row.snapshot, row.baselineSnapshot));
+    const cells = applyScheduleChanges(cellsFor(source), input.changes, source.activeTemplates).filter(row => keys.has(`${row.employeeId}|${row.day}`));
     const toConfirm = cells.filter(cell => !getActiveShiftAssignmentForDate(source.assignments.filter(row => row.employeeId === cell.employeeId), cell.day)?.scheduleDecisionId || !sameSchedule(cell.snapshot, cell.baselineSnapshot));
-    const affected = new Map<string, {employeeId:string;day:string}>();
-    const overnight = (snapshot: ScheduleSnapshot) => snapshot.kind === "shift" && snapshot.checkInTime && snapshot.checkOutTime && snapshot.checkOutTime <= snapshot.checkInTime;
-    for (const cell of changed) {
-      affected.set(`${cell.employeeId}|${cell.day}`, { employeeId: cell.employeeId, day: cell.day });
-      if (overnight(cell.snapshot) || overnight(cell.baselineSnapshot)) { const day = shiftDate(cell.day, 1); affected.set(`${cell.employeeId}|${day}`, { employeeId: cell.employeeId, day }); }
-    }
-    // Even freezing an unchanged day must not rewrite posted/approved provenance.
-    const protectedTargets = [...toConfirm.map(({employeeId,day}) => ({employeeId,day})), ...affected.values()];
-    if (protectedTargets.length) {
-      if (protectedTargets.some(target => source.periods.some(period => period.status !== "Open" && period.startDate <= target.day && period.endDate >= target.day))) throw new Error("A closed payroll period includes this employee-day or its overnight neighbor. Use the adjustment workflow; no schedule was changed.");
-      const protectedRuns = await tx.select({ employeeId: payrollRunEmployees.employeeId, startDate: payrollPeriods.startDate, endDate: payrollPeriods.endDate }).from(payrollRuns)
-        .innerJoin(payrollPeriods, eq(payrollRuns.payrollPeriodId, payrollPeriods.id)).innerJoin(payrollRunEmployees, eq(payrollRunEmployees.payrollRunId, payrollRuns.id))
-        .where(and(inArray(payrollRuns.status, ["Approved", "Posted"]), inArray(payrollRunEmployees.employeeId, [...new Set(protectedTargets.map(row => row.employeeId))])));
-      if (protectedTargets.some(target => protectedRuns.some(run => run.employeeId === target.employeeId && run.startDate <= target.day && run.endDate >= target.day))) throw new Error("An approved or posted payroll includes this employee-day or its overnight neighbor. Use the adjustment workflow; no schedule was changed.");
-    }
-    for (const target of affected.values()) await markAffectedShiftRunsStale({ tx, ...target, startDate: target.day, endDate: target.day, actorUserId: actor.userId });
+    const affected = await scheduleTargets(tx, source, toConfirm);
+    await assertWritableTargets(tx, source, affected);
+    await invalidateTargets(tx, actor, affected);
     for (const employeeId of [...new Set(toConfirm.map(row => row.employeeId))]) await projectConfirmedDays(tx, actor, input, toConfirm.filter(row => row.employeeId === employeeId), source);
-    let summariesRebuilt = 0;
-    for (const target of affected.values()) summariesRebuilt += await rebuildEmployeeAttendanceSummaries({ tx, employeeId: target.employeeId, startDate: target.day, endDate: target.day });
+    const summariesRebuilt = await rebuildTargets(tx, actor, affected);
     let draftRevision: number | undefined;
     if (source.draft && source.draft.sourceDigest === source.sourceDigest) {
       const fresh = await loadSources(actor, { departmentId: input.departmentId, periodId: input.periodId }, tx), freshCells = cellsFor(fresh);
@@ -235,7 +293,7 @@ export async function confirmScopedScheduleDays(actor: ScheduleActor, raw: Sched
       draftRevision = source.draft.revision + 1;
       await tx.update(scheduleWorkspaceDrafts).set({ cells: retained, sourceDigest: fresh.sourceDigest, revision: draftRevision, updatedByUserId: actor.userId, updatedAt: new Date() }).where(eq(scheduleWorkspaceDrafts.id, source.draft.id));
     }
-    const affectedTargets = [...new Map([...cells.map(({employeeId,day}) => ({employeeId,day})), ...affected.values()].map(target => [`${target.employeeId}|${target.day}`, target])).values()];
+    const affectedTargets = [...new Map([...cells.map(({employeeId,day}) => ({employeeId,day})), ...affected].map(target => [`${target.employeeId}|${target.day}`, target])).values()];
     return recordReceipt(tx, actor, request, { requestId: input.requestId, action: "days_confirmed", changedCount: toConfirm.length,
       message: `${cells.length} selected employee-day${cells.length === 1 ? "" : "s"} confirmed. ${summariesRebuilt} DTR day${summariesRebuilt === 1 ? "" : "s"} refreshed; other draft changes retained. Payroll was not recomputed.`,
       draftRevision, affectedTargets, affectedPeriodIds: source.periods.filter(period => affectedTargets.some(target => period.startDate <= target.day && period.endDate >= target.day)).map(period => period.id), summariesRebuilt });
@@ -251,7 +309,7 @@ async function projectConfirmedDays(tx: DbClient, actor: ScheduleActor, input: S
   if (revisions.length !== selected.size) throw new Error("The confirmation could not be recorded completely.");
   const values = cells.map(cell => {
     const snapshot = cell.snapshot;
-    return { employeeId, effectiveFrom: cell.day, effectiveTo: cell.day, shiftTableId: source.templates.has(String(snapshot.shiftTableId)) ? snapshot.shiftTableId : null, shiftName: snapshot.shiftName, shiftCode: snapshot.shiftCode, checkInTime: snapshot.checkInTime ?? "00:00:00", checkOutTime: snapshot.checkOutTime ?? "00:00:00", breakMinutes: snapshot.breakMinutes, paidBreakMinutes: snapshot.paidBreakMinutes, graceMinutes: snapshot.graceMinutes, hoursPerDay: snapshot.hoursPerDay.toFixed(2), isFlexible: snapshot.isFlexible, restDay: snapshot.kind === "rest" ? weekday(cell.day) : null, scheduleDecisionId: revisions.find(row => row.day === cell.day)!.id, confirmedSchedule: snapshot };
+    return { employeeId, effectiveFrom: cell.day, effectiveTo: cell.day, shiftTableId: source.templates.has(String(snapshot.shiftTableId)) ? snapshot.shiftTableId : null, shiftName: snapshot.shiftName, shiftCode: snapshot.shiftCode, checkInTime: snapshot.checkInTime ?? "00:00:00", checkOutTime: snapshot.checkOutTime ?? "00:00:00", breakMinutes: snapshot.breakMinutes, paidBreakMinutes: snapshot.paidBreakMinutes, graceMinutes: snapshot.graceMinutes, hoursPerDay: snapshot.hoursPerDay.toFixed(2), isFlexible: snapshot.isFlexible, restDay: snapshot.kind === "rest" ? weekday(cell.day) : null, calculationPolicy: calculationPolicyFor(snapshot.calculationPolicy), punchPolicy: punchPolicyFor(snapshot.punchPolicy), scheduleDecisionId: revisions.find(row => row.day === cell.day)!.id, confirmedSchedule: snapshot };
   });
   const inserts: typeof values = [];
   for (const row of values) {
@@ -263,31 +321,35 @@ async function projectConfirmedDays(tx: DbClient, actor: ScheduleActor, input: S
 }
 
 async function applyWeeklyImpact(tx: DbClient, actor: ScheduleActor, source: Sources, employeeId: string, from: string, to: string | null, nextForDay: (day: string) => ScheduleSnapshot) {
-  // Generated future periods have no inputs to invalidate. Fetch actual runs once,
-  // including historical posted runs, rather than issuing queries for every picker row.
   const [runs, latestImportedDate] = await Promise.all([
     tx.select({ periodId: payrollRuns.payrollPeriodId }).from(payrollRuns).innerJoin(payrollRunEmployees, eq(payrollRunEmployees.payrollRunId, payrollRuns.id)).where(and(eq(payrollRunEmployees.employeeId, employeeId), inArray(payrollRuns.status, ["Draft", "Reviewed", "Approved", "Posted"]))),
     getLatestImportedAttendanceDate(tx, employeeId),
   ]);
   const runPeriods = new Set(runs.map(row => row.periodId));
   const assignments = source.assignments.filter(row => row.employeeId === employeeId);
-  const changedOn = (day: string) => !getActiveShiftAssignmentForDate(assignments, day) && !sameSchedule(defaultFor(source, employeeId, day), nextForDay(day));
-  for (const period of source.periods.filter(row => runPeriods.has(row.id) && row.endDate >= from && (!to || row.startDate <= to))) {
-    const changed = scheduleDateRange(period.startDate > from ? period.startDate : from, to && to < period.endDate ? to : period.endDate).filter(changedOn);
-    if (!changed.length) continue;
-    await markAffectedShiftRunsStale({ tx, employeeId, startDate: changed[0], endDate: changed.at(-1)!, actorUserId: actor.userId });
+  const changedOn = (day: string) => day >= from && (!to || day <= to) && !getActiveShiftAssignmentForDate(assignments, day) && !sameSchedule(defaultFor(source, employeeId, day), nextForDay(day));
+  const changedDays = new Set<string>();
+  // Include closed periods even without runs, and their preceding workday: an overnight
+  // change at a cutoff can alter the next period's raw-log ownership and summaries.
+  for (const period of source.periods.filter(row => (row.status !== "Open" || runPeriods.has(row.id)) && row.endDate >= from && (!to || row.startDate <= shiftDate(to, 1)))) {
+    const start = shiftDate(period.startDate, -1) > from ? shiftDate(period.startDate, -1) : from;
+    const end = to && to < period.endDate ? to : period.endDate;
+    if (start <= end) for (const day of scheduleDateRange(start, end)) if (changedOn(day)) changedDays.add(day);
   }
   const range = getRebuildRange({ staleRange: { startDate: from, endDate: to }, latestImportedDate });
   if (range) {
     const [logs, summaries] = await Promise.all([
       tx.selectDistinct({ day: attendanceRawLogs.logDate }).from(attendanceRawLogs).where(and(eq(attendanceRawLogs.employeeId, employeeId), gte(attendanceRawLogs.logDate, range.startDate), lte(attendanceRawLogs.logDate, shiftDate(range.endDate, 1)))),
-      tx.select({ day: attendanceDailySummaries.attendanceDate }).from(attendanceDailySummaries).where(and(eq(attendanceDailySummaries.employeeId, employeeId), gte(attendanceDailySummaries.attendanceDate, range.startDate), lte(attendanceDailySummaries.attendanceDate, range.endDate))),
+      tx.select({ day: attendanceDailySummaries.attendanceDate }).from(attendanceDailySummaries).where(and(eq(attendanceDailySummaries.employeeId, employeeId), gte(attendanceDailySummaries.attendanceDate, range.startDate), lte(attendanceDailySummaries.attendanceDate, shiftDate(range.endDate, 1)))),
     ]);
-    const actualDays = [...new Set([...logs.flatMap(row => [row.day, shiftDate(row.day, -1)]), ...summaries.map(row => row.day)])].filter(day => day >= range.startDate && day <= range.endDate && changedOn(day)).sort();
-    const groups: Array<{startDate:string;endDate:string}> = [];
-    for (const day of actualDays) { const previous = groups.at(-1); if (previous && shiftDate(previous.endDate, 1) === day) previous.endDate = day; else groups.push({startDate:day,endDate:day}); }
-    for (const group of groups) await rebuildEmployeeAttendanceSummaries({ tx, employeeId, ...group });
+    for (const day of [...logs.flatMap(row => [row.day, shiftDate(row.day, -1)]), ...summaries.map(row => row.day)]) {
+      if (changedOn(day)) changedDays.add(day);
+    }
   }
+  const targets = await scheduleTargets(tx, source, [...changedDays].sort().map(day => ({ employeeId, day, snapshot: nextForDay(day), baselineSnapshot: defaultFor(source, employeeId, day) })));
+  await assertWritableTargets(tx, source, targets);
+  await invalidateTargets(tx, actor, targets);
+  await rebuildTargets(tx, actor, targets);
 }
 export async function saveWeeklySchedules(actor: ScheduleActor, raw: ScheduleWeeklyCommand, database: typeof db = db) {
   const input = weeklyCommand.parse(raw);
@@ -302,14 +364,15 @@ export async function saveWeeklySchedules(actor: ScheduleActor, raw: ScheduleWee
     for (const employeeId of input.employeeIds) {
       const snapshots = new Map(scheduleWeekdays.map(day => [day, defaultFor(source, employeeId, input.effectiveFrom, day)]));
       for (const day of input.days) {
-        const snapshot = day.value === "rest" || day.value === "unconfigured" ? emptySchedule(day.value) : source.templates.get(day.value);
+        const snapshot = day.value === "rest" || day.value === "unconfigured" ? emptySchedule(day.value) : source.activeTemplates.get(day.value) ?? (snapshots.get(day.weekday)?.shiftTableId === Number(day.value) ? snapshots.get(day.weekday) : undefined);
         if (!snapshot) throw new Error("Choose a current shift, Rest day or Unconfigured for each selected weekday.");
         snapshots.set(day.weekday, snapshot);
       }
       // A new effective-dated revision wins only inside its range; older records retain their audit history.
       const [pattern] = await tx.insert(employeeWeeklyShiftPatterns).values({ employeeId, effectiveFrom: input.effectiveFrom, effectiveTo: input.effectiveTo }).returning();
-      await tx.insert(employeeWeeklyShiftPatternDays).values([...snapshots].map(([day, snapshot]) => ({ patternId: pattern.id, weekday: day, scheduleState: snapshot.kind, shiftTableId: snapshot.shiftTableId, shiftName: snapshot.kind === "shift" ? snapshot.shiftName : null, shiftCode: snapshot.shiftCode, checkInTime: snapshot.checkInTime, checkOutTime: snapshot.checkOutTime, breakMinutes: snapshot.breakMinutes, paidBreakMinutes: snapshot.paidBreakMinutes, hoursPerDay: snapshot.hoursPerDay.toFixed(2) })));
-      await applyWeeklyImpact(tx, actor, source, employeeId, input.effectiveFrom, input.effectiveTo, day => snapshots.get(weekday(day))!);
+      const days = await tx.insert(employeeWeeklyShiftPatternDays).values([...snapshots].map(([day, snapshot]) => ({ patternId: pattern.id, weekday: day, scheduleState: snapshot.kind, definitionSnapshot: structuredClone(snapshot), calculationPolicy: calculationPolicyFor(snapshot.calculationPolicy), punchPolicy: punchPolicyFor(snapshot.punchPolicy), shiftTableId: snapshot.shiftTableId, shiftName: snapshot.kind === "shift" ? snapshot.shiftName : null, shiftCode: snapshot.shiftCode, checkInTime: snapshot.checkInTime, checkOutTime: snapshot.checkOutTime, breakMinutes: snapshot.breakMinutes, paidBreakMinutes: snapshot.paidBreakMinutes, hoursPerDay: snapshot.hoursPerDay.toFixed(2) }))).returning();
+      const revised = { ...source, fullPatterns: [...source.fullPatterns, { ...pattern, days }] };
+      await applyWeeklyImpact(tx, actor, source, employeeId, input.effectiveFrom, input.effectiveTo, day => defaultFor(revised, employeeId, day));
       await recordAdminAuditEvent({ actorUserId: actor.userId, entityType: "employee_weekly_shift_pattern", entityId: pattern.id, action: "employee_weekly_shift_pattern.revised", details: { employeeId, effectiveFrom: input.effectiveFrom, effectiveTo: input.effectiveTo, days: [...snapshots].map(([day, snapshot]) => ({ day, snapshot })) }, database: tx });
     }
     return recordReceipt(tx, actor, input, { requestId: input.requestId, action: "weekly_saved", message: `${input.employeeIds.length} weekly defaults saved. Confirmed period schedules are unchanged.`, changedCount: input.employeeIds.length });

@@ -869,6 +869,13 @@
       "when": 1791849600000,
       "tag": "0126_employee_file_contents",
       "breakpoints": true
+    },
+    {
+      "idx": 128,
+      "version": "7",
+      "when": 1791936000000,
+      "tag": "0127_shift_catalog_versions",
+      "breakpoints": true
     }
   ]
 }

@@ -66,7 +66,7 @@ export async function loadSourceDayEligibility(database:DbClient,records:SourceP
   database.query.employeeWeeklyShiftPatterns.findMany({where:and(inArray(employeeWeeklyShiftPatterns.employeeId,ids),lte(employeeWeeklyShiftPatterns.effectiveFrom,through),or(sql`${employeeWeeklyShiftPatterns.effectiveTo} is null`,gte(employeeWeeklyShiftPatterns.effectiveTo,from))),with:{days:true}}),
   database.select().from(employeesTimekeeping).where(inArray(employeesTimekeeping.employeeId,ids)),
  ]):[[],[],[]];
- const scheduleFor=(employeeId:string,day:string)=>{const resolved=resolveEmployeeScheduleForDate({attendanceDate:day,assignments:assignments.filter(row=>row.employeeId===employeeId),weeklyPatterns:patterns.filter(row=>row.employeeId===employeeId),legacyTimekeeping:timekeeping.find(row=>row.employeeId===employeeId)??null});return {...resolved.shiftWindow,requiresSplitPunches:[resolved.overrideAssignment?.shiftCode,resolved.overrideAssignment?.shiftName,resolved.weeklyPatternDay?.shiftCode,resolved.weeklyPatternDay?.shiftName].some(value=>value?.toUpperCase().includes("SPLIT"))};};
+ const scheduleFor=(employeeId:string,day:string)=>resolveEmployeeScheduleForDate({attendanceDate:day,assignments:assignments.filter(row=>row.employeeId===employeeId),weeklyPatterns:patterns.filter(row=>row.employeeId===employeeId),legacyTimekeeping:timekeeping.find(row=>row.employeeId===employeeId)??null}).shiftWindow;
  return {eligibility:sourceDayEligibility(records,punch=>employeeBySource.get(punch.employeeId)?.employeeId??null,scheduleFor),scheduleFor};
 }
 

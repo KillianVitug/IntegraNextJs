@@ -1,4 +1,5 @@
 "use client";
+import { shiftTableScheduleLabel } from "@/lib/scheduling/presentation";
 
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
@@ -227,7 +228,7 @@ export function ShiftAssignmentManager({
                   <option value={0}>Select shift table</option>
                   {shiftTables.map((shiftTable) => (
                     <option key={shiftTable.id} value={shiftTable.id}>
-                      {shiftTable.code} | {shiftTable.description}
+                      {shiftTableScheduleLabel(shiftTable)}
                     </option>
                   ))}
                 </select>
