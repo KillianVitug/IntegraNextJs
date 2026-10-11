@@ -5,7 +5,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { and, eq, desc, gte, lte, isNull, inArray, sql } from "drizzle-orm";
 import { db, type DbClient } from "@/db";
-import { employees, employeesGeneralInfo, employeesTimekeeping, employeeShiftAssignments, employeeWeeklyShiftPatterns, employeeWeeklyShiftPatternDays, employeesLeaveRecords, employeeLeaveRecordDays, payrollPeriods, payrollRuns, attendanceRawLogs, attendanceImportBatches } from "@/db/schema";
+import { employees, employeesGeneralInfo, employeesTimekeeping, employeeShiftAssignments, employeeWeeklyShiftPatterns, employeeWeeklyShiftPatternDays, employeesLeaveRecords, employeeLeaveRecordDays, payrollPeriods, payrollRuns, attendanceRawLogs, attendanceImportBatches, employeeAttendanceDayStatusOverrides } from "@/db/schema";
 import { attendanceSourceMappings as mappings, attendanceSourceEvents as events, attendanceSourceProjections as projections, attendanceSourceIdentities as identities } from "@/db/attendanceSourceSchema";
 import { workBatches, workPlans, workTreatments, workHistory, adjustmentCases, workRawLogs, workExclusions, workSourceExclusions } from "@/db/attendanceWorkbenchSchema";
 import { resolutionDigest, loadAttendanceReadiness, invalidateResolutionPeriod } from "./attendanceResolution";
@@ -29,7 +29,7 @@ const activeStates=["Approved","Applying","Sync pending","Failed"];
 export { draftVersion, workDayRecords } from "./attendanceWorkbenchModel";
 export async function workEmployees(periodId:string,database:DbClient=db,incoming?:SourcePunch[],now=new Date().toISOString(),employeeId?:string):Promise<WorkEmployee[]> {
  const [period]=await database.select().from(payrollPeriods).where(eq(payrollPeriods.id,periodId));if(!period)fail("Payroll period not found.");
- const [roster,links,identity,source,raw,timekeeping,assignments,patterns,patternDays,leaves,leaveDays,treatments,excluded,manualLinks,sourceExcluded,periodRuns,keptSnapshots,attendanceInputs]=await Promise.all([
+ const [roster,links,identity,source,raw,timekeeping,assignments,patterns,patternDays,leaves,leaveDays,treatments,excluded,manualLinks,sourceExcluded,periodRuns,keptSnapshots,attendanceInputs,dayStatusOverrides]=await Promise.all([
   database.select({person:employees,info:employeesGeneralInfo}).from(employees).leftJoin(employeesGeneralInfo,eq(employeesGeneralInfo.employeeId,employees.id)).where(and(isNull(employees.deletedAt),eq(employees.employeeType,"EMP"),employeeId?eq(employees.id,employeeId):undefined)),
   database.select().from(mappings),database.select().from(identities),incoming?Promise.resolve(incoming):database.select({payload:events.payload}).from(projections).innerJoin(events,eq(events.eventId,projections.eventId)).where(eq(projections.payrollPeriodId,periodId)).then(r=>r.map(x=>x.payload as SourcePunch)),
   database.select({log:attendanceRawLogs,format:attendanceImportBatches.sourceFormat}).from(attendanceRawLogs).innerJoin(attendanceImportBatches,eq(attendanceImportBatches.id,attendanceRawLogs.batchId)).where(eq(attendanceImportBatches.payrollPeriodId,periodId)),
@@ -38,6 +38,7 @@ export async function workEmployees(periodId:string,database:DbClient=db,incomin
   database.select().from(payrollRuns).where(eq(payrollRuns.payrollPeriodId,periodId)).orderBy(desc(payrollRuns.createdAt)),
   database.select().from(workHistory).where(and(eq(workHistory.action,"Kept payroll attendance"),sql`${workHistory.details}->>'periodId'=${periodId}`)),
   loadEffectiveAttendanceInputSet(database,{payrollPeriodId:periodId,employeeIds:employeeId?[employeeId]:undefined,startDate:period.startDate,endDate:period.endDate,neighborDays:"all"}),
+  database.select().from(employeeAttendanceDayStatusOverrides).where(and(eq(employeeAttendanceDayStatusOverrides.payrollPeriodId,periodId),employeeId?eq(employeeAttendanceDayStatusOverrides.employeeId,employeeId):undefined)),
  ]);
  const frozenRun=periodRuns.find(r=>freezesAttendanceInput(r.status,r.inputSnapshot?.payrollGroup));
  return roster.filter(({info})=>!info?.dateHired||info.dateHired<=period.endDate).filter(({info})=>!info?.separationDate||info.separationDate>=period.startDate).filter(({info})=>!info||!["Resigned","Terminated","Finished Conctract"].includes(info.employmentStatus??"")||!!info.separationDate).map(({person,info})=>{
@@ -74,22 +75,26 @@ export async function workEmployees(periodId:string,database:DbClient=db,incomin
    const leaveEvidence=dayLeaves.map(l=>({record:l,detail:leaveDays.filter(d=>d.leaveRecordId===l.id&&d.leaveDate===day)}));
    const version=resolutionDigest([configuration,leaveEvidence,employeeLinks,identity.filter(i=>sourceIds.includes(i.sourceEmployeeId)),context,attendance]);
    const treatment=treatments.find(t=>t.employeeId===person.id&&t.day===day&&(adminDecision(t.payload)||t.version===version));
-   const status=dayStatus({day,schedule,rest:isResolvedScheduleRestDay(resolved),leave,records:own,now});
-   const issues=status==="Future"||status==="In progress / awaiting upload"||status==="Rest day"||status==="Approved leave"?[]:sequenceProblems(own,schedule).errors;
-   issues.push(...attendance.issues);
-   if(status==="Schedule missing"&&own.some(r=>r.status==="VALID"&&!r.excluded))issues.push("Schedule missing; uncalculable time contributes no attendance-based work");
+   // Findings follow the same effective inputs as provisional payroll. Retained
+   // originals remain in records/history for review and never become extra pairs.
+   const effectiveRecords:WorkRecord[]=attendance.punches.filter(p=>p.included).map(p=>{const original=own.find(r=>r.id===p.id);return {...original,id:p.id,source:original?.source??"Manual",employeeId:person.id,type:p.type,at:p.at,status:"VALID",excluded:false,clockFlag:original?.clockFlag??false};});
+   const status=dayStatus({day,schedule,rest:isResolvedScheduleRestDay(resolved),leave,records:effectiveRecords,now});
+   const issues=[...attendance.issues];
+   if(status==="Schedule missing"&&attendance.punches.some(p=>p.included||p.evidenceState==="pending"))issues.push("Schedule missing; uncalculable time contributes no attendance-based work");
    if(!sourceIds.length&&own.some(r=>r.source==="API"))issues.push("Verify an attendance employee mapping");
-   if(own.some(r=>r.source==="API"&&r.status==="VALID"&&!r.excluded)&&own.some(r=>r.source==="File"&&r.status==="VALID"&&!r.excluded))issues.push("Choose between overlapping API and file punches");
-   if(own.some(r=>r.source==="API"&&r.status==="VALID"&&!r.excluded)&&own.some(r=>r.source==="Manual"&&r.status==="VALID"&&!r.excluded))issues.push("Compare original and manual evidence; prevent duplicate time");
+   if(!treatment&&!attendanceInputs.correctedDays.includes(`${person.id}|${day}`)){
+    if(effectiveRecords.some(r=>r.source==="API")&&effectiveRecords.some(r=>r.source==="File"))issues.push("Choose between overlapping API and file punches");
+    if(effectiveRecords.some(r=>r.source==="API")&&effectiveRecords.some(r=>r.source==="Manual"))issues.push("Compare original and manual evidence; prevent duplicate time");
+   }
    if(dayLeaves.some(l=>!leaveDays.some(d=>d.leaveRecordId===l.id&&d.leaveDate===day)))issues.push("Review missing leave day details in Leave");
-   if(treatment)issues.length=0;
+   if(dayStatusOverrides.some(row=>row.employeeId===person.id&&row.attendanceDate===day&&row.status==="Hold"))issues.push("Attendance time is on hold by administrator decision; review held-time decisions");
    const decision=adminDecision(treatment?.payload),incomingForDecision=decision?decisionIncomingRecords(incomingRecords,decision):frozenRun?workDayRecords(incomingRecords,day,schedule):[];
    const incomingDigest=resolutionDigest(attendanceEvidence(incomingForDecision));
    const keptSnapshot=keptSnapshots.some(h=>{const d=h.details as Record<string,unknown>;return d.employeeId===person.id&&d.day===day&&d.payrollRunId===frozenRun?.id&&d.incomingDigest===incomingDigest;});
-   const lateConflict=decision?incomingDigest!==decision.keptIncomingDigest&&incomingDigest!==resolutionDigest(attendanceEvidence(decision.sourceRecords))&&incomingDigest!==resolutionDigest(attendanceEvidence(decision.records)):!!frozenRun&&!keptSnapshot&&incomingDigest!==resolutionDigest(attendanceEvidence(own));
+   const lateConflict=!!attendance.lateConflict||(decision?incomingDigest!==decision.keptIncomingDigest&&incomingDigest!==resolutionDigest(attendanceEvidence(decision.sourceRecords))&&incomingDigest!==resolutionDigest(attendanceEvidence(decision.records)):!!frozenRun&&!keptSnapshot&&incomingDigest!==resolutionDigest(attendanceEvidence(own)));
    if(lateConflict)issues.push(decision?"Late upload differs — approved attendance retained":"Incoming attendance differs — payroll input retained");
    const decisionView:WorkDay["decision"]=decision?{planId:treatment!.planId,revision:treatment!.version,approvedAt:decision.approvedAt,reason:decision.reason,lateConflict,incomingDigest,incomingRecords:incomingForDecision}:frozenRun?{payrollRunId:frozenRun.id,approvedAt:(frozenRun.computedAt??frozenRun.createdAt).toISOString(),reason:"Attendance input retained from the payroll computation",lateConflict,incomingDigest,incomingRecords:incomingForDecision}:undefined;
-   days.push({attendance,day,schedule,rest:isResolvedScheduleRestDay(resolved),leave,leaveEvidence,configuration,records:own,status:!["Future","In progress / awaiting upload","Rest day","Approved leave"].includes(status)&&!own.some(r=>r.status==="VALID"&&!r.excluded)&&!leave?"No work recorded":status,issues:[...new Set(issues)],findings:[...new Set(issues)].map(message=>({code:message.startsWith("Late upload")||message.startsWith("Incoming attendance")?"LATE_CONFLICT":"ATTENDANCE_WARNING",severity:"warning" as const,employeeId:person.id,day,message})),suggestions:treatment||!own.length?[]:suggestionsForDay(day,own,schedule),version,resolved:!!treatment,...(decisionView?{decision:decisionView}:{})});
+   days.push({attendance,day,schedule,rest:isResolvedScheduleRestDay(resolved),leave,leaveEvidence,configuration,records:own,status:!["Future","In progress / awaiting upload","Rest day","Approved leave"].includes(status)&&!effectiveRecords.length&&!leave?"No work recorded":status,issues:[...new Set(issues)],findings:[...new Set(issues)].map(message=>({code:message.startsWith("Late upload")||message.startsWith("Incoming attendance")?"LATE_CONFLICT":"ATTENDANCE_WARNING",severity:"warning" as const,employeeId:person.id,day,message})),suggestions:treatment||!own.length?[]:suggestionsForDay(day,own,schedule),version,resolved:!!treatment&&issues.length===0,...(decisionView?{decision:decisionView}:{})});
   }
   return {id:person.id,no:person.employeeNo,name:[person.firstName,person.middleName,person.lastName].filter(Boolean).join(" "),sourceIds,mappingEvidence:employeeLinks,hired:info?.dateHired??null,separated:info?.separationDate??null,days,contextRecords:records};
  }).sort((a,b)=>a.no.localeCompare(b.no));

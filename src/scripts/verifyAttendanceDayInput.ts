@@ -29,4 +29,12 @@ assert.equal(buildAttendanceDayInput(included).complete,true);assert.deepEqual(b
 assert.equal(buildAttendanceDayInput([{...included[0],included:false,reason:"Device clock needs verification"},included[1]]).canConfirmExisting,false);
 assert.equal(buildAttendanceDayInput([included[1]]).missingDirection,"IN");
 assert.equal(buildAttendanceDayInput([included[0]]).missingDirection,"OUT");
-console.log(JSON.stringify({passed:true,checks:16,scope:"Day-scoped source eligibility and truthful IN/OUT findings"}));
+const historical={...included[0],id:"original-voided",at:"2026-10-06T09:00:00+08:00",included:false,reason:"Voided by approved attendance decision",evidenceState:"resolved" as const};
+assert.deepEqual(buildAttendanceDayInput([...included,historical]).issues,[],"Reviewed audit evidence cannot add a false missing OUT");
+assert.equal(buildAttendanceDayInput([...included,historical]).punches.length,3,"Audit capture remains visible");
+for(const evidenceState of ["resolved","voided","excluded"] as const)assert.deepEqual(buildAttendanceDayInput([...included,{...historical,evidenceState,reason:"Retained original evidence"}]).issues,[]);
+const pending=buildAttendanceDayInput([...included,{...historical,evidenceState:"pending",reason:"New incoming capture requires review"}]);
+assert(pending.issues.some(issue=>issue.includes("New incoming")));assert.equal(pending.missingDirection,"OUT","Unreviewed evidence still participates in the active sequence");
+assert.equal(buildAttendanceDayInput([included[0],historical]).missingDirection,"OUT","History never supplies an effective missing OUT");
+const excessive=buildAttendanceDayInput([included[0],{...included[1],at:"2026-10-08T09:00:00+08:00"}]);assert.equal(excessive.complete,false);assert(excessive.issues.some(issue=>issue.includes("24 hours")),"Shared findings retain the batch duration guard");
+console.log(JSON.stringify({passed:true,checks:23,scope:"Day-scoped source eligibility, effective sequence and visible informational evidence"}));

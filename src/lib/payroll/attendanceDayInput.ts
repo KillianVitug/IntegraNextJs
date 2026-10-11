@@ -1,7 +1,7 @@
 import { groupLogsByEmployeeAndAttendanceDate, type ShiftWindow } from "./attendance";
 import { manilaWallTime, type SourcePunch } from "./attendanceSourceClient";
 
-export type AttendanceInputPunch = { id:string; type:"IN"|"OUT"|"UNSPECIFIED"; at:string; included:boolean; reason:string|null };
+export type AttendanceInputPunch = { id:string; type:"IN"|"OUT"|"UNSPECIFIED"; at:string; included:boolean; reason:string|null; evidenceState?:"effective"|"pending"|"resolved"|"voided"|"excluded" };
 export type AttendanceDayInput = { punches:AttendanceInputPunch[]; issues:string[]; missingDirection:"IN"|"OUT"|null; complete:boolean; canConfirmExisting:boolean; lateConflict?:boolean };
 export type SourceDayEligibility = { day:string; eligible:boolean; reason:string|null; contextualFlagsResolved:boolean };
 /** Draft/Stale runs retain their snapshots but do not freeze current attendance. */
@@ -36,23 +36,27 @@ function sequence(punches:AttendanceInputPunch[]) {
  const ordered=[...punches].sort((a,b)=>Date.parse(a.at)-Date.parse(b.at)||a.id.localeCompare(b.id));
  if(ordered.length&&ordered.every(punch=>punch.type==="UNSPECIFIED")){
   const complete=ordered.length%2===0&&ordered.every((punch,index)=>!index||Date.parse(punch.at)>Date.parse(ordered[index-1].at))&&ordered.every((punch,index)=>index%2===0||Date.parse(punch.at)-Date.parse(ordered[index-1].at)<=86400000);
-  return {complete,missingDirection:null,ambiguous:!complete};
+  return {complete,missingDirection:null,ambiguous:!complete,invalidDuration:ordered.some((punch,index)=>index%2===1&&Date.parse(punch.at)-Date.parse(ordered[index-1].at)>86400000)};
  }
- let opened=false,missingIn=false,missingOut=false,ambiguous=false;
+ let opened=false,openedAt=0,missingIn=false,missingOut=false,ambiguous=false,invalidDuration=false;
  for(const [index,punch] of ordered.entries()){
   if(index&&Date.parse(punch.at)===Date.parse(ordered[index-1].at))ambiguous=true;
-  if(punch.type==="IN"){if(opened){missingOut=true;ambiguous=true;}opened=true;}
-  else if(punch.type==="OUT"){if(!opened)missingIn=true;opened=false;}
+  if(punch.type==="IN"){if(opened){missingOut=true;ambiguous=true;}opened=true;openedAt=Date.parse(punch.at);}
+  else if(punch.type==="OUT"){if(!opened)missingIn=true;else if(Date.parse(punch.at)-openedAt>86400000)invalidDuration=true;opened=false;}
   else ambiguous=true;
  }
  if(opened)missingOut=true;
- return {complete:ordered.length>0&&!missingIn&&!missingOut&&!ambiguous,missingDirection:missingIn&&!missingOut?"IN" as const:missingOut&&!missingIn?"OUT" as const:null,ambiguous};
+ return {complete:ordered.length>0&&!missingIn&&!missingOut&&!ambiguous&&!invalidDuration,missingDirection:missingIn&&!missingOut?"IN" as const:missingOut&&!missingIn?"OUT" as const:null,ambiguous,invalidDuration};
 }
 export function buildAttendanceDayInput(punches:AttendanceInputPunch[]):AttendanceDayInput {
- const active=punches.filter(p=>!p.reason?.startsWith("Voided")&&!p.reason?.startsWith("Excluded"));
+ // Audit captures remain visible, but an explicitly resolved/voided/excluded
+ // capture is not another IN/OUT in the current sequence. The string fallback
+ // keeps older callers compatible; live readers supply the explicit state.
+ const active=punches.filter(p=>p.included||(!["resolved","voided","excluded"].includes(p.evidenceState??"")&&!p.reason?.startsWith("Voided")&&!p.reason?.startsWith("Excluded")));
  const known=sequence(active),payable=sequence(punches.filter(p=>p.included));
  const held=[...new Set(active.filter(p=>!p.included&&p.reason).map(p=>p.reason!))];
  const issues=[...held];
+ if(known.invalidDuration)issues.push("Shift exceeds 24 hours; verify dates or split the shift");
  if(known.missingDirection)issues.push(`Missing ${known.missingDirection}`);
  else if(known.ambiguous||active.length&&!known.complete)issues.push("Review repeated or incomplete IN/OUT sequence");
  return {punches,issues,missingDirection:known.missingDirection,complete:payable.complete,canConfirmExisting:known.complete&&held.length>0&&!held.some(reason=>/clock|identity|investigation|retained|overlapping/i.test(reason))};
