@@ -76,6 +76,13 @@ async function main() {
     const unapprovedEstimate = (await estimate("Daily", daily.id)).rows[0];
     assert.equal(unapprovedEstimate.status, "Available", unapprovedEstimate.warnings.join(" | "));
     assert.equal(unapprovedEstimate.recorded?.gross, 800);
+    if (process.env.PROVISIONAL_FINANCIAL_BASELINE !== "1") {
+      const review = unapprovedEstimate.days.find(row => row.date === day)?.review;
+      assert.ok(review, "Actual provisional loader supplies review metadata");
+      assert.equal(review.eligible, true); assert.equal(review.scheduleConfigured, true);
+      assert.equal(review.lateMinutes, 0); assert.equal(review.undertimeMinutes, 0);
+      assert.equal(review.overtimeMinutes, 30); assert.equal(review.overtimeApproved, false, "Detected overtime is visible without implying approval");
+    }
     assert.equal((await official("Daily", daily.id)).grossPay, 800);
     const unapprovedBaseline = await computeManualPayrollLatestBaseline(period.id, daily.id, client);
     assert.ok(unapprovedBaseline);
@@ -96,6 +103,11 @@ async function main() {
     assert.equal(approvedOfficial.lines.find(line => line.code === "OT")?.amount, 62.5, "30min uses800/8×0.5×1.25 despite account multiplier9");
     assert.equal(approvedOfficial.totalDeductions, 0);
     assert.equal(approvedEstimate.recorded?.net, 862.5);
+    if (process.env.PROVISIONAL_FINANCIAL_BASELINE !== "1") {
+      const review = approvedEstimate.days.find(row => row.date === day)?.review;
+      assert.ok(review); assert.equal(review.overtimeMinutes, 30); assert.equal(review.overtimeApproved, true);
+      assert.equal(review.lateMinutes, 0); assert.equal(review.undertimeMinutes, 0);
+    }
     const regularDetail=approvedEstimate.recordedLines.find(line=>line.code==="REG")?.details;
     const overtimeDetail=approvedEstimate.recordedLines.find(line=>line.code==="OT")?.details;
     assert.ok(regularDetail);assert.ok(overtimeDetail);
@@ -111,6 +123,11 @@ async function main() {
     const monthlyOfficial = await official("Monthly", monthly.id);
     const monthlyBaseline = await computeManualPayrollLatestBaseline(period.id, monthly.id, client);
     assert.equal(monthlyEstimate.recorded?.gross, 30000);
+    if (process.env.PROVISIONAL_FINANCIAL_BASELINE !== "1") {
+      const review = monthlyEstimate.days.find(row => row.date === day)?.review;
+      assert.ok(review); assert.equal(review.eligible, true); assert.equal(review.scheduleConfigured, true);
+      assert.equal(review.overtimeMinutes, 30); assert.equal(review.overtimeApproved, true, "Monthly attendance metadata does not change fixed pay");
+    }
     const monthlyDetail=monthlyEstimate.recordedLines.find(line=>line.code==="REG")?.details;
     assert.ok(monthlyDetail);assert.equal(monthlyDetail.scope,"period");assert.equal(monthlyDetail.workDate,undefined);
     assert.equal(monthlyDetail.startDate,"2020-10-01");assert.equal(monthlyDetail.endDate,"2020-10-31","Monthly basis is the whole earning month, not the displayed payout half or recorded cutoff");
@@ -162,7 +179,27 @@ async function main() {
     assert.deepEqual(await state(),beforeDetailedManual,"Adding display metadata never persists manual projections or changes original attendance/payroll");
     checks.push("Actual provisional loader exposes dated exact-minute REG/OT, full-month Monthly scope, and refreshed manual attendance provenance while preserving explicit adjustments and all stored rows");
     checks.push("Actual manual-save and OT-revoke/reapprove services: Reviewed→Stale precedes derivative refresh; saved Daily changes1112.50→1050→1112.50 while retaining explicit250; Monthly manual30123 unchanged");
-    console.log(JSON.stringify({ passed: true, checks, fixture: "fresh fictional PGlite/current schema; two old service modules use only a rebound database import", limits: "No statutory deduction rules or official run approval/posting tested; no GUI/auth flow; current-schema fixture omits migration/FK compatibility, covered separately" }));
+    // Stable monetary fields only: release comparison excludes generated IDs,
+    // timestamps and finding/display metadata which may intentionally change.
+    const lines = (values: Array<{ code: string; lineType: string; amount: string | number; quantity?: string | number | null; rate?: string | number | null; hours?: number; minutes?: number }>) => values.map(line => ({
+      code: line.code, lineType: line.lineType, amount: Number(line.amount),
+      quantity: line.quantity == null ? null : Number(line.quantity), rate: line.rate == null ? null : Number(line.rate),
+      hours: line.hours ?? null, minutes: line.minutes ?? null,
+    })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const provisional = (row: typeof approvedEstimate) => ({ recorded: row.recorded, forecast: row.forecast, postedCredits: row.postedCredits, recordedLines: lines(row.recordedLines), forecastLines: lines(row.forecastLines) });
+    const computation = (row: typeof approvedOfficial) => ({ regularPay: row.regularPay, grossPay: row.grossPay, taxablePay: row.taxablePay, nonTaxablePay: row.nonTaxablePay, totalDeductions: row.totalDeductions, employeeContributions: row.employeeContributions, employerContributions: row.employerContributions, netPay: row.netPay, lines: lines(row.lines) });
+    const financialProjection = {
+      unapprovedDaily: provisional(unapprovedEstimate),
+      approvedDaily: { provisional: provisional(approvedEstimate), official: computation(approvedOfficial), manualBaseline: { fields: approvedBaseline.fields, lines: lines(approvedBaseline.lines) } },
+      monthly: { provisional: provisional(monthlyEstimate), official: computation(monthlyOfficial), manualBaseline: { fields: monthlyBaseline.fields, lines: lines(monthlyBaseline.lines) } },
+      savedManual: { provisional: provisional(detailedManual), grossPay: Number(dailyEntry.grossPay), netPay: Number(dailyEntry.netPay), lines: lines(dailyLines), monthlyGrossPay: Number(monthlyEntryBefore.grossPay) },
+    };
+    const assertFiniteValues = (value: unknown): void => {
+      if (typeof value === "number") assert.ok(Number.isFinite(value), "Financial comparison must never serialize invalid numbers as null");
+      else if (value && typeof value === "object") Object.values(value).forEach(assertFiniteValues);
+    };
+    assertFiniteValues(financialProjection);
+    console.log(JSON.stringify({ passed: true, checks, financialProjection, fixture: "fresh fictional PGlite/current schema; two old service modules use only a rebound database import", limits: "No statutory deduction rules or official run approval/posting tested; no GUI/auth flow; current-schema fixture omits migration/FK compatibility, covered separately. Financial projection compares only the named fixture stages and fields, not every possible employee case." }));
   } finally { await pg.close(); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

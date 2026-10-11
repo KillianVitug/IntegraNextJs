@@ -4,7 +4,8 @@ import { z } from "zod";
 import { and, asc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { workTreatments } from "@/db/attendanceWorkbenchSchema";
-import { attendanceDailySummaries, employeeShiftAssignments, employeeWeeklyShiftPatterns, employeesLeaveRecords, payrollPeriods, payrollRuns, shiftTableBreaks } from "@/db/schema";
+import { attendanceResolutions } from "@/db/attendanceSourceSchema";
+import { attendanceDailySummaries, employeeDailyOvertimeOverrides, employeeShiftAssignments, employeeWeeklyShiftPatterns, employeesLeaveRecords, payrollPeriods, payrollRuns, shiftTableBreaks } from "@/db/schema";
 import { loadPayrollCalculation, type EmployeePayrollComputation } from "./engine";
 import { loadEffectiveAttendanceCorrections, loadEffectiveAttendanceInputSet, attendanceInputForDay, mapEffectiveAttendanceCorrections } from "./effectiveAttendanceInputs";
 import { buildAttendancePeriodDetailRows, buildAttendanceSummaryComputations } from "./attendanceSync";
@@ -21,6 +22,9 @@ import { buildDeductibleRegularBreakWindows } from "@/lib/shifts";
 import { buildManualPayrollBaselineSnapshotFromComputation, projectManualPayrollAttendanceLinesFromBaseline } from "./manualPayroll";
 import type { ProvisionalAmounts, ProvisionalDay, ProvisionalEmployee, ProvisionalPayroll, ProvisionalPayrollQuery } from "./provisionalTypes";
 import { withProvisionalLineDetails, type ProvisionalLineContext, type ProvisionalManualDetail } from "./provisionalLineDetails";
+import { adminDecision } from "./attendanceAdminDecision";
+import { workDayRecords } from "./attendanceWorkbenchModel";
+import { resolutionPeople } from "./attendanceResolution";
 
 const daySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => { const day = new Date(`${value}T00:00:00Z`); return Number.isFinite(day.getTime()) && day.toISOString().slice(0,10) === value; }, "Select a valid date.");
 const querySchema = z.object({periodId:z.string().uuid(),group:z.enum(["Daily","Monthly"]),asOfDate:daySchema.optional(),departmentId:z.number().int().positive().optional(),employeeId:z.string().uuid().optional()});
@@ -56,7 +60,7 @@ export async function loadProvisionalPayroll(raw:ProvisionalPayrollQuery, databa
     const outsideCheckDates=requiredCheckDates.filter(date=>date<period.startDate||date>period.endDate);
     const queryStart=[period.startDate,...outsideCheckDates].sort()[0],queryEnd=[period.endDate,...outsideCheckDates].sort().at(-1)!;
     const startDate=sourceDayOffset(queryStart,-1),scope={employeeIds,startDate:queryStart,endDate:queryEnd};
-    const [attendanceInputs,corrections,assignments,patterns,leaves,departments,runs,decisions] = await Promise.all([
+    const [attendanceInputs,corrections,assignments,patterns,leaves,departments,runs,decisions,overtimeApprovals,noAttendanceDecisions] = await Promise.all([
       loadEffectiveAttendanceInputSet(tx,{...scope,neighborDays:"all"}), loadEffectiveAttendanceCorrections(tx,scope),
       employeeIds.length?tx.select().from(employeeShiftAssignments).where(and(inArray(employeeShiftAssignments.employeeId,employeeIds),lte(employeeShiftAssignments.effectiveFrom,queryEnd),or(isNull(employeeShiftAssignments.effectiveTo),gte(employeeShiftAssignments.effectiveTo,startDate)))):[],
       employeeIds.length?tx.query.employeeWeeklyShiftPatterns.findMany({where:and(inArray(employeeWeeklyShiftPatterns.employeeId,employeeIds),lte(employeeWeeklyShiftPatterns.effectiveFrom,queryEnd),or(isNull(employeeWeeklyShiftPatterns.effectiveTo),gte(employeeWeeklyShiftPatterns.effectiveTo,startDate))),with:{days:true}}):[],
@@ -64,7 +68,17 @@ export async function loadProvisionalPayroll(raw:ProvisionalPayrollQuery, databa
       loadEmployeeDepartmentMetadataByEmployeeId(employeeIds,tx),
       tx.select().from(payrollRuns).where(eq(payrollRuns.payrollPeriodId,period.id)),
       employeeIds.length?tx.select().from(workTreatments).where(and(inArray(workTreatments.employeeId,employeeIds),gte(workTreatments.day,queryStart),lte(workTreatments.day,queryEnd),eq(workTreatments.active,true),sql`${workTreatments.payload}->>'kind' = 'AdminDecision'`)):[],
+      employeeIds.length?tx.select().from(employeeDailyOvertimeOverrides).where(and(inArray(employeeDailyOvertimeOverrides.employeeId,employeeIds),gte(employeeDailyOvertimeOverrides.attendanceDate,queryStart),lte(employeeDailyOvertimeOverrides.attendanceDate,queryEnd))):[],
+      employeeIds.length?tx.select({employeeId:attendanceResolutions.employeeId}).from(attendanceResolutions).where(and(inArray(attendanceResolutions.employeeId,employeeIds),eq(attendanceResolutions.payrollPeriodId,storedPeriod.id),eq(attendanceResolutions.state,"Approved"),eq(attendanceResolutions.kind,"NoAttendance"))):[],
     ]);
+    // Older period-wide no-attendance decisions are valid only against the
+    // current source/mapping revision and latest decision, just like review.
+    const noAttendanceSources=noAttendanceDecisions.length?await resolutionPeople(tx,{id:storedPeriod.id,startDate:storedPeriod.startDate,endDate:storedPeriod.endDate}):[];
+    const noAttendanceSourcesByEmployee=new Map<string,typeof noAttendanceSources>();
+    for(const person of noAttendanceSources){if(!person.employeeId||person.contextOnly)continue;const sources=noAttendanceSourcesByEmployee.get(person.employeeId)??[];sources.push(person);noAttendanceSourcesByEmployee.set(person.employeeId,sources);}
+    // A legacy approval belongs to one source identity. Several identities can
+    // map to the same employee; one approval cannot resolve all the others.
+    const verifiedNoAttendanceEmployees=new Set([...noAttendanceSourcesByEmployee].filter(([,sources])=>sources.every(person=>person.classification!=="TestOnly"&&!person.issues.length&&person.resolution?.kind==="NoAttendance"&&person.resolution.state==="Approved")).map(([employeeId])=>employeeId));
     const logs=attendanceInputs.logs;
     const approvedDecisionDays=new Set(decisions.map(row=>`${row.employeeId}|${row.day}`));
     const leaveTypes=await buildLeaveTypeMapByCode(leaves.filter(leave=>!leave.leaveTypeLookup).map(leave=>leave.leaveType),tx);
@@ -151,7 +165,7 @@ export async function loadProvisionalPayroll(raw:ProvisionalPayrollQuery, databa
           postedCreditsApplied:input.group==="Monthly"&&paid.length>0,
         });
       }
-      return {...calculated,lineContexts};
+      return {...calculated,lineContexts,reviewInputs:annotationInputs};
     }
     const recorded=await scenario(recordedAttendance,asOfDate), forecast=asOfDate>=period.endDate?recorded:await scenario(forecastAttendance);
     const recordedMap=new Map(recorded.computations.map(row=>[row.employeeId,row])),forecastMap=new Map(forecast.computations.map(row=>[row.employeeId,row]));
@@ -162,9 +176,24 @@ export async function loadProvisionalPayroll(raw:ProvisionalPayrollQuery, databa
       if(forecast.unavailable.has(employee.id)&&forecast.unavailable.get(employee.id)!==recorded.unavailable.get(employee.id))warnings.push(forecast.unavailable.get(employee.id)!);
       const days:ProvisionalDay[]=details.filter(day=>day.employeeId===employee.id && day.attendanceDate>=storedPeriod.startDate && day.attendanceDate<=storedPeriod.endDate).map(day=>{
         const schedule=scheduleFor(employee.id,day.attendanceDate),rest=isResolvedScheduleRestDay(schedule),flags=normalizeAttendanceDtrAnomalyFlags(day.anomalyFlags);
-        const payrollHold=calculator.attendanceDayStatusOverrideRows.some(row=>row.employeeId===employee.id&&row.attendanceDate===day.attendanceDate&&row.status==="Hold");
+        const manualStatus=calculator.attendanceDayStatusOverrideRows.find(row=>row.employeeId===employee.id&&row.attendanceDate===day.attendanceDate)?.status;
+        const payrollHold=manualStatus==="Hold";
+        const attendance=attendanceInputForDay(attendanceInputs,employee.id,day.attendanceDate);
+        const decision=adminDecision(decisions.find(row=>row.employeeId===employee.id&&row.day===day.attendanceDate)?.payload);
+        const correctionDates=corrections.filter(row=>row.employeeId===employee.id&&row.attendanceDate===day.attendanceDate).map(row=>row.reviewedAt?.toISOString()).filter((value):value is string=>!!value);
+        const correctedAt=[...correctionDates,...(decision?.approvedAt?[decision.approvedAt]:[])].sort().at(-1)??null;
+        // Review annotations reuse the calculator's actual overrides. They never
+        // feed back into the calculation or infer attendance from earnings.
+        const effectiveDay=applyAttendanceDtrEffectiveStatus(applyAttendanceDtrMetricOverride(day,recorded.reviewInputs.dayMetricOverrideRows.find(row=>row.employeeId===employee.id&&row.attendanceDate===day.attendanceDate)),manualStatus);
+        const review:NonNullable<ProvisionalDay["review"]>={
+          eligible:(!employee.generalInfo?.dateHired||day.attendanceDate>=employee.generalInfo.dateHired)&&(!employee.generalInfo?.separationDate||day.attendanceDate<=employee.generalInfo.separationDate),
+          scheduleConfigured:schedule.configured,approvedLeave:day.paidLeaveMinutes>0||day.unpaidLeaveMinutes>0,
+          reviewedNoWork:["Absent","No Logs","Rest Day"].includes(manualStatus??"")||verifiedNoAttendanceEmployees.has(employee.id)||Boolean(decision&&!attendance.lateConflict&&!workDayRecords(decision.records,day.attendanceDate,schedule.shiftWindow).some(record=>record.status==="VALID"&&!record.excluded)),
+          correctedAt,lateMinutes:effectiveDay.lateMinutes,undertimeMinutes:effectiveDay.undertimeMinutes,overtimeMinutes:effectiveDay.overtimeMinutes,
+          overtimeApproved:overtimeApprovals.some(row=>row.employeeId===employee.id&&row.attendanceDate===day.attendanceDate&&row.isApproved),anomalyFlags:flags,
+        };
         const status:ProvisionalDay["status"]=payrollHold?"Held time":day.attendanceDate===today?"In progress":day.attendanceDate>today?"Future":!schedule.configured?"Schedule missing":day.paidLeaveMinutes>0?"Paid leave":flags.some(flag=>/MISSING|INCOMPLETE|ODD|UNPAIRED|PARTIAL/.test(flag))?"Incomplete":day.workedMinutes>0?"Recorded":rest?"Rest day":"No work recorded";
-        return {attendance:attendanceInputForDay(attendanceInputs,employee.id,day.attendanceDate),payrollHold,date:day.attendanceDate,scheduleIn:day.scheduledInTime,scheduleOut:day.scheduledOutTime,scheduleSource:schedule.overrideAssignment?.scheduleDecisionId?"Confirmed period schedule":schedule.source==="WEEKLY_PATTERN"?"Weekly default":schedule.source==="OVERRIDE"?"Dated schedule":"Employee default",isRestDay:rest,scheduledMinutes:day.scheduledMinutes,workedMinutes:day.workedMinutes,regularMinutes:day.regularMinutes,firstIn:day.firstInAt?.toISOString().slice(0,19)??null,lastOut:day.lastOutAt?.toISOString().slice(0,19)??null,punches:day.rawPunches.map(value=>{const raw=logs.find(log=>log.employeeId===employee.id && log.loggedAt.getTime()===value.getTime());return raw?`${raw.logDate} ${raw.logTime.length===5?raw.logTime+":00":raw.logTime} · ${raw.direction}`:`${value.toISOString().slice(0,19).replace("T"," ")} · Punch`;}),status,warnings:[...(payrollHold?["Attendance time is on hold by administrator decision; review held-time decisions, not the punch sequence."]:[]),...flags.filter(flag=>flag!=="NO_LOGS"),...(day.attendanceDate>=today&&approvedDecisionDays.has(`${employee.id}|${day.attendanceDate}`)?["Approved attendance decision retained; no additional work assumed in the forecast."]:[]),...(day.attendanceDate>asOfDate&&day.attendanceDate<today?["After the selected cutoff; included only in the forecast."]:[])]};
+        return {attendance,review,payrollHold,date:day.attendanceDate,scheduleIn:day.scheduledInTime,scheduleOut:day.scheduledOutTime,scheduleSource:schedule.overrideAssignment?.scheduleDecisionId?"Confirmed period schedule":schedule.source==="WEEKLY_PATTERN"?"Weekly default":schedule.source==="OVERRIDE"?"Dated schedule":"Employee default",isRestDay:rest,scheduledMinutes:day.scheduledMinutes,workedMinutes:day.workedMinutes,regularMinutes:day.regularMinutes,firstIn:day.firstInAt?.toISOString().slice(0,19)??null,lastOut:day.lastOutAt?.toISOString().slice(0,19)??null,punches:day.rawPunches.map(value=>{const raw=logs.find(log=>log.employeeId===employee.id && log.loggedAt.getTime()===value.getTime());return raw?`${raw.logDate} ${raw.logTime.length===5?raw.logTime+":00":raw.logTime} · ${raw.direction}`:`${value.toISOString().slice(0,19).replace("T"," ")} · Punch`;}),status,warnings:[...(payrollHold?["Attendance time is on hold by administrator decision; review held-time decisions, not the punch sequence."]:[]),...flags.filter(flag=>flag!=="NO_LOGS"),...(day.attendanceDate>=today&&approvedDecisionDays.has(`${employee.id}|${day.attendanceDate}`)?["Approved attendance decision retained; no additional work assumed in the forecast."]:[]),...(day.attendanceDate>asOfDate&&day.attendanceDate<today?["After the selected cutoff; included only in the forecast."]:[])]};
       });
       const unconfirmedFuture=days.filter(day=>day.date>=today&&!day.isRestDay&&day.scheduleSource!=="Confirmed period schedule");
       if(input.group==="Daily"&&unconfirmedFuture.length)warnings.push(`${unconfirmedFuture.length} future day(s) lack confirmed period schedules and are excluded from the forecast.`);
@@ -181,7 +210,7 @@ export async function loadProvisionalPayroll(raw:ProvisionalPayrollQuery, databa
     }).sort((a,b)=>a.name.localeCompare(b.name));
     const sum=(field:"recorded"|"forecast")=>rows.reduce((total,row)=>{const value=row[field];if(value)for(const key of Object.keys(total) as Array<keyof ProvisionalAmounts>)total[key]=money(total[key]+value[key]);return total;},emptyAmounts());
     const postedRun=runs.find(run=>run.status==="Posted"&&[input.group,"Legacy"].includes(runPayrollGroup(run.inputSnapshot)));
-    const inputRevision=digest({period,input,asOfDate,generatedInputs,calculationInputs:calculator.inputRevisionData,attendanceInputs,logs,corrections,decisions,assignments,patterns,breaks,leaves,departments,employees:visible,salaries:calculator.resolvedSalaryByEmployeeId,manual:calculator.manualPayrollEntryRows,exceptions:calculator.payrollExceptionRows,periodOverrides:calculator.attendancePeriodOverrideRows,statusOverrides:calculator.attendanceDayStatusOverrideRows,typeOverrides:calculator.attendanceDayTypeOverrideRows,rules:calculator.statutoryRules,accountCodes:calculator.allAccountCodes,holidays:calculator.holidays,recorded:recorded.computations,forecast:forecast.computations,paid:calculator.priorPaid.digest,shortfalls:recorded.shortfallLedger.digest,payouts:calculator.payouts});
+    const inputRevision=digest({period,input,asOfDate,generatedInputs,calculationInputs:calculator.inputRevisionData,attendanceInputs,logs,corrections,decisions,overtimeApprovals,noAttendanceDecisions,verifiedNoAttendanceEmployees,assignments,patterns,breaks,leaves,departments,employees:visible,salaries:calculator.resolvedSalaryByEmployeeId,manual:calculator.manualPayrollEntryRows,exceptions:calculator.payrollExceptionRows,periodOverrides:calculator.attendancePeriodOverrideRows,statusOverrides:calculator.attendanceDayStatusOverrideRows,typeOverrides:calculator.attendanceDayTypeOverrideRows,rules:calculator.statutoryRules,accountCodes:calculator.allAccountCodes,holidays:calculator.holidays,recorded:recorded.computations,forecast:forecast.computations,paid:calculator.priorPaid.digest,shortfalls:recorded.shortfallLedger.digest,payouts:calculator.payouts});
     return {period:{id:storedPeriod.id,code:storedPeriod.code,startDate:storedPeriod.startDate,endDate:storedPeriod.endDate,earningMonth:earningMonth(period),status:storedPeriod.status},group:input.group,asOfDate,today,generatedAt:new Date().toISOString(),inputRevision,
       forecastAssumption:"Forecast uses known attendance for completed days and assumes today's and future confirmed working shifts are completed as scheduled. Missed past shifts remain no work. Approved attendance decisions remain unchanged. Hypothetical punches exist only in memory; no attendance records are created. Saved earnings, deductions and prior-payment credits follow the normal payroll rules.",rows,
       totals:{recorded:sum("recorded"),forecast:sum("forecast"),available:rows.filter(row=>row.status==="Available"||row.status==="No work — ₱0").length,unavailable:rows.filter(row=>row.status==="Unavailable").length,notScheduled:rows.filter(row=>!row.scheduledThisHalf).length},

@@ -19,6 +19,18 @@ export type ProvisionalLine = { code: string; description: string; lineType: "Ea
 export type ProvisionalDay = {
   attendance?: AttendanceDayInput;
   payrollHold?: boolean;
+  review?: {
+    eligible: boolean;
+    scheduleConfigured: boolean;
+    approvedLeave: boolean;
+    reviewedNoWork: boolean;
+    correctedAt: string | null;
+    lateMinutes: number;
+    undertimeMinutes: number;
+    overtimeMinutes: number;
+    overtimeApproved: boolean;
+    anomalyFlags: string[];
+  };
   date: string; scheduleIn: string | null; scheduleOut: string | null; scheduleSource: string;
   isRestDay: boolean; scheduledMinutes: number; workedMinutes: number; regularMinutes: number;
   firstIn: string | null; lastOut: string | null; punches: string[];
