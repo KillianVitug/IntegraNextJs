@@ -111,64 +111,38 @@ test.describe("manager legacy browser fallbacks", () => {
   }) => {
     await page.goto("/managerLeaves", { waitUntil: "domcontentloaded" });
 
-    const employeeSelect = page.locator("#balance-employee");
-    if ((await employeeSelect.locator("option").count()) === 0) {
-      test.skip(true, "No employees are available for the manager test user.");
+    const employeeSelect = page.locator("#leave-employee");
+    const leaveTypeSelect = page.locator("#leave-type");
+    if ((await employeeSelect.locator("option").count()) <= 1 || (await leaveTypeSelect.locator("option").count()) <= 1) {
+      test.skip(true, "No employees or leave types are available for the manager test user.");
     }
-
-    const leaveTypeSelect = page.locator("#balance-type");
-    if ((await leaveTypeSelect.locator("option").count()) === 0) {
-      test.skip(true, "No leave types are available.");
-    }
-
-    await expect(page.locator("#balance-start")).toHaveCount(0);
-    await expect(
-      page.locator('form[action="/managerLeaves/request"][method="post"]'),
-    ).toBeVisible();
+    await expect(employeeSelect).toHaveValue("");
+    await expect(leaveTypeSelect).toHaveValue("");
+    await expect(page.locator('input[type="hidden"][name="employeeId"]')).toHaveCount(0);
+    await expect(page.locator('input[type="hidden"][name="leaveType"]')).toHaveCount(0);
+    await expect(page.locator("form").filter({ has: employeeSelect })).toHaveAttribute("method", "POST");
     await expect(page.getByRole("button", { name: /Submit Request/i })).toBeVisible();
-    await expect(page.locator("#leave-employee")).toHaveAttribute("readonly", "");
-    await expect(page.locator("#leave-type")).toHaveAttribute("readonly", "");
-    await expect(page.locator('input[type="hidden"][name="employeeId"]')).toHaveValue(
-      await employeeSelect.inputValue(),
-    );
-    await expect(page.locator('input[type="hidden"][name="leaveType"]')).toHaveValue(
-      await leaveTypeSelect.inputValue(),
-    );
-
-    await employeeSelect.selectOption({ index: 0 });
-    await leaveTypeSelect.selectOption({ index: 0 });
+    await employeeSelect.selectOption({ index: 1 });
+    await leaveTypeSelect.selectOption({ index: 1 });
+    const selectedEmployee = await employeeSelect.inputValue();
+    const selectedType = await leaveTypeSelect.inputValue();
+    await page.locator("#leave-reason").fill("Fictional unsent balance-check context");
     await page.getByRole("button", { name: /Check Balance/i }).click();
-    await expect(page).toHaveURL(/\/managerLeaves\?[^#]*employeeId=/);
-    await expect(page).toHaveURL(/\/managerLeaves\?[^#]*leaveType=/);
-    await expect(page.getByText(/Available Balance/i)).toBeVisible();
-    await expect(page.locator("#leave-employee")).toHaveAttribute("readonly", "");
-    await expect(page.locator("#leave-type")).toHaveAttribute("readonly", "");
-    await expect(page.locator('input[type="hidden"][name="employeeId"]')).toHaveValue(
-      await page.locator("#balance-employee").inputValue(),
-    );
-    await expect(page.locator('input[type="hidden"][name="leaveType"]')).toHaveValue(
-      await page.locator("#balance-type").inputValue(),
-    );
-
+    await expect(page.getByText(/Balance checked for/i)).toBeVisible();
+    await expect(employeeSelect).toHaveValue(selectedEmployee);
+    await expect(leaveTypeSelect).toHaveValue(selectedType);
+    await expect(page.locator("#leave-reason")).toHaveValue("Fictional unsent balance-check context");
+    expect(page.url()).not.toContain("reason=");
     const editLink = page.getByRole("link", { name: /^Edit$/ }).first();
     if (await editLink.isVisible()) {
       await editLink.click();
       await expect(page).toHaveURL(/\/managerLeaves\?[^#]*editLeaveId=/);
-      await expect(page.locator("#leave-employee")).toHaveAttribute("readonly", "");
-      await expect(page.locator("#leave-type")).toHaveAttribute("readonly", "");
-      await expect(page.locator('input[type="hidden"][name="employeeId"]')).not.toHaveValue("");
-      await expect(page.locator('input[type="hidden"][name="leaveType"]')).not.toHaveValue("");
-      await expect(page.locator('input[name="leaveStartDate"]').last()).toHaveValue(
-        /\d{4}-\d{2}-\d{2}/,
-      );
-      await expect(page.locator('textarea[name="reason"]').first()).toBeVisible();
+      await expect(employeeSelect).not.toHaveValue("");
+      await expect(leaveTypeSelect).not.toHaveValue("");
+      await expect(page.locator('input[name="leaveStartDate"]')).toHaveValue(/\d{4}-\d{2}-\d{2}/);
       await expect(page.getByRole("button", { name: /Update Request/i })).toBeVisible();
       await expect(page.getByRole("button", { name: /Cancel Request/i })).toBeVisible();
-      await expect(page.getByRole("link", { name: /Cancel Edit/i })).toHaveAttribute(
-        "href",
-        `/managerLeaves?year=${new Date().getFullYear()}`,
-      );
-      await expect(page.locator('button[formaction="/managerLeaves/request/cancel"]')).toBeVisible();
+      await expect(page.getByRole("link", { name: /Start a new request/i })).toBeVisible();
     }
   });
 

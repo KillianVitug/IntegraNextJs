@@ -15,11 +15,24 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const canonical = (v: unknown): string => Array.isArray(v) ? `[${v.map(canonical).join(",")}]` : v && typeof v === "object" ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`).join(",")}}` : JSON.stringify(v);
 export const resolutionDigest = (value: unknown) => createHash("sha256").update(canonical(value)).digest("hex");
 const enabled = () => { if (process.env.ATTENDANCE_SOURCE_ENABLED !== "true") fail("Attendance connection is disabled."); };
-export async function resolutionPeople(database: DbClient, period: { id: string; startDate: string; endDate: string }, incoming?: SourcePunch[]): Promise<ResolutionPerson[]> {
+export async function resolutionPeople(database: DbClient, period: { id: string; startDate: string; endDate: string }, incoming?: SourcePunch[], employeeScopeIds?: string[]): Promise<ResolutionPerson[]> {
+  // Manager readers must bound source identities before reading evidence. Existing
+  // administrator callers retain their original full-period behavior.
+  if (employeeScopeIds) {
+    if (!employeeScopeIds.length) return [];
+    const scopedLinks = await database.select({ sourceId: mappings.sourceEmployeeId }).from(mappings).where(inArray(mappings.employeeId, employeeScopeIds));
+    const sourceIds = scopedLinks.map(link => link.sourceId);
+    if (!sourceIds.length) return [];
+    const records = incoming?.filter(punch => sourceIds.includes(punch.employeeId)) ?? (await database.select({ payload: events.payload }).from(projections).innerJoin(events, eq(events.eventId, projections.eventId)).where(and(eq(projections.payrollPeriodId, period.id), inArray(events.sourceEmployeeId, sourceIds)))).map(row => row.payload as SourcePunch);
+    return resolutionPeopleForRecords(database, period, records, sourceIds);
+  }
   const records = incoming ?? (await database.select({ payload: events.payload }).from(projections).innerJoin(events, eq(events.eventId, projections.eventId)).where(eq(projections.payrollPeriodId, period.id))).map(r => r.payload as SourcePunch);
-  const links = await database.select({ sourceId: mappings.sourceEmployeeId, employeeId: employees.id, employeeNo: employees.employeeNo, first: employees.firstName, middle: employees.middleName, last: employees.lastName, deleted: employees.deletedAt, changed: sql<string>`${mappings.updatedAt}::text` }).from(mappings).innerJoin(employees, eq(employees.id, mappings.employeeId));
-  const states = await database.select().from(identities);
-  const decisions = await database.select().from(resolutions).where(eq(resolutions.payrollPeriodId, period.id)).orderBy(desc(resolutions.createdAt), desc(resolutions.id));
+  return resolutionPeopleForRecords(database, period, records);
+}
+async function resolutionPeopleForRecords(database: DbClient, period: { id: string; startDate: string; endDate: string }, records: SourcePunch[], sourceIds?: string[]): Promise<ResolutionPerson[]> {
+  const links = await database.select({ sourceId: mappings.sourceEmployeeId, employeeId: employees.id, employeeNo: employees.employeeNo, first: employees.firstName, middle: employees.middleName, last: employees.lastName, deleted: employees.deletedAt, changed: sql<string>`${mappings.updatedAt}::text` }).from(mappings).innerJoin(employees, eq(employees.id, mappings.employeeId)).where(sourceIds ? inArray(mappings.sourceEmployeeId, sourceIds) : undefined);
+  const states = await database.select().from(identities).where(sourceIds ? inArray(identities.sourceEmployeeId, sourceIds) : undefined);
+  const decisions = await database.select().from(resolutions).where(and(eq(resolutions.payrollPeriodId, period.id), sourceIds ? inArray(resolutions.sourceEmployeeId, sourceIds) : undefined)).orderBy(desc(resolutions.createdAt), desc(resolutions.id));
   const scope = periodAttendanceScope(records, period.startDate, period.endDate);
   return [...new Set(records.map(p => p.employeeId))].sort().map(sourceId => {
     const group = records.filter(p => p.employeeId === sourceId).sort(chronological), link = links.find(p => p.sourceId === sourceId && !p.deleted), classification = states.find(s => s.sourceEmployeeId === sourceId);

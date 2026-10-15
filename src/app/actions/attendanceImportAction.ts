@@ -43,6 +43,8 @@ import {
   getManagerDepartmentIds,
   requireManager,
 } from "@/lib/auth/server";
+import { requireManagerAttendanceMutation, requireManagerImportDiagnostics } from "@/lib/auth/manager-attendance-mutations";
+import { attendanceActivityKind } from "@/lib/payroll/attendanceActivity";
 import {
   currentDepartmentMemberStatusCondition,
   isPayrollEligibleEmploymentStatus,
@@ -1151,7 +1153,7 @@ export async function syncManagerDtrPayrollPeriodAction(
   payrollPeriodId: string,
   options: { markStale?: boolean; staleNotes?: string } = {}
 ) {
-  const auth = await requireManager();
+  const auth = await requireManagerAttendanceMutation();
   const scope = await getManagerAttendanceScope(auth.accountId);
 
   if (!payrollPeriodId) {
@@ -2208,22 +2210,20 @@ async function getManagerOwnedDtrImportBatchIds(
 
 function serializeManagerAttendanceBatch(
   batch: typeof attendanceImportBatches.$inferSelect,
-  scopedMatchedRows: number,
-  canViewUnmatchedDiagnostics: boolean
+  scopedMatchedRows: number
 ) {
   return {
     id: batch.id,
     payrollPeriodId: batch.payrollPeriodId,
-    sourceFileName: batch.sourceFileName,
+    // Filenames and notes are unrestricted import/admin text. Keep them in
+    // Admin history rather than returning potential financial text to managers.
+    kind: attendanceActivityKind(batch.sourceFormat, batch.sourceFileName),
     sourceFormat: batch.sourceFormat,
     status: batch.status,
-    totalRows: batch.totalRows,
-    matchedRows: batch.matchedRows,
-    unmatchedRows: batch.unmatchedRows,
-    duplicateRows: batch.duplicateRows,
+    totalRows: scopedMatchedRows,
+    matchedRows: scopedMatchedRows,
     scopedMatchedRows,
-    canViewUnmatchedDiagnostics,
-    notes: batch.notes,
+    canViewUnmatchedDiagnostics: false,
     importedAt: batch.importedAt.toISOString(),
   };
 }
@@ -2373,14 +2373,13 @@ export async function listManagerDtrImportBatchesAction(payrollPeriodId: string)
   return batchRows.map((batch) =>
     serializeManagerAttendanceBatch(
       batch,
-      scopedRowCountByBatchId.get(batch.id) ?? 0,
-      managerOwnedBatchIds.has(batch.id)
+      scopedRowCountByBatchId.get(batch.id) ?? 0
     )
   );
 }
 
 export async function importManagerDtrLogsAction(params: AttendanceImportParams) {
-  const auth = await requireManager();
+  const auth = await requireManagerAttendanceMutation();
   const scope = await getManagerAttendanceScope(auth.accountId);
 
   if (!params.payrollPeriodId) {
@@ -2416,14 +2415,14 @@ export async function importManagerDtrLogsAction(params: AttendanceImportParams)
   );
 
   return batch
-    ? serializeManagerAttendanceBatch(batch, batch.matchedRows, true)
+    ? serializeManagerAttendanceBatch(batch, batch.matchedRows)
     : null;
 }
 
 export async function refreshManagerAttendancePeriodSummariesAction(
   payrollPeriodId: string
 ) {
-  const auth = await requireManager();
+  const auth = await requireManagerAttendanceMutation();
   const scope = await getManagerAttendanceScope(auth.accountId);
 
   if (!payrollPeriodId) {
@@ -2459,7 +2458,7 @@ export async function refreshManagerAttendancePeriodSummariesAction(
 }
 
 export async function markManagerDtrPayrollStaleAction(payrollPeriodId: string) {
-  const auth = await requireManager();
+  const auth = await requireManagerAttendanceMutation();
   const scope = await getManagerAttendanceScope(auth.accountId);
 
   if (!payrollPeriodId) {
@@ -2510,20 +2509,38 @@ export async function getManagerAttendancePeriodDtrAction(payrollPeriodId: strin
 
   return {
     payrollPeriod: serializeAttendancePayrollPeriod(sourceData.payrollPeriod),
-    employees: employeesForView,
+    employees: employeesForView.map((employee) => ({
+      ...employee,
+      rows: employee.rows.map((row) => ({
+        ...row,
+        anomalyFlags: row.anomalyFlags.length ? ["ATTENDANCE_REVIEW_NEEDED"] : [],
+      })),
+      sourceFiles: employee.sourceFiles.map((source) => ({
+        batchId: source.batchId,
+        sourceFileName: "Attendance source",
+        punchCount: source.punchCount,
+      })),
+    })),
   };
 }
 
 export async function getManagerAttendanceDtrHeldRowsAction(periodId: string) {
   const auth = await requireManager({ redirectTo: "/" });
   const scope = await getManagerAttendanceScope(auth.accountId);
-  return loadAttendanceDtrHeldRows(periodId, scope.employeeIds);
+  const result = await loadAttendanceDtrHeldRows(periodId, scope.employeeIds);
+  return {
+    ...result,
+    rows: result.rows.map((row) => ({
+      ...row,
+      anomalyFlags: row.anomalyFlags.length ? ["ATTENDANCE_REVIEW_NEEDED"] : [],
+    })),
+  };
 }
 
 export async function getManagerAttendanceImportBatchUnmatchedDiagnosticsAction(
   batchId: string
 ): Promise<AttendanceImportBatchDiagnosticsView> {
-  const auth = await requireManager({ redirectTo: "/" });
+  const auth = await requireManagerImportDiagnostics();
   const scope = await getManagerAttendanceScope(auth.accountId);
   const batch = await db.query.attendanceImportBatches.findFirst({
     where: eq(attendanceImportBatches.id, batchId),
@@ -2572,7 +2589,7 @@ export async function getManagerAttendanceImportBatchUnmatchedDiagnosticsAction(
 }
 
 export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
-  const auth = await requireManager();
+  const auth = await requireManagerAttendanceMutation();
   const parsed = attendanceDtrHoldApprovalSchema.parse(input);
   const attendanceDates = [...new Set(parsed.attendanceDates)].sort((left, right) =>
     left.localeCompare(right)
@@ -2839,7 +2856,7 @@ export async function submitManagerAttendanceDtrHoldRowsAction(input: unknown) {
 export async function saveManagerAttendanceDtrDayMetricOverrideAction(
   input: unknown
 ) {
-  const auth = await requireManager();
+  const auth = await requireManagerAttendanceMutation();
   const parsed = managerAttendanceDtrDayMetricOverrideSchema.parse(input);
   const scope = await getManagerAttendanceScope(auth.accountId);
 
@@ -3371,7 +3388,7 @@ export async function revertAttendanceImportBatchAction(batchId: string) {
 }
 
 export async function revertManagerDtrImportBatchAction(batchId: string) {
-  const auth = await requireManager();
+  const auth = await requireManagerAttendanceMutation();
   const scope = await getManagerAttendanceScope(auth.accountId);
 
   if (scope.employeeIds.length === 0) {
@@ -4923,6 +4940,8 @@ export async function refreshGeneratedDtrRowsForBranchCalendarAccountCodeOverrid
   attendanceDate: string;
   departmentId?: number | null;
 }) {
+  const actor = await requireAdminActor();
+  if (args.actorUserId !== actor.userId) throw new Error("Forbidden.");
   const refreshTasks: Array<{
     payrollPeriodId: string;
     employeeIds: string[];
@@ -5028,6 +5047,8 @@ export async function refreshGeneratedDtrRowsForHolidayCalendarChange(args: {
   startDate: string;
   endDate: string;
 }) {
+  const actor = await requireAdminActor();
+  if (args.actorUserId !== actor.userId) throw new Error("Forbidden.");
   const refreshTasks: Array<{
     payrollPeriodId: string;
     employeeIds: string[];
