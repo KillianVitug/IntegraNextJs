@@ -67,6 +67,20 @@ export type ScheduleDayRepair = {
 export type ScheduleWeeklyCommand = {
   requestId: string; departmentId: number; sourceDigest: string; effectiveFrom: string; effectiveTo: string | null;
   employeeIds: string[]; days: Array<{ weekday: ScheduleWeekday; value: string }>;
+  reuseFromDate?: string; previewDigest?: string;
+};
+export type ScheduleWeeklyPreviewInput = Omit<ScheduleWeeklyCommand, "requestId" | "previewDigest">;
+export type ScheduleWeeklyPreview = {
+  sourceDigest: string; previewDigest: string; reuseFromDate?: string; canSave: boolean; blockers: string[];
+  employees: Array<{
+    employeeId: string; name: string; sourcePatternId: number | null; sourceEffectiveFrom: string | null;
+    effectiveFrom: string; effectiveTo: string | null;
+    days: Array<{ weekday: ScheduleWeekday; snapshot: ScheduleSnapshot; label: string }>;
+    changedDays: number | null; retainedAssignments: Array<{ from: string; to: string | null; kind: "confirmed" | "dated" }>;
+    blockers: string[];
+  }>;
+  /** Known refresh/protection targets, including overnight neighbors; not an unlimited-range day count. */
+  affectedEmployeeDays: number; payrollMayChange: boolean;
 };
 export type ScheduleArchiveCommand = { requestId: string; departmentId: number; sourceDigest: string; employeeId: string; patternId: number; endDate: string };
 export type ScheduleReceipt = { requestId: string; action: "draft_saved" | "confirmed" | "days_confirmed" | "draft_deleted" | "weekly_saved" | "weekly_archived" | "schedule_requested"; message: string; changedCount: number; draftRevision?: number; affectedTargets?: Array<{employeeId:string;day:string}>; affectedPeriodIds?: string[]; summariesRebuilt?: number;
@@ -76,6 +90,7 @@ export type ScheduleReceipt = { requestId: string; action: "draft_saved" | "conf
   note?: string;
   linkedEmployees?: Array<{employeeId:string;day:string}>;
   actorRole?: "ADMIN" | "MANAGER";
+  selectedEmployeeIds?: string[];
 };
 export type ScheduleActionResult = { ok: true; receipt: ScheduleReceipt } | { ok: false; error: string; uncertain?: boolean };
 
