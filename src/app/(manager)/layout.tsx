@@ -7,10 +7,11 @@ import { ManagerMobileNav } from "./ManagerMobileNav";
 
 const sidebarItems: SidebarItem[] = [
   { label: "Dashboard", href: "/managerHome", icon: "home" },
-  { label: "Calendar", href: "/managerCalendar", icon: "calendar" },
-  { label: "Leave Requests", href: "/managerLeaves", icon: "calendar" },
+  { label: "Attendance", href: "/managerDtrFiles", icon: "file" },
   { label: "Schedules", href: "/schedules", icon: "file" },
-  { label: "DTR Files", href: "/managerDtrFiles", icon: "file" },
+  { label: "Leave Requests", href: "/managerLeaves", icon: "calendar" },
+  { label: "Provisional Payroll", href: "/managerProvisional", icon: "file" },
+  { label: "Calendar", href: "/managerCalendar", icon: "calendar" },
 ];
 
 export default async function ManagerLayout({ children }: { children: ReactNode }) {

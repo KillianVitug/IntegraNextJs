@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { and, asc, desc, eq, gte, inArray, isNull, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { describeResolvedSchedule } from "@/lib/scheduling/resolved-presentation";
 import type { ScheduleSnapshot } from "@/lib/scheduling/workspace-types";
@@ -28,7 +28,6 @@ import {
 } from "@/lib/auth/server";
 import { currentDepartmentMemberStatusCondition } from "@/lib/employmentStatus";
 import {
-  ensureDefaultLeaveTypes,
   getEmployeeLeaveBalanceSummary,
   getLeaveTypeByCode,
   replaceLeaveRecordDayDetails,
@@ -50,12 +49,6 @@ import { leaveFormSchema } from "@/zod-schemas/SickandLeaveSchema";
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
 
-const managerLeaveMutationSchema = leaveFormSchema.omit({
-  leaveStatus: true,
-}).extend({
-  id: z.coerce.number().int().positive().optional(),
-});
-
 const dateKeySchema = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD date format.")
@@ -70,6 +63,18 @@ const dateKeySchema = z
         )}-${String(date.getDate()).padStart(2, "0")}`
     );
   }, "Select a valid date.");
+
+const managerLeaveMutationSchema = leaveFormSchema.omit({
+  leaveStatus: true,
+}).extend({
+  id: z.coerce.number().int().positive().optional(),
+  dateFiled: dateKeySchema,
+  leaveStartDate: dateKeySchema,
+  leaveEndDate: dateKeySchema.optional().nullable().or(z.literal("")),
+  reason: z.string().trim().min(1, "Enter a reason for the request.").max(4000),
+}).refine((value) => !value.leaveEndDate || value.leaveEndDate >= value.leaveStartDate, {
+  message: "Leave end must be on or after leave start.", path: ["leaveEndDate"],
+});
 
 const managerScheduleRequestPayloadSchema =
   upsertEmployeeShiftAssignmentSchema.extend({
@@ -242,9 +247,7 @@ function selectPayrollPeriodId<
 }
 
 async function requireExistingLeaveType(code: string, database: DbLike = db) {
-  await ensureDefaultLeaveTypes();
-
-  const leaveType = await getLeaveTypeByCode(code.trim(), database);
+  const leaveType = await getLeaveTypeByCode(code.trim(), database, { initializeDefaults: false });
   if (!leaveType) {
     throw new Error("Selected leave type was not found.");
   }
@@ -639,6 +642,7 @@ export async function getManagerLeaveRecordsByYear(year: number) {
       dayPart: employeeLeaveRecordDays.dayPart,
       reason: employeesLeaveRecords.reason,
       leaveStatus: employeesLeaveRecords.leaveStatus,
+      canEdit: sql<boolean>`exists (select 1 from ${employeeLeaveApprovalEvents} where ${employeeLeaveApprovalEvents.leaveRecordId} = ${employeesLeaveRecords.id} and ${employeeLeaveApprovalEvents.action} = 'Submitted' and ${employeeLeaveApprovalEvents.actorUserId} = ${auth.accountId})`,
       employeeNo: employees.employeeNo,
       employeeType: employees.employeeType,
       firstName: employees.firstName,
@@ -658,6 +662,7 @@ export async function getManagerLeaveRecordsByYear(year: number) {
     .where(
       and(
         isNull(employees.deletedAt),
+        isNull(employeesLeaveRecords.deletedAt),
         isNull(employeesGeneralInfo.deletedAt),
         currentDepartmentMemberStatusCondition(),
         inArray(employeesGeneralInfo.departmentId, departmentIds),
@@ -695,7 +700,8 @@ export async function getManagerLeaveBalanceSummary(
       employeeId,
     });
 
-    const summary = await getEmployeeLeaveBalanceSummary(employeeId, year);
+    z.coerce.number().int().min(1900).max(2100).parse(year);
+    const summary = await getEmployeeLeaveBalanceSummary(employeeId, year, db, { initializeDefaults: false });
     return { data: summary, error: null };
   } catch (error) {
     console.error("Error fetching manager leave balance summary:", error);
@@ -718,8 +724,29 @@ export async function createManagerLeaveRecord(input: unknown) {
   });
 
   const record = await db.transaction(async (tx) => {
+    // Serialize identical retries before checking the existing pending request.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`manager-leave:${auth.accountId}:${payload.employeeId}`}))`);
+    await assertManagerCanAccessEmployee({ accountId: auth.accountId, employeeId: payload.employeeId, database: tx });
     const leaveType = await requireExistingLeaveType(payload.leaveType, tx);
     const leaveEndDate = normalizeLeaveEndDate(payload.leaveEndDate);
+    const [duplicate] = await tx.select({ record: employeesLeaveRecords })
+      .from(employeesLeaveRecords)
+      .innerJoin(employeeLeaveApprovalEvents, eq(employeeLeaveApprovalEvents.leaveRecordId, employeesLeaveRecords.id))
+      .innerJoin(employeeLeaveRecordDays, eq(employeeLeaveRecordDays.leaveRecordId, employeesLeaveRecords.id))
+      .where(and(
+        eq(employeesLeaveRecords.employeeId, payload.employeeId),
+        eq(employeesLeaveRecords.dateFiled, payload.dateFiled),
+        eq(employeesLeaveRecords.leaveStartDate, payload.leaveStartDate),
+        leaveEndDate ? eq(employeesLeaveRecords.leaveEndDate, leaveEndDate) : isNull(employeesLeaveRecords.leaveEndDate),
+        eq(employeesLeaveRecords.leaveType, leaveType.code),
+        eq(employeesLeaveRecords.reason, payload.reason),
+        eq(employeesLeaveRecords.leaveStatus, "Pending"),
+        isNull(employeesLeaveRecords.deletedAt),
+        eq(employeeLeaveRecordDays.dayPart, payload.dayPart),
+        eq(employeeLeaveApprovalEvents.action, "Submitted"),
+        eq(employeeLeaveApprovalEvents.actorUserId, auth.accountId),
+      )).limit(1);
+    if (duplicate) return duplicate.record;
     await assertNoApprovedLeaveDateConflict({
       employeeId: payload.employeeId,
       startDate: payload.leaveStartDate,
@@ -750,6 +777,7 @@ export async function createManagerLeaveRecord(input: unknown) {
       leaveTypeId: leaveType.id,
       dayPart: payload.dayPart ?? "FullDay",
       chargeRestDays: true,
+      initializeDefaults: false,
       database: tx,
     });
 
@@ -761,7 +789,7 @@ export async function createManagerLeaveRecord(input: unknown) {
       newStatus: "Pending",
     });
 
-    return createdRecord;
+    return (await tx.query.employeesLeaveRecords.findFirst({ where: eq(employeesLeaveRecords.id, createdRecord.id) }))!;
   });
 
   revalidatePath("/managerLeaves");
@@ -771,7 +799,8 @@ export async function createManagerLeaveRecord(input: unknown) {
 
 export async function updateManagerLeaveRecord(input: unknown) {
   const auth = await requireManager();
-  const payload = managerLeaveMutationSchema.required({ id: true }).parse(input);
+  const payload = managerLeaveMutationSchema.parse(input);
+  const recordId = z.coerce.number().int().positive().parse(payload.id);
 
   await assertManagerCanAccessEmployee({
     accountId: auth.accountId,
@@ -779,13 +808,15 @@ export async function updateManagerLeaveRecord(input: unknown) {
   });
 
   const record = await db.transaction(async (tx) => {
-    const existing = await tx.query.employeesLeaveRecords.findFirst({
-      where: eq(employeesLeaveRecords.id, payload.id),
-    });
+    const [existing] = await tx.select().from(employeesLeaveRecords)
+      .where(and(eq(employeesLeaveRecords.id, recordId), isNull(employeesLeaveRecords.deletedAt))).for("update");
 
     if (!existing || existing.leaveStatus !== "Pending") {
       throw new Error("Only pending leave requests can be updated.");
     }
+
+    await assertManagerCanAccessEmployee({ accountId: auth.accountId, employeeId: existing.employeeId, database: tx });
+    await assertManagerCanAccessEmployee({ accountId: auth.accountId, employeeId: payload.employeeId, database: tx });
 
     await assertManagerSubmittedLeave({
       managerAccountId: auth.accountId,
@@ -814,7 +845,7 @@ export async function updateManagerLeaveRecord(input: unknown) {
         reason: payload.reason,
         updatedAt: new Date(),
       })
-      .where(eq(employeesLeaveRecords.id, payload.id))
+      .where(and(eq(employeesLeaveRecords.id, recordId), eq(employeesLeaveRecords.leaveStatus, "Pending")))
       .returning();
 
     await replaceLeaveRecordDayDetails({
@@ -825,6 +856,7 @@ export async function updateManagerLeaveRecord(input: unknown) {
       leaveTypeId: leaveType.id,
       dayPart: payload.dayPart ?? "FullDay",
       chargeRestDays: true,
+      initializeDefaults: false,
       database: tx,
     });
 
@@ -836,7 +868,7 @@ export async function updateManagerLeaveRecord(input: unknown) {
       newStatus: "Pending",
     });
 
-    return updatedRecord;
+    return (await tx.query.employeesLeaveRecords.findFirst({ where: eq(employeesLeaveRecords.id, updatedRecord.id) }))!;
   });
 
   revalidatePath("/managerLeaves");
@@ -846,11 +878,11 @@ export async function updateManagerLeaveRecord(input: unknown) {
 
 export async function cancelManagerLeaveRecord(id: number) {
   const auth = await requireManager();
+  z.number().int().positive().parse(id);
 
   await db.transaction(async (tx) => {
-    const existing = await tx.query.employeesLeaveRecords.findFirst({
-      where: eq(employeesLeaveRecords.id, id),
-    });
+    const [existing] = await tx.select().from(employeesLeaveRecords)
+      .where(and(eq(employeesLeaveRecords.id, id), isNull(employeesLeaveRecords.deletedAt))).for("update");
 
     if (!existing || existing.leaveStatus !== "Pending") {
       throw new Error("Only pending leave requests can be cancelled.");
@@ -870,7 +902,7 @@ export async function cancelManagerLeaveRecord(id: number) {
     await tx
       .update(employeesLeaveRecords)
       .set({ leaveStatus: "Cancelled", updatedAt: new Date() })
-      .where(eq(employeesLeaveRecords.id, id));
+      .where(and(eq(employeesLeaveRecords.id, id), eq(employeesLeaveRecords.leaveStatus, "Pending")));
 
     await tx.insert(employeeLeaveApprovalEvents).values({
       leaveRecordId: id,

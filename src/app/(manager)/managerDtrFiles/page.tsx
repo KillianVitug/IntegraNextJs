@@ -8,7 +8,7 @@ import { PageHeader } from "@/components/layout/page-layout";
 import { ManagerDtrFilesClient } from "./ManagerDtrFilesClient";
 
 export const metadata = {
-  title: "Manager DTR Files",
+  title: "Manager Attendance",
 };
 
 function readYear(value: string | undefined, fallback: number) {
@@ -18,11 +18,6 @@ function readYear(value: string | undefined, fallback: number) {
     : fallback;
 }
 
-function readCount(value: string | undefined) {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
-}
-
 export default async function ManagerDtrFilesPage({
   searchParams,
 }: {
@@ -30,24 +25,6 @@ export default async function ManagerDtrFilesPage({
     year?: string;
     periodId?: string;
     employeeId?: string;
-    importStatus?: string;
-    imported?: string;
-    denied?: string;
-    unmatched?: string;
-    refreshStatus?: string;
-    summaries?: string;
-    removeStatus?: string;
-    removedLogs?: string;
-    removedSummaries?: string;
-    holdRefreshed?: string;
-    holdDeleted?: string;
-    holdOverridesCleared?: string;
-    holdEditEmployeeId?: string;
-    holdStatus?: string;
-    holdMessage?: string;
-    payrollRecomputeStatus?: string;
-    payrollRunNumber?: string;
-    payrollRecomputeMessage?: string;
   }>;
 }) {
   const params = await searchParams;
@@ -71,8 +48,8 @@ export default async function ManagerDtrFilesPage({
   return (
     <div className="space-y-4">
       <PageHeader
-        title="DTR Files"
-        description="Import branch DTR files and review read-only attendance summaries for your assigned departments."
+        title="Attendance"
+        description="Review attendance evidence for employees in your assigned departments."
       />
 
       <ManagerDtrFilesClient
@@ -84,24 +61,6 @@ export default async function ManagerDtrFilesPage({
         dtr={dtr}
         heldRows={heldRows}
         employeeId={employeeId}
-        importStatus={params.importStatus}
-        imported={readCount(params.imported)}
-        denied={readCount(params.denied)}
-        unmatched={readCount(params.unmatched)}
-        refreshStatus={params.refreshStatus}
-        summaries={readCount(params.summaries)}
-        removeStatus={params.removeStatus}
-        removedLogs={readCount(params.removedLogs)}
-        removedSummaries={readCount(params.removedSummaries)}
-        holdRefreshed={readCount(params.holdRefreshed)}
-        holdDeleted={readCount(params.holdDeleted)}
-        holdOverridesCleared={readCount(params.holdOverridesCleared)}
-        holdEditEmployeeId={params.holdEditEmployeeId?.trim() || ""}
-        holdStatus={params.holdStatus}
-        holdMessage={params.holdMessage}
-        payrollRecomputeStatus={params.payrollRecomputeStatus}
-        payrollRunNumber={readCount(params.payrollRunNumber)}
-        payrollRecomputeMessage={params.payrollRecomputeMessage}
       />
     </div>
   );

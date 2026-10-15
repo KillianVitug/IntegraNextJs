@@ -183,9 +183,10 @@ export async function ensureDefaultLeaveTypes() {
 
 export async function getLeaveTypeByCode(
   code: string,
-  database: DatabaseLike = db
+  database: DatabaseLike = db,
+  options: { initializeDefaults?: boolean } = {}
 ) {
-  await ensureDefaultLeaveTypes();
+  if (options.initializeDefaults !== false) await ensureDefaultLeaveTypes();
 
   return database.query.leaveTypes.findFirst({
     where: eq(leaveTypes.code, code.trim()),
@@ -251,13 +252,18 @@ export function resolveLeavePayStatus(
 
 export async function getLeavePolicyForType(
   leaveTypeId: number,
-  database: DatabaseLike = db
+  database: DatabaseLike = db,
+  options: { initializeDefaults?: boolean } = {}
 ): Promise<LeavePolicyRecord> {
-  await ensureDefaultLeaveTypes();
+  if (options.initializeDefaults !== false) await ensureDefaultLeaveTypes();
 
   let policy = await database.query.leavePolicies.findFirst({
     where: eq(leavePolicies.leaveTypeId, leaveTypeId),
   });
+
+  if (!policy && options.initializeDefaults === false) {
+    throw new Error("Leave policy is not configured. Ask HR to review this leave type.");
+  }
 
   if (!policy) {
     const [createdPolicy] = await database
@@ -335,9 +341,10 @@ async function loadSlvlEntitlements(
 export async function getEmployeeLeaveBalanceSummary(
   employeeId: string,
   year: number,
-  database: DatabaseLike = db
+  database: DatabaseLike = db,
+  options: { initializeDefaults?: boolean } = {}
 ): Promise<LeaveBalanceSummaryItem[]> {
-  await ensureDefaultLeaveTypes();
+  if (options.initializeDefaults !== false) await ensureDefaultLeaveTypes();
 
   const [typeRows, ledgerRows, slvlEntitlements] = await Promise.all([
     database.select().from(leaveTypes).orderBy(asc(leaveTypes.code)),
@@ -549,11 +556,14 @@ export async function replaceLeaveRecordDayDetails(args: {
   dayPart?: LeaveDayPart | null;
   leaveTypeId?: number | null;
   chargeRestDays?: boolean;
+  initializeDefaults?: boolean;
   database?: DatabaseLike;
 }) {
   const database = args.database ?? db;
   const policy = args.leaveTypeId
-    ? await getLeavePolicyForType(args.leaveTypeId, database)
+    ? await getLeavePolicyForType(args.leaveTypeId, database, {
+        initializeDefaults: args.initializeDefaults,
+      })
     : null;
   const details = await buildLeaveDayDetails({
     employeeId: args.employeeId,

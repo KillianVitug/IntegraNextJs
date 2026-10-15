@@ -1,101 +1,45 @@
 "use server";
 
-import { redirect } from "next/navigation";
 import {
-  cancelManagerLeaveRecord,
-  createManagerLeaveRecord,
-  updateManagerLeaveRecord,
+  cancelManagerLeaveRecord, createManagerLeaveRecord, getManagerLeaveBalanceSummary, updateManagerLeaveRecord,
 } from "@/app/actions/managerAction";
+import { z } from "zod";
+import { leaveFormPayload, readLeaveFormValues, safeLeaveError, type LeaveFormState } from "./form-state";
 
-function text(formData: FormData, name: string) {
-  return String(formData.get(name) ?? "").trim();
-}
-
-function currentYear(formData: FormData) {
-  const year = Number(text(formData, "year"));
-  return Number.isInteger(year) && year >= 1900 && year <= 2100
-    ? year
-    : new Date().getFullYear();
-}
-
-function estimateDays(startDate: string, endDate: string) {
-  if (!startDate) return 1;
-  const start = new Date(`${startDate}T00:00:00`);
-  const end = endDate ? new Date(`${endDate}T00:00:00`) : start;
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 1;
-
-  const diff = Math.floor((end.getTime() - start.getTime()) / 86_400_000) + 1;
-  return diff > 0 ? diff : 1;
-}
-
-function managerLeavesRedirect(args: {
-  year: number;
-  status?: string;
-  error?: unknown;
-}) {
-  const params = new URLSearchParams({ year: String(args.year) });
-  if (args.status) params.set("status", args.status);
-  if (args.error) {
-    params.set(
-      "error",
-      args.error instanceof Error ? args.error.message : "Unable to save request.",
-    );
-  }
-
-  redirect(`/managerLeaves?${params.toString()}`);
-}
-
-function buildLeavePayload(formData: FormData) {
-  const leaveStartDate = text(formData, "leaveStartDate");
-  const leaveEndDate = text(formData, "leaveEndDate");
-
-  return {
-    employeeId: text(formData, "employeeId"),
-    dateFiled: text(formData, "dateFiled"),
-    leaveStartDate,
-    leaveEndDate,
-    leaveType: text(formData, "leaveType"),
-    noOfDays: estimateDays(leaveStartDate, leaveEndDate),
-    dayPart: "FullDay" as const,
-    reason: text(formData, "reason"),
-  };
-}
-
-export async function createManagerLeaveRecordFromForm(formData: FormData) {
-  const year = currentYear(formData);
-
+export async function submitManagerLeaveForm(previous: LeaveFormState, formData: FormData): Promise<LeaveFormState> {
+  const values = readLeaveFormValues(formData);
+  const state: LeaveFormState = { values, revision: previous.revision + 1 };
   try {
-    await createManagerLeaveRecord(buildLeavePayload(formData));
+    const intent = String(formData.get("intent") ?? "save");
+    if (intent === "balance") {
+      z.string().uuid("Select an employee.").parse(values.employeeId);
+      z.string().min(1, "Select a leave type.").parse(values.leaveType);
+      const year = Number(values.leaveStartDate.slice(0, 4));
+      z.number().int().min(1900).max(2100).parse(year);
+      const result = await getManagerLeaveBalanceSummary(values.employeeId, year);
+      if (result.error) throw new Error(result.error);
+      const selected = result.data?.find((item) => item.code === values.leaveType);
+      if (!selected) throw new Error("Selected leave type was not found.");
+      return { ...state, balance: { employeeId: values.employeeId, leaveType: values.leaveType, year, days: selected.balance, requiresBalance: selected.requiresBalance } };
+    }
+    if (intent === "cancel") {
+      await cancelManagerLeaveRecord(z.coerce.number().int().positive().parse(values.id));
+      return { ...state, message: `Request #${values.id} cancelled.`, values: { ...values, id: "" } };
+    }
+    const payload = leaveFormPayload(values);
+    const result = values.id
+      ? await updateManagerLeaveRecord({ ...payload, id: values.id })
+      : await createManagerLeaveRecord(payload);
+    if (result.error || !result.data) throw new Error(result.error ?? "Save was not confirmed.");
+    const saved = result.data;
+    return {
+      ...state,
+      values: { ...values, id: String(saved.id), employeeId: saved.employeeId, leaveType: saved.leaveType,
+        dateFiled: saved.dateFiled, leaveStartDate: saved.leaveStartDate ?? saved.dateFiled,
+        leaveEndDate: saved.leaveEndDate ?? "", reason: saved.reason ?? "" },
+      message: `Request #${saved.id} saved — ${saved.leaveStatus}. ${Number(saved.noOfDays)} day(s). This is a request for HR review, not an approval.`,
+    };
   } catch (error) {
-    managerLeavesRedirect({ year, error });
+    return { ...state, error: safeLeaveError(error) };
   }
-
-  managerLeavesRedirect({ year, status: "created" });
-}
-
-export async function updateManagerLeaveRecordFromForm(formData: FormData) {
-  const year = currentYear(formData);
-
-  try {
-    await updateManagerLeaveRecord({
-      ...buildLeavePayload(formData),
-      id: text(formData, "id"),
-    });
-  } catch (error) {
-    managerLeavesRedirect({ year, error });
-  }
-
-  managerLeavesRedirect({ year, status: "updated" });
-}
-
-export async function cancelManagerLeaveRecordFromForm(formData: FormData) {
-  const year = currentYear(formData);
-
-  try {
-    await cancelManagerLeaveRecord(Number(text(formData, "id")));
-  } catch (error) {
-    managerLeavesRedirect({ year, error });
-  }
-
-  managerLeavesRedirect({ year, status: "cancelled" });
 }

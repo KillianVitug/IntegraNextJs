@@ -3,20 +3,20 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  Calendar,
   FileText,
   LayoutDashboardIcon,
   ListChecks,
-  Upload,
+  ClipboardList,
+  Clock3,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const managerNavItems = [
   { label: "Home", href: "/managerHome", icon: LayoutDashboardIcon },
-  { label: "Calendar", href: "/managerCalendar", icon: Calendar },
-  { label: "Leaves", href: "/managerLeaves", icon: ListChecks },
+  { label: "Attendance", href: "/managerDtrFiles", icon: Clock3 },
   { label: "Schedules", href: "/schedules", icon: FileText },
-  { label: "DTR", href: "/managerDtrFiles", icon: Upload },
+  { label: "Leaves", href: "/managerLeaves", icon: ListChecks },
+  { label: "Payroll", href: "/managerProvisional", icon: ClipboardList },
 ];
 
 export function ManagerMobileNav() {
@@ -39,7 +39,7 @@ export function ManagerMobileNav() {
               href={item.href}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "flex min-h-12 flex-col items-center justify-center gap-1 rounded-md px-1 text-[11px] font-medium text-muted-foreground transition-colors",
+                "flex min-h-12 flex-col items-center justify-center gap-1 rounded-md px-0.5 text-[10px] min-[360px]:text-[11px] font-medium text-muted-foreground transition-colors",
                 active && "bg-primary text-primary-foreground",
               )}
             >
