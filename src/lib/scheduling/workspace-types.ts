@@ -4,6 +4,8 @@ export const scheduleWeekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "
 export type ScheduleWeekday = (typeof scheduleWeekdays)[number];
 export type ScheduleSnapshot = {
   kind: "shift" | "rest" | "unconfigured";
+  /** Working a designated rest day keeps its classification and applicable premiums. */
+  designatedRestDay?: boolean;
   shiftTableId: number | null;
   shiftName: string;
   shiftCode: string | null;
@@ -54,6 +56,7 @@ export type ScheduleWorkspaceQuery = { departmentId?: number; periodId?: string;
 export type SchedulePeriodCommand = {
   requestId: string; departmentId: number; periodId: string; sourceDigest: string; expectedDraftRevision: number | null; expectedDraftId: string | null;
   changes: Array<{ employeeId: string; day: string; value: string; customTimes?: { start: string; end: string } }>;
+  note?: string;
 };
 export type ScheduleDayRepair = {
   departmentId: number; periodId: string; sourceDigest: string;
@@ -66,5 +69,37 @@ export type ScheduleWeeklyCommand = {
   employeeIds: string[]; days: Array<{ weekday: ScheduleWeekday; value: string }>;
 };
 export type ScheduleArchiveCommand = { requestId: string; departmentId: number; sourceDigest: string; employeeId: string; patternId: number; endDate: string };
-export type ScheduleReceipt = { requestId: string; action: "draft_saved" | "confirmed" | "days_confirmed" | "draft_deleted" | "weekly_saved" | "weekly_archived"; message: string; changedCount: number; draftRevision?: number; affectedTargets?: Array<{employeeId:string;day:string}>; affectedPeriodIds?: string[]; summariesRebuilt?: number };
-export type ScheduleActionResult = { ok: true; receipt: ScheduleReceipt } | { ok: false; error: string };
+export type ScheduleReceipt = { requestId: string; action: "draft_saved" | "confirmed" | "days_confirmed" | "draft_deleted" | "weekly_saved" | "weekly_archived" | "schedule_requested"; message: string; changedCount: number; draftRevision?: number; affectedTargets?: Array<{employeeId:string;day:string}>; affectedPeriodIds?: string[]; summariesRebuilt?: number;
+  outcome?: "applied" | "pending-review" | "approved" | "denied" | "cancelled";
+  reviewRequestId?: string;
+  operation?: ScheduleOperationKind;
+  note?: string;
+  linkedEmployees?: Array<{employeeId:string;day:string}>;
+  actorRole?: "ADMIN" | "MANAGER";
+};
+export type ScheduleActionResult = { ok: true; receipt: ScheduleReceipt } | { ok: false; error: string; uncertain?: boolean };
+
+export type ScheduleOperationKind = "adjust" | "cover" | "swap";
+export type ScheduleDayOperationCommand = Omit<SchedulePeriodCommand, "changes"> & {
+  employeeId: string; day: string; operation: ScheduleOperationKind;
+  replacementEmployeeId?: string; value?: string; customTimes?: {start:string;end:string};
+};
+export type SchedulePendingOperation = {
+  version: 1; kind: ScheduleOperationKind; primaryEmployeeId: string; day: string;
+  departmentId: number; periodId: string; note?: string;
+  cells: Array<{ employeeId:string; day:string; before:ScheduleSnapshot; after:ScheduleSnapshot; defaultSnapshot:ScheduleSnapshot }>;
+  linkedEmployees: Array<{employeeId:string;day:string}>;
+  requestReasons: string[]; requiresRestReview: boolean;
+};
+export type ScheduleDayHistoryEntry = {
+  id:string; requestId:string; day:string; createdAt:string; actorName:string; actorRole:string;
+  before:ScheduleSnapshot; after:ScheduleSnapshot; operation:ScheduleOperationKind;
+  /** Only this authenticated actor's bounded schedule note may be returned. */
+  note?:string; linkedEmployees:Array<{employeeId:string;day:string}>;
+};
+export type ScheduleDayHistoryPage = { entries:ScheduleDayHistoryEntry[]; nextCursor:string|null;
+  requests:Array<{id:string;operation:ScheduleOperationKind;status:"Pending"|"Approved"|"Denied"|"Cancelled"|"Voided";createdAt:string;decidedAt:string|null;reasons:string[];canCancel:boolean}> };
+export type ScheduleDayOperations = ScheduleDayRepair & {
+  candidates:Array<{employeeId:string;employeeNo:string;name:string;day:string;snapshot:ScheduleSnapshot;label:string;restrictions:string[];requiresReview:boolean;reviewReasons:string[]}>;
+  reviewRequired:boolean; restrictions:string[]; reviewReasons:string[]; history:ScheduleDayHistoryPage;
+};

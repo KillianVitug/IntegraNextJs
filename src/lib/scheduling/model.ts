@@ -1,3 +1,4 @@
+import { PayrollValidationError } from "@/lib/payroll/validation";
 import type { ScheduleSnapshot, ScheduleCell } from "./workspace-types";
 import { describeSchedule } from "./presentation";
 
@@ -5,7 +6,7 @@ export function scheduleDateRange(from: string, to: string) {
   const days: string[] = [];
   for (const date = new Date(`${from}T12:00:00Z`); date.toISOString().slice(0, 10) <= to; date.setUTCDate(date.getUTCDate() + 1)) {
     days.push(date.toISOString().slice(0, 10));
-    if (days.length > 366) throw new Error("Choose a schedule range of at most one year.");
+    if (days.length > 366) throw new PayrollValidationError("Choose a schedule range of at most one year.");
   }
   return days;
 }
@@ -25,12 +26,19 @@ function stableValue(value: unknown): unknown {
   return value;
 }
 export function sameSchedule(left: ScheduleSnapshot, right: ScheduleSnapshot) { return JSON.stringify(stableValue(left)) === JSON.stringify(stableValue(right)); }
+export function retainRestDesignation(before: ScheduleSnapshot, after: ScheduleSnapshot): ScheduleSnapshot {
+  const next=structuredClone(after);
+  delete next.designatedRestDay;
+  // Classification belongs to this employee and survives an intermediate unconfigured state.
+  if(before.kind === "rest" || before.designatedRestDay)next.designatedRestDay=true;
+  return next;
+}
 export function withDateScheduleTimes(base: ScheduleSnapshot, times: {start:string;end:string}): ScheduleSnapshot {
-  if(base.kind!=="shift")throw new Error("Choose a working shift before adjusting its times. Rest and unconfigured days have no working times.");
-  const minutes=(value:string)=>{if(!/^([01]\d|2[0-3]):[0-5]\d(?::00)?$/.test(value))throw new Error("Enter valid start and end times.");return Number(value.slice(0,2))*60+Number(value.slice(3,5));};
+  if(base.kind!=="shift")throw new PayrollValidationError("Choose a working shift before adjusting its times. Rest and unconfigured days have no working times.");
+  const minutes=(value:string)=>{if(!/^([01]\d|2[0-3]):[0-5]\d(?::00)?$/.test(value))throw new PayrollValidationError("Enter valid start and end times.");return Number(value.slice(0,2))*60+Number(value.slice(3,5));};
   const start=minutes(times.start),end=minutes(times.end),duration=(end-start+1440)%1440;
-  if(!duration||base.breakMinutes>=duration)throw new Error("The shift must have working time after its unpaid breaks.");
-  for(const slot of base.breaks.filter(row => !row.slotKey.startsWith("ot_break"))){const from=(minutes(slot.fromTime)-start+1440)%1440,to=from+(minutes(slot.toTime)-minutes(slot.fromTime)+1440)%1440;if(from>=duration||to>duration||to<=from)throw new Error(`The ${slot.label} break falls outside these times. Choose a shift with the appropriate breaks.`);}
+  if(!duration||base.breakMinutes>=duration)throw new PayrollValidationError("The shift must have working time after its unpaid breaks.");
+  for(const slot of base.breaks.filter(row => !row.slotKey.startsWith("ot_break"))){const from=(minutes(slot.fromTime)-start+1440)%1440,to=from+(minutes(slot.toTime)-minutes(slot.fromTime)+1440)%1440;if(from>=duration||to>duration||to<=from)throw new PayrollValidationError(`The ${slot.label} break falls outside these times. Choose a shift with the appropriate breaks.`);}
   return {...structuredClone(base),shiftTableId:null,shiftCode:base.shiftCode,shiftName:base.shiftName,checkInTime:times.start.slice(0,5)+":00",checkOutTime:times.end.slice(0,5)+":00",hoursPerDay:Math.round((duration-base.breakMinutes)/60*100)/100,isFlexible:false};
 }
 export function applyScheduleChanges(cells: ScheduleCell[], changes: Array<{employeeId:string;day:string;value:string;customTimes?:{start:string;end:string}}>, templates: Map<string,ScheduleSnapshot>) {
@@ -39,18 +47,18 @@ export function applyScheduleChanges(cells: ScheduleCell[], changes: Array<{empl
   const seen = new Set<string>();
   for (const change of changes) {
     const key = `${change.employeeId}:${change.day}`;
-    if (seen.has(key)) throw new Error("A workday was submitted more than once.");
+    if (seen.has(key)) throw new PayrollValidationError("A workday was submitted more than once.");
     seen.add(key);
     const cell = byKey.get(key);
-    if (!cell) throw new Error("A selected employee or workday is outside this branch and payroll period.");
+    if (!cell) throw new PayrollValidationError("A selected employee or workday is outside this branch and payroll period.");
     let snapshot = change.value === "default" ? cell.defaultSnapshot
       : change.value === "latest-default" ? cell.latestDefaultSnapshot ?? cell.defaultSnapshot
       : change.value === "rest" || change.value === "unconfigured" ? emptySchedule(change.value)
       : change.value === "saved" ? cell.snapshot
       : change.value === "captured" ? cell.baselineSnapshot : templates.get(change.value) ?? (change.value === cell.baselineValue ? cell.baselineSnapshot : undefined);
-    if (!snapshot) throw new Error("The selected shift is no longer available.");
+    if (!snapshot) throw new PayrollValidationError("The selected shift is no longer available.");
     if(change.customTimes)snapshot=withDateScheduleTimes(snapshot,change.customTimes);
-    cell.snapshot = structuredClone(snapshot); cell.value = scheduleValue(snapshot); cell.label = scheduleLabel(snapshot); cell.source = "Period exception";
+    cell.snapshot = retainRestDesignation(cell.baselineSnapshot, snapshot); cell.value = scheduleValue(cell.snapshot); cell.label = scheduleLabel(cell.snapshot); cell.source = "Period exception";
     if (change.value === "latest-default") {
       cell.defaultSnapshot = structuredClone(snapshot); cell.defaultValue = scheduleValue(snapshot); cell.defaultLabel = scheduleLabel(snapshot);
     }

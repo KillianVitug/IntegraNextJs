@@ -78,13 +78,14 @@ function formatEffectiveDateSummary(dates: string[]) {
 }
 
 function isEditableRequest(request: ScheduleRequestRow) {
-  return request.status === "Pending" && request.action === "Create";
+  return request.status === "Pending" && request.action === "Create" && !request.payload.scheduleOperation && request.payload.shiftTableId != null;
 }
 
 function formatShiftTableLabel(
-  shiftTableId: number,
+  shiftTableId: number | null,
   shiftTableMap: Map<number, SelectShiftTableSchemaType>,
 ) {
+  if (shiftTableId == null) return "Captured day schedule";
   const shiftTable = shiftTableMap.get(shiftTableId);
   if (!shiftTable) {
     return `Unknown shift table (#${shiftTableId})`;
@@ -180,7 +181,7 @@ export function ManagerScheduleRequestForm({
 
     setSelectedRequest(request);
     setForm({
-      shiftTableId: request.payload.shiftTableId,
+      shiftTableId: request.payload.shiftTableId ?? 0,
       effectiveDates: getRequestEffectiveDates(request),
       reason: request.reason ?? "",
     });

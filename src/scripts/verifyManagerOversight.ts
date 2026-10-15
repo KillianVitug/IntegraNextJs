@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import vm from "node:vm";
 import ts from "typescript";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import * as s from "@/db/schema";
 import { readManagerAttendanceOverview } from "@/lib/manager/oversight";
 import { projectManagerAttendanceDay } from "@/lib/manager/oversight-model";
@@ -147,6 +147,59 @@ async function main() {
     assert.equal(overnightAfter.employees[0].days.find(day => day.date === days[4])!.phase, "recorded");
     assert.equal(overnightAfter.employees[0].days.find(day => day.date === days[4])!.needsAction, true);
     checks.push("Prior-day 22:00–06:00 shift is in progress at 01:00 with no missing-OUT action, and actionable at 07:00 if OUT is still absent");
+    // Inspect actual persisted rest-work snapshots through the public manager loader.
+    // Legacy rest days may retain clock times and must not become planned work by inference.
+    const [restWorkAssignment] = await database.select().from(s.employeeShiftAssignments).where(and(eq(s.employeeShiftAssignments.employeeId, employee.id), eq(s.employeeShiftAssignments.effectiveFrom, days[1])));
+    assert(restWorkAssignment?.confirmedSchedule?.kind === "shift");
+    await database.update(s.employeeShiftAssignments).set({ confirmedSchedule: { ...restWorkAssignment.confirmedSchedule, designatedRestDay: true }, restDay: "Saturday" }).where(eq(s.employeeShiftAssignments.id, restWorkAssignment.id));
+    await database.update(s.employeesTimekeeping).set({ restDay: "Tuesday" }).where(eq(s.employeesTimekeeping.employeeId, otherEmployee.id));
+    const beforeRestProjection = await fingerprint();
+    const restWorkOverview = await readManagerAttendanceOverview(manager, { periodId: period.id, employeeId: employee.id }, transactional, now);
+    const plannedRestWork = restWorkOverview.employees[0].days.find(day => day.date === days[1])!;
+    assert.equal(plannedRestWork.isRestDay, true);
+    assert.equal(plannedRestWork.scheduledRestWork, true);
+    assert.equal(plannedRestWork.scheduleIn?.slice(0, 5), "08:00"); assert.equal(plannedRestWork.scheduleOut?.slice(0, 5), "17:00");
+    assert.equal(restWorkOverview.employees[0].days.find(day => day.date === days[2])!.scheduledRestWork, false, "An ordinary confirmed working day is not rest-day work");
+    const legacyRestOverview = await readManagerAttendanceOverview(otherManager, { periodId: period.id, employeeId: otherEmployee.id }, transactional, now);
+    const legacyRest = legacyRestOverview.employees[0].days.find(day => day.date === days[4])!;
+    assert.equal(legacyRest.isRestDay, true); assert(legacyRest.scheduleIn && legacyRest.scheduleOut);
+    assert.equal(legacyRest.scheduledRestWork, false, "Legacy rest-day clock times do not establish a confirmed work arrangement");
+    assert.equal(await fingerprint(), beforeRestProjection, "Rest-work manager projections remain read-only across every table");
+    const [overnightRestAssignment] = await database.select().from(s.employeeShiftAssignments).where(and(eq(s.employeeShiftAssignments.employeeId, employee.id), eq(s.employeeShiftAssignments.effectiveFrom, days[2])));
+    assert(overnightRestAssignment?.confirmedSchedule?.kind === "shift");
+    await database.update(s.employeeShiftAssignments).set({ confirmedSchedule: { ...overnightRestAssignment.confirmedSchedule, designatedRestDay: true, checkInTime: "22:00:00", checkOutTime: "06:00:00", breaks: [], breakMinutes: 0, paidBreakMinutes: 0, hoursPerDay: 8 }, restDay: "Sunday" }).where(eq(s.employeeShiftAssignments.id, overnightRestAssignment.id));
+    const beforeRestOvernight = await fingerprint();
+    const restDuring = await readManagerAttendanceOverview(manager, { periodId: period.id, employeeId: employee.id }, transactional, new Date("2020-10-19T01:00:00+08:00"));
+    const restAfter = await readManagerAttendanceOverview(manager, { periodId: period.id, employeeId: employee.id }, transactional, new Date("2020-10-19T07:00:00+08:00"));
+    const underwayRest = restDuring.employees[0].days.find(day => day.date === days[2])!;
+    const completedRest = restAfter.employees[0].days.find(day => day.date === days[2])!;
+    assert.equal(underwayRest.scheduledRestWork, true); assert.equal(underwayRest.isRestDay, true);
+    assert.equal(underwayRest.phase, "in-progress"); assert.equal(underwayRest.needsAction, false);
+    assert(!restDuring.issues.some(issue => issue.date === days[2]), "A confirmed overnight rest-work shift is not a completed attendance issue at 01:00");
+    assert.equal(completedRest.phase, "recorded"); assert.equal(completedRest.scheduledRestWork, true); assert.equal(completedRest.isRestDay, true);
+    assert.equal(completedRest.regularMinutes, 0, "Missing-evidence review does not change rest-day regular-pay classification");
+    assert.equal(completedRest.needsAction, true);
+    assert(completedRest.findings.some(finding => finding.code === "scheduled-no-attendance" && finding.needsAction));
+    assert(restAfter.issues.some(issue => issue.date === days[2] && issue.code === "scheduled-no-attendance"), "Completed confirmed rest-work with no evidence remains in the manager queue");
+    const legacyRestDuring = await readManagerAttendanceOverview(otherManager, { periodId: period.id, employeeId: otherEmployee.id }, transactional, new Date("2020-10-21T01:00:00+08:00"));
+    assert.equal(legacyRestDuring.employees[0].days.find(day => day.date === days[4])!.phase, "recorded", "Legacy rest-day clocks alone do not establish an overnight working shift");
+    const canonicalRest = (await loadProvisionalPayroll({ periodId: period.id, employeeId: employee.id, group: "Daily", asOfDate: days[4] }, transactional)).rows[0].days.find(day => day.date === days[2])!;
+    const scope = { today: "2020-10-22", asOfDate: days[4] };
+    const projectRest = (day: typeof canonicalRest, selectedScope = scope) => projectManagerAttendanceDay(day, selectedScope, undefined, false, day.review?.approvedLeave ? "unverified" : "none", true);
+    assert(projectRest(canonicalRest).findings.some(finding => finding.code === "scheduled-no-attendance"));
+    for (const [label, guarded] of [
+      ["approved leave", { ...canonicalRest, review: { ...canonicalRest.review!, approvedLeave: true } }],
+      ["reviewed no work", { ...canonicalRest, review: { ...canonicalRest.review!, reviewedNoWork: true } }],
+      ["outside employment", { ...canonicalRest, review: { ...canonicalRest.review!, eligible: false } }],
+      ["held attendance", { ...canonicalRest, payrollHold: true }],
+    ] as const) assert(!projectRest(guarded).findings.some(finding => finding.code === "scheduled-no-attendance"), `Rest-work missing-evidence rule preserves ${label} exclusion`);
+    assert.equal(projectRest(canonicalRest, { ...scope, asOfDate: days[0] }).needsAction, false, "After-cutoff rest work is not actionable");
+    assert.equal(await fingerprint(), beforeRestOvernight, "Overnight rest-work manager/Admin reads preserve all tables");
+    await database.update(s.employeeShiftAssignments).set({ confirmedSchedule: overnightRestAssignment.confirmedSchedule, restDay: overnightRestAssignment.restDay }).where(eq(s.employeeShiftAssignments.id, overnightRestAssignment.id));
+    await database.update(s.employeeShiftAssignments).set({ confirmedSchedule: restWorkAssignment.confirmedSchedule, restDay: restWorkAssignment.restDay }).where(eq(s.employeeShiftAssignments.id, restWorkAssignment.id));
+    await database.update(s.employeesTimekeeping).set({ restDay: null }).where(eq(s.employeesTimekeeping.employeeId, otherEmployee.id));
+    checks.push("Actual manager projection distinguishes confirmed designated-rest work with hours from ordinary work and legacy rest-day clock times; all tables preserved by reads");
+    checks.push("Confirmed overnight rest work stays in progress at 01:00, enters missing-attendance review at 07:00 without changing rest designation/pay quantities, and preserves leave/no-work/employment/hold/cutoff exclusions");
     const scopedResolution = await resolutionPeople(client, period, undefined, [employee.id]);
     assert(scopedResolution.every(row => row.employeeId === employee.id));
     assert.deepEqual(scopedResolution, (await resolutionPeople(client, period)).filter(row => row.employeeId === employee.id), "Scoped legacy-resolution evidence is identical to Admin's same employees");

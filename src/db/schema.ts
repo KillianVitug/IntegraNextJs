@@ -17,7 +17,7 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
-import type { ScheduleCell, ScheduleSnapshot, ScheduleReceipt } from "@/lib/scheduling/workspace-types";
+import type { ScheduleCell, ScheduleSnapshot, ScheduleReceipt, SchedulePendingOperation } from "@/lib/scheduling/workspace-types";
 import type { ShiftCatalogReceipt } from "@/lib/scheduling/shift-catalog-types";
 import {
   attendanceDtrDayTypeValues,
@@ -1981,7 +1981,7 @@ export const branchCalendarScheduleOverrideItems = pgTable(
 export type ManagerScheduleChangePayload = {
   id?: number;
   employeeId: string;
-  shiftTableId: number;
+  shiftTableId: number | null;
   shiftSchedule?: string | null;
   effectiveFrom: string;
   effectiveTo?: string | null;
@@ -1990,6 +1990,7 @@ export type ManagerScheduleChangePayload = {
   graceMinutes: number;
   restDay?: string | null;
   isFlexible: boolean;
+  scheduleOperation?: SchedulePendingOperation;
 };
 
 export const managerScheduleChangeRequests = pgTable(

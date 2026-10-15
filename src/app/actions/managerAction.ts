@@ -1211,6 +1211,9 @@ export async function updateManagerScheduleChangeRequest(input: unknown) {
   if (existing.employeeId !== schedulePayload.employeeId) {
     throw new Error("Schedule request employee cannot be changed.");
   }
+  if (existing.payload.scheduleOperation) {
+    throw new Error("This request contains captured day changes. Cancel it and prepare a fresh preview in Provisional Payroll instead.");
+  }
 
   const [request] = await db
     .update(managerScheduleChangeRequests)
@@ -1252,6 +1255,9 @@ export async function cancelManagerScheduleChangeRequest(input: unknown) {
 
   if (!existing) {
     throw new Error("Pending schedule request was not found.");
+  }
+  if (existing.payload.scheduleOperation) {
+    throw new Error("Cancel this captured day request from its history in Provisional Payroll.");
   }
 
   await assertManagerCanAccessEmployee({
@@ -1315,6 +1321,7 @@ export async function getManagerScheduleRequests() {
     .where(
       and(
         eq(managerScheduleChangeRequests.requestedByAccountId, auth.accountId),
+        sql`${managerScheduleChangeRequests.payload}->'scheduleOperation' is null`,
         isNull(employees.deletedAt),
         isNull(employeesGeneralInfo.deletedAt),
         currentDepartmentMemberStatusCondition(),
