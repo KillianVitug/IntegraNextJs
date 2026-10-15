@@ -25,6 +25,8 @@ export function ScheduleWorkspaceEditor({ initialWorkspace, initialView, employe
   const [notice, setNotice] = useState("");
   const [dirty, setDirty] = useState({ weekly: false, period: false });
   const [editorVersion, setEditorVersion] = useState({ weekly: 0, period: 0 });
+  const [weeklySavedRevision, setWeeklySavedRevision] = useState(0);
+  const [weeklyReviewRevision, setWeeklyReviewRevision] = useState(0);
   const [scope, setScope] = useState({ departmentId: workspace.departmentId?.toString() ?? "", periodId: workspace.periodId ?? "", effectiveDate: workspace.effectiveDate });
   const pending = useRef<PendingAction | null>(null);
   const errorRef = useRef<HTMLDivElement>(null);
@@ -55,7 +57,7 @@ export function ScheduleWorkspaceEditor({ initialWorkspace, initialView, employe
     window.history.replaceState(null, "", `/schedules?${query}`);
   }
 
-  async function refreshModel(savedView?: "weekly" | "period", effectiveDate?: string) {
+  async function refreshModel(savedView?: "weekly" | "period", effectiveDate?: string, retainWeeklyInputs = false) {
     const model = await getScheduleWorkspace({ departmentId: workspace.departmentId ?? undefined, periodId: workspace.periodId ?? undefined, effectiveDate: effectiveDate ?? workspace.effectiveDate });
     setWorkspace(model);
     const nextScope = { departmentId: model.departmentId?.toString() ?? "", periodId: model.periodId ?? "", effectiveDate: model.effectiveDate };
@@ -64,14 +66,15 @@ export function ScheduleWorkspaceEditor({ initialWorkspace, initialView, employe
     const refreshPeriod = !savedView || savedView === "period" || !dirty.period;
     if (refreshWeekly) setWeeklyWorkspace(model);
     if (refreshPeriod) setPeriodWorkspace(model);
-    setEditorVersion(value => ({ weekly: value.weekly + Number(refreshWeekly), period: value.period + Number(refreshPeriod) }));
+    setEditorVersion(value => ({ weekly: value.weekly + Number(refreshWeekly && !retainWeeklyInputs), period: value.period + Number(refreshPeriod) }));
     setDirty(previous => ({ weekly: refreshWeekly ? false : previous.weekly, period: refreshPeriod ? false : previous.period }));
   }
   async function completed(receipt: ScheduleReceipt) {
     const effectiveDate = pending.current?.effectiveDate;
     pending.current = null; setUnknown(false); setNotice(`${receipt.message} Receipt: ${receipt.requestId}`); setError("");
     const savedView = receipt.action === "weekly_saved" || receipt.action === "weekly_archived" ? "weekly" : "period";
-    try { await refreshModel(savedView, effectiveDate); } catch { setError("The change was saved, but the updated schedule could not load. Reload the saved schedule below; do not submit the change again."); setDirty(previous => ({ ...previous, [savedView]: false })); }
+    if (receipt.action === "weekly_saved") setWeeklySavedRevision(value => value + 1);
+    try { await refreshModel(savedView, effectiveDate, receipt.action === "weekly_saved"); } catch { setError("The change was saved, but the updated schedule could not load. Reload the saved schedule below; do not submit the change again."); setDirty(previous => ({ ...previous, [savedView]: false })); }
   }
   async function checkReceipt() {
     if (!pending.current) return;
@@ -95,7 +98,10 @@ export function ScheduleWorkspaceEditor({ initialWorkspace, initialView, employe
       if (!result.ok) {
         const receipt = await getScheduleRequestReceipt(action.requestId);
         if (receipt) { await completed(receipt); return; }
-        pending.current = null; setUnknown(false); setError(result.error); return;
+        if (result.uncertain) { setUnknown(true); setError(`${result.error} Check status or retry the same request.`); return; }
+        pending.current = null; setUnknown(false); setError(result.error);
+        if (action.title === "Save weekly defaults") setWeeklyReviewRevision(value => value + 1);
+        return;
       }
       await completed(result.receipt);
     } catch {
@@ -123,23 +129,10 @@ export function ScheduleWorkspaceEditor({ initialWorkspace, initialView, employe
     const run = action === "save" ? saveScheduleDraft : action === "confirm" ? confirmScheduleDraft : deleteScheduleDraft;
     await execute({ requestId: command.requestId, title, run: () => run(command) });
   }
-  async function saveWeekly(value: Pick<ScheduleWeeklyCommand, "effectiveFrom" | "effectiveTo" | "employeeIds" | "days">) {
+  async function saveWeekly(value: Pick<ScheduleWeeklyCommand, "effectiveFrom" | "effectiveTo" | "employeeIds" | "days" | "reuseFromDate" | "previewDigest">) {
     if (workspace.departmentId === null) return;
-    if (value.effectiveFrom !== weeklyWorkspace.effectiveDate) { setError("Review the effective date before saving these weekly defaults. Your selections and edits are retained."); return; }
     const command: ScheduleWeeklyCommand = { ...value, requestId: generateUUID(), departmentId: workspace.departmentId, sourceDigest: weeklyWorkspace.weeklyDigest };
-    await execute({ requestId: command.requestId, title: "Save weekly defaults", effectiveDate: command.effectiveFrom, run: () => saveWeeklyDefaults(command) });
-  }
-  async function reviewWeeklyDate(effectiveDate: string) {
-    if (locked) return;
-    setBusy(true); setError(""); setNotice("");
-    try {
-      const model = await getScheduleWorkspace({ departmentId: workspace.departmentId ?? undefined, periodId: workspace.periodId ?? undefined, effectiveDate });
-      setWorkspace(model); setWeeklyWorkspace(model);
-      const nextScope = { departmentId: model.departmentId?.toString() ?? "", periodId: model.periodId ?? "", effectiveDate: model.effectiveDate };
-      setScope(nextScope); updateUrl(nextScope);
-      setNotice("Current weekly defaults have been refreshed for the effective date. Your selected employees and weekday edits are retained; review them before saving.");
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Defaults for the effective date could not load. Your selections and edits are retained."); }
-    finally { setBusy(false); }
+    await execute({ requestId: command.requestId, title: "Save weekly defaults", effectiveDate: weeklyWorkspace.effectiveDate, run: () => saveWeeklyDefaults(command) });
   }
   async function archiveWeekly(value: Pick<ScheduleArchiveCommand, "employeeId" | "patternId" | "endDate">) {
     if (workspace.departmentId === null) return;
@@ -166,7 +159,7 @@ export function ScheduleWorkspaceEditor({ initialWorkspace, initialView, employe
     {notice && <div role="status" className="break-words rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-950 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-100">{notice}</div>}
     {error && <div ref={errorRef} tabIndex={-1} role="alert" className="rounded-lg focus:outline-none focus:ring-2 focus:ring-destructive"><ScheduleNotice error>{error}</ScheduleNotice><div className="mt-2 flex flex-wrap gap-2">{unknown ? <><ScheduleButton disabled={busy} onClick={checkReceipt}>Check request status</ScheduleButton><ScheduleButton disabled={busy} onClick={() => pending.current && execute(pending.current, true)}>Retry same request</ScheduleButton></> : <ScheduleButton disabled={busy} onClick={async () => { setBusy(true); try { await refreshModel(); setError(""); } catch { setError("The saved schedule could not load. Please try again."); } finally { setBusy(false); } }}>{anyDirty ? "Discard edits and reload saved schedule" : "Reload saved schedule"}</ScheduleButton>}</div></div>}
     {anyDirty && !unknown && <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground"><span>Unsaved edits are retained while switching tabs, weeks and search filters.</span><ScheduleButton disabled={busy} onClick={() => { setWeeklyWorkspace(workspace); setPeriodWorkspace(workspace); setEditorVersion(value => ({ weekly: value.weekly + 1, period: value.period + 1 })); setDirty({ weekly: false, period: false }); setError(""); }}>Discard local edits</ScheduleButton></div>}
-    <div role="tabpanel" id="weekly-panel" aria-labelledby="weekly-tab" hidden={view !== "weekly"}><WeeklyDefaults key={`weekly:${editorVersion.weekly}`} workspace={weeklyWorkspace} employeeId={employeeId} busy={locked} onDirty={value => setDirty(previous => ({ ...previous, weekly: value }))} onReviewDate={reviewWeeklyDate} onSave={saveWeekly} onArchive={archiveWeekly} /></div>
+    <div role="tabpanel" id="weekly-panel" aria-labelledby="weekly-tab" hidden={view !== "weekly"}><WeeklyDefaults key={`weekly:${editorVersion.weekly}`} workspace={weeklyWorkspace} employeeId={employeeId} busy={locked} savedRevision={weeklySavedRevision} reviewRevision={weeklyReviewRevision} onDirty={value => setDirty(previous => ({ ...previous, weekly: value }))} onSave={saveWeekly} onArchive={archiveWeekly} /></div>
     <div role="tabpanel" id="period-panel" aria-labelledby="period-tab" hidden={view !== "period"}><PeriodSchedule key={`period:${editorVersion.period}`} workspace={periodWorkspace} employeeId={employeeId} day={day} busy={locked} onDirty={value => setDirty(previous => ({ ...previous, period: value }))} onAction={periodAction} /></div>
     {!workspace.departments.length && <ScheduleNotice>No branches are assigned to your account. An administrator can assign your branch access.</ScheduleNotice>}
     <p className="text-xs text-muted-foreground">Schedules describe planned work. Attendance and payroll approval remain separate.</p>

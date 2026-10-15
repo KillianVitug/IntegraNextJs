@@ -1,8 +1,8 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { archiveWeeklySchedule, cancelScheduleOperationRequest as cancelOperation, confirmScopedScheduleDays, mutatePeriodSchedule, readScheduleDayRepair, readScheduleDayOperations, readScheduleDayHistory, readScheduleReceipt, readScheduleWorkspace, requireScheduleActor, saveWeeklySchedules, submitScheduleDayOperation as submitOperation } from "@/lib/scheduling/service";
-import type { ScheduleActionResult, ScheduleArchiveCommand, SchedulePeriodCommand, ScheduleReceipt, ScheduleWeeklyCommand, ScheduleWorkspaceQuery, ScheduleDayOperationCommand, ScheduleDayOperations, ScheduleDayHistoryPage } from "@/lib/scheduling/workspace-types";
+import { archiveWeeklySchedule, cancelScheduleOperationRequest as cancelOperation, confirmScopedScheduleDays, mutatePeriodSchedule, readScheduleDayRepair, readScheduleDayOperations, readScheduleDayHistory, readScheduleReceipt, readScheduleWorkspace, readWeeklySchedulePreview, requireScheduleActor, saveWeeklySchedules, submitScheduleDayOperation as submitOperation } from "@/lib/scheduling/service";
+import type { ScheduleActionResult, ScheduleArchiveCommand, SchedulePeriodCommand, ScheduleReceipt, ScheduleWeeklyCommand, ScheduleWeeklyPreviewInput, ScheduleWeeklyPreview, ScheduleWorkspaceQuery, ScheduleDayOperationCommand, ScheduleDayOperations, ScheduleDayHistoryPage } from "@/lib/scheduling/workspace-types";
 import { PayrollValidationError } from "@/lib/payroll/validation";
 import { ZodError } from "zod";
 import { db } from "@/db";
@@ -10,6 +10,7 @@ import { db } from "@/db";
 const publicError=(error:unknown)=>error instanceof PayrollValidationError?error.message:error instanceof ZodError?"Check the selected employee, date, schedule and optional note, then try again.":"The schedule action could not finish. Your entries are retained. Check its saved status before retrying.";
 async function read<T>(operation:()=>Promise<T>) {try{return await operation();}catch(error){if(error&&typeof error==="object"&&"digest" in error&&String(error.digest).startsWith("NEXT_REDIRECT"))throw error;throw new Error(publicError(error));}}
 export async function getScheduleWorkspace(query: ScheduleWorkspaceQuery = {}) { return read(async()=>readScheduleWorkspace(await requireScheduleActor(), query)); }
+export async function getWeeklyDefaultsPreview(input: ScheduleWeeklyPreviewInput): Promise<ScheduleWeeklyPreview> { return read(async () => { const actor = await requireScheduleActor(); return db.transaction(tx => readWeeklySchedulePreview(actor, input, tx), { isolationLevel: "repeatable read", accessMode: "read only" }); }); }
 export async function getScheduleDayRepair(query: {employeeId:string;day:string;periodId?:string}) { return read(async()=>readScheduleDayRepair(await requireScheduleActor(), query)); }
 export async function getScheduleDayOperations(query:{employeeId:string;day:string;periodId?:string}):Promise<ScheduleDayOperations> {return read(async()=>{const actor=await requireScheduleActor();return db.transaction(tx=>readScheduleDayOperations(actor,query,tx),{isolationLevel:"repeatable read",accessMode:"read only"});});}
 export async function getScheduleDayHistory(query:{employeeId:string;day:string;periodId?:string;cursor?:string}):Promise<ScheduleDayHistoryPage> {return read(async()=>{const actor=await requireScheduleActor();return db.transaction(tx=>readScheduleDayHistory(actor,query,tx),{isolationLevel:"repeatable read",accessMode:"read only"});});}

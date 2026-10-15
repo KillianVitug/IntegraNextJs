@@ -18,7 +18,7 @@ import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard"
 import { loadEffectiveAttendanceRawLogs } from "@/lib/payroll/effectiveAttendanceInputs";
 import { lockShiftAssignmentContext, markAffectedShiftRunsStale, rebuildEmployeeAttendanceSummaries, getLatestImportedAttendanceDate, getRebuildRange } from "@/app/actions/shiftAssignmentHelpers";
 import { applyScheduleChanges, emptySchedule, retainRestDesignation, sameSchedule, scheduleDateRange, scheduleLabel, scheduleValue, shiftDate } from "./model";
-import { scheduleWeekdays, type ScheduleCell, type ScheduleSnapshot, type ScheduleWorkspace, type ScheduleWorkspaceQuery, type ScheduleReceipt, type SchedulePeriodCommand, type ScheduleWeeklyCommand, type ScheduleArchiveCommand, type ScheduleWeekday, type ScheduleDayRepair, type ScheduleDayOperationCommand, type SchedulePendingOperation, type ScheduleDayOperations, type ScheduleDayHistoryPage } from "./workspace-types";
+import { scheduleWeekdays, type ScheduleCell, type ScheduleSnapshot, type ScheduleWorkspace, type ScheduleWorkspaceQuery, type ScheduleReceipt, type SchedulePeriodCommand, type ScheduleWeeklyCommand, type ScheduleWeeklyPreviewInput, type ScheduleWeeklyPreview, type ScheduleArchiveCommand, type ScheduleWeekday, type ScheduleDayRepair, type ScheduleDayOperationCommand, type SchedulePendingOperation, type ScheduleDayOperations, type ScheduleDayHistoryPage } from "./workspace-types";
 
 export type ScheduleActor = { userId: string; role: "ADMIN" | "MANAGER" };
 export async function requireScheduleActor(): Promise<ScheduleActor> {
@@ -32,7 +32,11 @@ const clockTime=z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 const note = z.string().trim().max(500).optional();
 const periodCommand = z.object({ requestId: z.string().uuid(), departmentId: z.number().int().positive(), periodId: z.string().uuid(), sourceDigest: z.string().length(64), expectedDraftRevision: z.number().int().positive().nullable(), expectedDraftId: z.string().uuid().nullable(), changes: z.array(z.object({ employeeId: z.string().uuid(), day: date, value, customTimes:z.object({start:clockTime,end:clockTime}).optional() })).max(10000), note });
 const dayOperationCommand = periodCommand.omit({changes:true}).extend({employeeId:z.string().uuid(),day:date,operation:z.enum(["adjust","cover","swap"]),replacementEmployeeId:z.string().uuid().optional(),value:value.optional(),customTimes:z.object({start:clockTime,end:clockTime}).optional()});
-const weeklyCommand = z.object({ requestId: z.string().uuid(), departmentId: z.number().int().positive(), sourceDigest: z.string().length(64), effectiveFrom: date, effectiveTo: date.nullable(), employeeIds: z.array(z.string().uuid()).min(1).max(100), days: z.array(z.object({ weekday: z.enum(scheduleWeekdays), value })).min(1).max(7) }).refine(input => !input.effectiveTo || input.effectiveTo >= input.effectiveFrom, "The end date must be on or after the start date.");
+const weeklyFields = z.object({ departmentId: z.number().int().positive(), sourceDigest: z.string().length(64), effectiveFrom: date, effectiveTo: date.nullable(), employeeIds: z.array(z.string().uuid()).min(1).max(100), days: z.array(z.object({ weekday: z.enum(scheduleWeekdays), value })).max(7), reuseFromDate: date.optional() });
+const validWeeklyRange = (input: ScheduleWeeklyPreviewInput) => !input.effectiveTo || input.effectiveTo >= input.effectiveFrom;
+const validWeeklyChanges = (input: ScheduleWeeklyPreviewInput) => Boolean(input.reuseFromDate) || input.days.length > 0;
+const weeklyPreviewCommand = weeklyFields.refine(validWeeklyRange, "The end date must be on or after the start date.").refine(validWeeklyChanges, "Choose a weekday change or an earlier date for the saved week.");
+const weeklyCommand = weeklyFields.extend({ requestId: z.string().uuid(), previewDigest: z.string().length(64).optional() }).refine(validWeeklyRange, "The end date must be on or after the start date.").refine(validWeeklyChanges, "Choose a weekday change or an earlier date for the saved week.");
 const archiveCommand = z.object({ requestId: z.string().uuid(), departmentId: z.number().int().positive(), sourceDigest: z.string().length(64), employeeId: z.string().uuid(), patternId: z.number().int().positive(), endDate: date });
 const digest = (input: unknown) => createHash("sha256").update(JSON.stringify(input)).digest("hex");
 const weekday = (day: string) => new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "long" }).format(new Date(`${day}T12:00:00Z`)) as ScheduleWeekday;
@@ -151,10 +155,11 @@ async function receiptFor(tx: DbClient, actor: ScheduleActor, requestId: string,
 }
 async function assertReceiptScope(actor:ScheduleActor,receipt:ScheduleReceipt,database:DbClient) {
   // Recovery is still scoped after a manager loses a branch or an employee transfers.
-  if (actor.role === "MANAGER" && receipt.affectedTargets?.length) {
+  const employeeIds = [...new Set([...(receipt.selectedEmployeeIds ?? []), ...(receipt.affectedTargets ?? []).map(row => row.employeeId)])];
+  if (actor.role === "MANAGER" && employeeIds.length) {
     const allowed = await departmentsFor(actor, database);
-    const members = allowed.length ? await database.select({id:employees.id}).from(employees).innerJoin(employeesGeneralInfo,eq(employees.id,employeesGeneralInfo.employeeId)).where(and(inArray(employees.id,[...new Set(receipt.affectedTargets.map(row=>row.employeeId))]),inArray(employeesGeneralInfo.departmentId,allowed.map(row=>row.id)),isNull(employees.deletedAt),isNull(employeesGeneralInfo.deletedAt),currentDepartmentMemberStatusCondition())) : [];
-    if (new Set(receipt.affectedTargets.map(row=>row.employeeId)).size !== members.length) throw new PayrollValidationError("This schedule request is no longer within your assigned scope.");
+    const members = allowed.length ? await database.select({id:employees.id}).from(employees).innerJoin(employeesGeneralInfo,eq(employees.id,employeesGeneralInfo.employeeId)).where(and(inArray(employees.id,employeeIds),inArray(employeesGeneralInfo.departmentId,allowed.map(row=>row.id)),isNull(employees.deletedAt),isNull(employeesGeneralInfo.deletedAt),currentDepartmentMemberStatusCondition())) : [];
+    if (employeeIds.length !== members.length) throw new PayrollValidationError("This schedule request is no longer within your assigned scope.");
   }
 }
 export async function readScheduleReceipt(actor: ScheduleActor, requestId: string, database: DbClient = db) {
@@ -360,7 +365,7 @@ async function projectConfirmedDays(tx: DbClient, actor: ScheduleActor, input: S
   if (inserts.length) await tx.insert(employeeShiftAssignments).values(inserts);
 }
 
-async function applyWeeklyImpact(tx: DbClient, actor: ScheduleActor, source: Sources, employeeId: string, from: string, to: string | null, nextForDay: (day: string) => ScheduleSnapshot) {
+async function weeklyImpactTargets(tx: DbClient, source: Sources, employeeId: string, from: string, to: string | null, nextForDay: (day: string) => ScheduleSnapshot) {
   const [runs, latestImportedDate] = await Promise.all([
     tx.select({ periodId: payrollRuns.payrollPeriodId }).from(payrollRuns).innerJoin(payrollRunEmployees, eq(payrollRunEmployees.payrollRunId, payrollRuns.id)).where(and(eq(payrollRunEmployees.employeeId, employeeId), inArray(payrollRuns.status, ["Draft", "Reviewed", "Approved", "Posted"]))),
     getLatestImportedAttendanceDate(tx, employeeId),
@@ -386,12 +391,86 @@ async function applyWeeklyImpact(tx: DbClient, actor: ScheduleActor, source: Sou
       if (changedOn(day)) changedDays.add(day);
     }
   }
-  const targets = await scheduleTargets(tx, source, [...changedDays].sort().map(day => ({ employeeId, day, snapshot: nextForDay(day), baselineSnapshot: defaultFor(source, employeeId, day) })));
+  return scheduleTargets(tx, source, [...changedDays].sort().map(day => ({ employeeId, day, snapshot: nextForDay(day), baselineSnapshot: defaultFor(source, employeeId, day) })));
+}
+async function applyWeeklyImpact(tx: DbClient, actor: ScheduleActor, source: Sources, employeeId: string, from: string, to: string | null, nextForDay: (day: string) => ScheduleSnapshot) {
+  const targets = await weeklyImpactTargets(tx, source, employeeId, from, to, nextForDay);
   await assertWritableTargets(tx, source, targets);
   await assertManagerUnreviewed(tx, actor, targets);
   await invalidateTargets(tx, actor, targets);
   await rebuildTargets(tx, actor, targets);
 }
+
+async function prepareWeeklySchedules(tx: DbClient, actor: ScheduleActor, source: Sources, input: ScheduleWeeklyPreviewInput) {
+  if (source.weeklyDigest !== input.sourceDigest) throw new PayrollValidationError("Weekly defaults or employee details changed. Reload before saving; no defaults were changed.");
+  if (new Set(input.employeeIds).size !== input.employeeIds.length || new Set(input.days.map(day => day.weekday)).size !== input.days.length) throw new PayrollValidationError("Select each employee and weekday only once.");
+  if (input.employeeIds.some(id => !source.roster.some(row => row.employee.id === id))) throw new PayrollValidationError("A selected employee is not assigned to this branch.");
+  const plans: Array<{ employee: ScheduleWeeklyPreview["employees"][number]; snapshots: Map<ScheduleWeekday, ScheduleSnapshot>; targets: ScheduleTarget[] }> = [];
+  for (const employeeId of input.employeeIds) {
+    const person = source.roster.find(row => row.employee.id === employeeId)!.employee;
+    const patterns = source.fullPatterns.filter(row => row.employeeId === employeeId);
+    const sourcePattern = getActiveWeeklyShiftPatternForDate(patterns, input.reuseFromDate ?? input.effectiveFrom);
+    const blockers: string[] = [];
+    let effectiveTo = input.effectiveTo;
+    if (input.reuseFromDate) {
+      if (!sourcePattern) blockers.push("No saved weekly pattern applies on the source date. Choose a date with the saved week you want to reuse.");
+      else if (input.effectiveFrom >= sourcePattern.effectiveFrom) blockers.push(`This saved week already starts ${sourcePattern.effectiveFrom}. Choose an earlier start to extend it.`);
+      else {
+        if (effectiveTo && effectiveTo >= sourcePattern.effectiveFrom) blockers.push(`The end must be before ${sourcePattern.effectiveFrom}, where the saved week continues.`);
+        effectiveTo ??= shiftDate(sourcePattern.effectiveFrom, -1);
+        const patternBoundaries = [...new Set(patterns.flatMap(pattern => [pattern.effectiveFrom, ...(pattern.effectiveTo && pattern.effectiveTo !== "9999-12-31" ? [shiftDate(pattern.effectiveTo, 1)] : [])]))]
+          .filter(day => day > input.effectiveFrom && day <= effectiveTo!).sort();
+        const intermediate = patternBoundaries.map(day => ({ day, pattern: getActiveWeeklyShiftPatternForDate(patterns, day) })).find(row => row.pattern && row.pattern.effectiveFrom > input.effectiveFrom);
+        if (intermediate) blockers.push(`Another saved weekly version starts ${intermediate.pattern!.effectiveFrom} and applies from ${intermediate.day}. End this extension before ${intermediate.day} to preserve it.`);
+      }
+    }
+    const snapshots = new Map(scheduleWeekdays.map(day => [day, defaultFor(source, employeeId, input.reuseFromDate ?? input.effectiveFrom, day)]));
+    for (const day of input.days) {
+      const snapshot = day.value === "rest" || day.value === "unconfigured" ? emptySchedule(day.value) : source.activeTemplates.get(day.value) ?? (snapshots.get(day.weekday)?.shiftTableId === Number(day.value) ? snapshots.get(day.weekday) : undefined);
+      if (!snapshot) blockers.push(`Choose a current shift, Rest day or Unconfigured for ${day.weekday}.`);
+      else snapshots.set(day.weekday, structuredClone(snapshot));
+    }
+    const assignments = source.assignments.filter(row => row.employeeId === employeeId);
+    const retainedAssignments: ScheduleWeeklyPreview["employees"][number]["retainedAssignments"] = [];
+    const boundaries = [...new Set([input.effectiveFrom, ...assignments.flatMap(row => [row.effectiveFrom, ...(row.effectiveTo && row.effectiveTo !== "9999-12-31" ? [shiftDate(row.effectiveTo, 1)] : [])])])]
+      .filter(day => day >= input.effectiveFrom && (!effectiveTo || day <= effectiveTo)).sort();
+    for (const [index, from] of boundaries.entries()) {
+      const assignment = getActiveShiftAssignmentForDate(assignments, from);
+      if (assignment) retainedAssignments.push({ from, to: boundaries[index + 1] ? shiftDate(boundaries[index + 1], -1) : effectiveTo, kind: assignment.scheduleDecisionId ? "confirmed" : "dated" });
+    }
+    let changedDays: number | null = null, targets: ScheduleTarget[] = [];
+    if (!blockers.length) {
+      try {
+        const effectiveWeekdays = new Set(operationalScheduleSampleDates({ startDate: input.effectiveFrom, endDate: effectiveTo }, []).map(day => weekday(day)));
+        for (const [day, snapshot] of snapshots) if (effectiveWeekdays.has(day)) assertOperationalSchedule(snapshot, { startDate: input.effectiveFrom, endDate: effectiveTo });
+        if (effectiveTo) changedDays = scheduleDateRange(input.effectiveFrom, effectiveTo).filter(day => !getActiveShiftAssignmentForDate(assignments, day) && !sameSchedule(defaultFor(source, employeeId, day), snapshots.get(weekday(day))!)).length;
+        targets = await weeklyImpactTargets(tx, source, employeeId, input.effectiveFrom, effectiveTo, day => snapshots.get(weekday(day))!);
+        await assertWritableTargets(tx, source, targets);
+        await assertManagerUnreviewed(tx, actor, targets);
+      } catch (error) {
+        if (!(error instanceof PayrollValidationError)) throw error;
+        blockers.push(error.message);
+      }
+    }
+    plans.push({ snapshots, targets, employee: { employeeId, name: `${person.lastName}, ${person.firstName}`, sourcePatternId: sourcePattern?.id ?? null, sourceEffectiveFrom: sourcePattern?.effectiveFrom ?? null, effectiveFrom: input.effectiveFrom, effectiveTo,
+      days: [...snapshots].map(([weekday, snapshot]) => ({ weekday, snapshot, label: scheduleLabel(snapshot) })), changedDays, retainedAssignments, blockers } });
+  }
+  const employees = plans.map(plan => plan.employee), blockers = employees.flatMap(person => person.blockers.map(message => `${person.name}: ${message}`));
+  const targets = plans.flatMap(plan => plan.targets);
+  // The preview must expire when effective dated inputs or payroll protection/review state changes.
+  const runState = await tx.select({ id: payrollRuns.id, status: payrollRuns.status, updatedAt: payrollRuns.updatedAt, employeeId: payrollRunEmployees.employeeId, startDate: payrollPeriods.startDate, endDate: payrollPeriods.endDate }).from(payrollRuns)
+    .innerJoin(payrollPeriods, eq(payrollPeriods.id, payrollRuns.payrollPeriodId)).innerJoin(payrollRunEmployees, eq(payrollRunEmployees.payrollRunId, payrollRuns.id))
+    .where(inArray(payrollRunEmployees.employeeId, input.employeeIds)).orderBy(asc(payrollRuns.id), asc(payrollRunEmployees.employeeId));
+  const preview: ScheduleWeeklyPreview = { sourceDigest: source.weeklyDigest, previewDigest: digest({ input, employees, targets, assignments: source.assignments.filter(row => input.employeeIds.includes(row.employeeId)), periods: [...source.periods].sort((left, right) => left.id.localeCompare(right.id)), runState }), reuseFromDate: input.reuseFromDate, canSave: !blockers.length, blockers, employees, affectedEmployeeDays: targets.length, payrollMayChange: employees.some(person => person.changedDays === null || person.changedDays > 0) };
+  return { preview, plans };
+}
+
+export async function readWeeklySchedulePreview(actor: ScheduleActor, raw: ScheduleWeeklyPreviewInput, database: DbClient = db): Promise<ScheduleWeeklyPreview> {
+  const input = weeklyPreviewCommand.parse(raw);
+  const source = await loadSources(actor, { departmentId: input.departmentId, effectiveDate: input.reuseFromDate ?? input.effectiveFrom }, database, false);
+  return (await prepareWeeklySchedules(database, actor, source, input)).preview;
+}
+
 export async function saveWeeklySchedules(actor: ScheduleActor, raw: ScheduleWeeklyCommand, database: typeof db = db) {
   const input = weeklyCommand.parse(raw);
   if (new Set(input.employeeIds).size !== input.employeeIds.length || new Set(input.days.map(day => day.weekday)).size !== input.days.length) throw new PayrollValidationError("Select each employee and weekday only once.");
@@ -400,6 +479,21 @@ export async function saveWeeklySchedules(actor: ScheduleActor, raw: ScheduleWee
     const prior = await receiptFor(tx, actor, input.requestId, digest(input)); if (prior) return prior;
     for (const id of [...input.employeeIds].sort()) await lockShiftAssignmentContext(tx, id);
     const source = await loadSources(actor, { departmentId: input.departmentId, effectiveDate: input.effectiveFrom }, tx);
+    if (input.reuseFromDate || input.previewDigest) {
+      const previewInput = weeklyPreviewCommand.parse(input);
+      const { preview, plans } = await prepareWeeklySchedules(tx, actor, source, previewInput);
+      if (!preview.canSave) throw new PayrollValidationError(preview.blockers.join(" "));
+      if (!input.previewDigest || input.previewDigest !== preview.previewDigest) throw new PayrollValidationError("The weekly impact changed. Review the refreshed impact before saving; no defaults were changed.");
+      for (const plan of plans) {
+        const { employeeId, effectiveFrom, effectiveTo, sourcePatternId } = plan.employee;
+        const [pattern] = await tx.insert(employeeWeeklyShiftPatterns).values({ employeeId, effectiveFrom, effectiveTo }).returning();
+        await tx.insert(employeeWeeklyShiftPatternDays).values([...plan.snapshots].map(([day, snapshot]) => ({ patternId: pattern.id, weekday: day, scheduleState: snapshot.kind, definitionSnapshot: structuredClone(snapshot), calculationPolicy: calculationPolicyFor(snapshot.calculationPolicy), punchPolicy: punchPolicyFor(snapshot.punchPolicy), shiftTableId: source.templates.has(String(snapshot.shiftTableId)) ? snapshot.shiftTableId : null, shiftName: snapshot.kind === "shift" ? snapshot.shiftName : null, shiftCode: snapshot.shiftCode, checkInTime: snapshot.checkInTime, checkOutTime: snapshot.checkOutTime, breakMinutes: snapshot.breakMinutes, paidBreakMinutes: snapshot.paidBreakMinutes, hoursPerDay: snapshot.hoursPerDay.toFixed(2) })));
+        await invalidateTargets(tx, actor, plan.targets);
+        await rebuildTargets(tx, actor, plan.targets);
+        await recordAdminAuditEvent({ actorUserId: actor.userId, entityType: "employee_weekly_shift_pattern", entityId: pattern.id, action: "employee_weekly_shift_pattern.revised", details: { employeeId, effectiveFrom, effectiveTo, reuseFromDate: input.reuseFromDate, sourcePatternId, days: [...plan.snapshots].map(([day, snapshot]) => ({ day, snapshot })) }, database: tx });
+      }
+      return recordReceipt(tx, actor, input, { requestId: input.requestId, action: "weekly_saved", message: `${plans.length} weekly defaults saved. Confirmed and dated schedules are unchanged. Payroll inputs may need recalculation or review.`, changedCount: plans.length, selectedEmployeeIds: input.employeeIds });
+    }
     if (source.weeklyDigest !== input.sourceDigest) throw new PayrollValidationError("Weekly defaults or employee details changed. Reload before saving; no defaults were changed.");
     if (input.employeeIds.some(id => !source.roster.some(row => row.employee.id === id))) throw new PayrollValidationError("A selected employee is not assigned to this branch.");
     for (const employeeId of input.employeeIds) {
@@ -418,7 +512,7 @@ export async function saveWeeklySchedules(actor: ScheduleActor, raw: ScheduleWee
       await applyWeeklyImpact(tx, actor, source, employeeId, input.effectiveFrom, input.effectiveTo, day => defaultFor(revised, employeeId, day));
       await recordAdminAuditEvent({ actorUserId: actor.userId, entityType: "employee_weekly_shift_pattern", entityId: pattern.id, action: "employee_weekly_shift_pattern.revised", details: { employeeId, effectiveFrom: input.effectiveFrom, effectiveTo: input.effectiveTo, days: [...snapshots].map(([day, snapshot]) => ({ day, snapshot })) }, database: tx });
     }
-    return recordReceipt(tx, actor, input, { requestId: input.requestId, action: "weekly_saved", message: `${input.employeeIds.length} weekly defaults saved. Confirmed period schedules are unchanged.`, changedCount: input.employeeIds.length });
+    return recordReceipt(tx, actor, input, { requestId: input.requestId, action: "weekly_saved", message: `${input.employeeIds.length} weekly defaults saved. Confirmed period schedules are unchanged.`, changedCount: input.employeeIds.length, selectedEmployeeIds: input.employeeIds });
   });
 }
 
@@ -443,7 +537,7 @@ export async function archiveWeeklySchedule(actor: ScheduleActor, raw: ScheduleA
     }
     await applyWeeklyImpact(tx, actor, source, input.employeeId, shiftDate(input.endDate, 1), existing.effectiveTo, day => defaultFor(revised, input.employeeId, day));
     await recordAdminAuditEvent({ actorUserId: actor.userId, entityType: "employee_weekly_shift_pattern", entityId: existing.id, action: "employee_weekly_shift_pattern.ended", details: { previousEffectiveTo: existing.effectiveTo, effectiveTo: input.endDate }, database: tx });
-    return recordReceipt(tx, actor, input, { requestId: input.requestId, action: "weekly_archived", message: "Weekly default end date saved. Its history and confirmed schedules are retained.", changedCount: 1 });
+    return recordReceipt(tx, actor, input, { requestId: input.requestId, action: "weekly_archived", message: "Weekly default end date saved. Its history and confirmed schedules are retained.", changedCount: 1, selectedEmployeeIds: [input.employeeId] });
   });
 }
 
