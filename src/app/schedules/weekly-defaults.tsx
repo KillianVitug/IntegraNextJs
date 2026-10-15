@@ -37,7 +37,7 @@ export function WeeklyDefaults({ workspace, employeeId, busy, savedRevision, rev
   const selectedEmployees = workspace.employees.filter(employee => selected.has(employee.id));
   const extendsSavedWeek = selectedEmployees.some(employee => {
     const pattern = employee.weeklyHistory.filter(pattern => pattern.effectiveFrom <= workspace.effectiveDate && (!pattern.effectiveTo || pattern.effectiveTo >= workspace.effectiveDate)).sort((a, b) => b.id - a.id)[0];
-    return !pattern || pattern.effectiveFrom > effectiveFrom;
+    return Boolean(pattern && pattern.effectiveFrom > effectiveFrom);
   });
   const reuse = Boolean(effectiveFrom && effectiveFrom < workspace.effectiveDate && (!configuredDays.length || extendsSavedWeek));
   const [review, setReview] = useState<{ key: string; result?: ScheduleWeeklyPreview; error?: string } | null>(null);
