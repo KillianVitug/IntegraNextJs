@@ -56,7 +56,8 @@ async function main() {
     ]).returning();
     await database.insert(leavePolicies).values(types.map((type) => ({ leaveTypeId: type.id, grantModel: "Annual" as const })));
     const policiesBefore = await database.select().from(leavePolicies);
-    const balance = await formActions.submitManagerLeaveForm(state, form(values, "balance"));
+    const balanceInput = form(values, "balance"); balanceInput.delete("intent");
+    const balance = await formActions.checkManagerLeaveBalanceForm(state, balanceInput);
     assert.equal(balance.balance?.days, 0); assert.equal(balance.error, undefined);
     assert.deepEqual(await database.select().from(leavePolicies), policiesBefore, "balance check cannot seed policies");
     assert.equal((await database.select().from(leaveBalanceLedger)).length, 0, "balance check cannot grant or reserve leave");
@@ -68,7 +69,8 @@ async function main() {
     assert.equal((await database.select().from(employeeLeaveApprovalEvents)).length, 1, "identical retry creates no second submission audit or record");
 
     const current = { ...values, employeeId: employeeB, leaveType: "VL", reason: "Visible changed person and type" };
-    const saved = await formActions.submitManagerLeaveForm(balance, form(current));
+    const saveInput = form(current); saveInput.delete("intent"); saveInput.set("formRevision", String(balance.revision));
+    const saved = await formActions.saveManagerLeaveForm(state, saveInput);
     assert.equal(saved.error, undefined); assert.equal(saved.values.employeeId, employeeB); assert.equal(saved.values.leaveType, "VL");
     const persisted = await database.query.employeesLeaveRecords.findFirst({ where: eq(employeesLeaveRecords.id, Number(saved.values.id)) });
     assert.equal(persisted?.employeeId, employeeB); assert.equal(persisted?.leaveType, "VL"); assert.match(saved.message ?? "", /Pending/);
@@ -91,7 +93,10 @@ async function main() {
     await assert.rejects(() => actions.cancelManagerLeaveRecord(first.data.id), /Only pending/);
     const changed = await actions.updateManagerLeaveRecord({ ...leaveFormPayload({ ...current, reason: "Updated pending request" }), id: Number(saved.values.id) });
     assert.equal(changed.data.reason, "Updated pending request"); assert.equal(changed.data.leaveStatus, "Pending");
-    await actions.cancelManagerLeaveRecord(changed.data.id);
+    const cancelInput = form({ ...current, id: String(changed.data.id), reason: changed.data.reason ?? "" });
+    cancelInput.delete("intent"); cancelInput.set("formRevision", String(saved.revision));
+    const cancelled = await formActions.cancelManagerLeaveForm(state, cancelInput);
+    assert.match(cancelled.message ?? "", /cancelled/); assert.equal(cancelled.values.id, "");
     assert.equal((await database.query.employeesLeaveRecords.findFirst({ where: eq(employeesLeaveRecords.id, changed.data.id) }))?.leaveStatus, "Cancelled");
 
     const readback = await actions.getManagerLeaveRecordsByYear(2026);
