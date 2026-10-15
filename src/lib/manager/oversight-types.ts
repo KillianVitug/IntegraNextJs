@@ -8,6 +8,8 @@ export type ManagerAttendanceDay = {
   phase: "recorded" | "after-cutoff" | "in-progress" | "future" | "outside-employment";
   scheduleIn: string | null; scheduleOut: string | null; scheduleSource: string;
   scheduleConfigured: boolean; isRestDay: boolean;
+  /** Explicit confirmed working snapshot on a retained designated rest day; never inferred from legacy clock times. */
+  scheduledRestWork?: boolean;
   breaks: Array<{ fromTime: string; toTime: string; requiresPunches: boolean }>;
   scheduledMinutes: number; workedMinutes: number; regularMinutes: number;
   lateMinutes: number; undertimeMinutes: number; overtimeMinutes: number;

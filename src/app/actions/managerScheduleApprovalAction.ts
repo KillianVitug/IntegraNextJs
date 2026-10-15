@@ -17,11 +17,12 @@ import { lockAttendancePayrollInput } from "@/lib/payroll/attendanceSourceGuard"
 import { upsertEmployeeShiftAssignmentSchema } from "@/zod-schemas/employeeShiftAssignment";
 import { recordAdminAuditEvent, requireAdminActor } from "@/lib/admin";
 import { requireAdmin } from "@/lib/auth/server";
+import { applyScheduleOperationRequest } from "@/lib/scheduling/service";
 
 export async function listAdminScheduleChangeRequests() {
   await requireAdmin({ redirectTo: "/" });
 
-  return db
+  const requests = await db
     .select({
       id: managerScheduleChangeRequests.id,
       action: managerScheduleChangeRequests.action,
@@ -52,6 +53,11 @@ export async function listAdminScheduleChangeRequests() {
     )
     .leftJoin(department, eq(employeesGeneralInfo.departmentId, department.id))
     .orderBy(desc(managerScheduleChangeRequests.createdAt));
+  const operationIds = [...new Set(requests.flatMap(request => request.payload.scheduleOperation?.linkedEmployees.map(person => person.employeeId) ?? []))];
+  const operationEmployees = operationIds.length ? await db.select({ id: employees.id, employeeNo: employees.employeeNo, firstName: employees.firstName, lastName: employees.lastName })
+    .from(employees).where(inArray(employees.id, operationIds)) : [];
+  return requests.map(request => ({ ...request, operationEmployees: operationEmployees.filter(person => request.payload.scheduleOperation?.linkedEmployees.some(link => link.employeeId === person.id))
+    .map(person => ({ id: person.id, name: `${person.firstName} ${person.lastName}`, employeeNo: person.employeeNo })) }));
 }
 
 function revalidateScheduleRequestSurfaces() {
@@ -60,6 +66,10 @@ function revalidateScheduleRequestSurfaces() {
   revalidatePath("/managerSchedules");
   revalidatePath("/managerCalendar");
   revalidatePath("/shiftAssignments");
+  revalidatePath("/schedules");
+  revalidatePath("/managerProvisional");
+  revalidatePath("/managerHome");
+  revalidatePath("/payroll/provisional");
 }
 
 function getBundledEffectiveDates(payload: {
@@ -72,7 +82,7 @@ async function resolveAppliedCreateAssignmentId(request: {
   targetAssignmentId: number | null;
   employeeId: string;
   payload: {
-    shiftTableId: number;
+    shiftTableId: number | null;
     effectiveFrom: string;
     effectiveTo?: string | null;
   };
@@ -90,6 +100,7 @@ async function resolveAppliedCreateAssignmentId(request: {
   }
 
   const effectiveTo = request.payload.effectiveTo ?? null;
+  if (request.payload.shiftTableId == null) throw new Error("This request uses captured day values. Open Schedules to record a new revision instead.");
   const matches = await database
     .select({ id: employeeShiftAssignments.id })
     .from(employeeShiftAssignments)
@@ -118,7 +129,7 @@ async function resolveAppliedCreateAssignmentIds(request: {
   targetAssignmentId: number | null;
   employeeId: string;
   payload: {
-    shiftTableId: number;
+    shiftTableId: number | null;
     effectiveFrom: string;
     effectiveTo?: string | null;
     effectiveDates?: string[] | null;
@@ -159,12 +170,26 @@ async function resolveAppliedCreateAssignmentIds(request: {
 export async function approveManagerScheduleChangeRequest(args: {
   requestId: string;
   decisionNote?: string | null;
+  restWorkReviewed?: boolean;
+  restWorkBasis?: "voluntary-written" | "exception-reviewed";
+  restWorkEvidence?: string;
 }) {
   const actor = await requireAdminActor();
   await db.transaction(async tx => {
     await lockAttendancePayrollInput(tx);
-    const [request] = await tx.select().from(managerScheduleChangeRequests).where(and(eq(managerScheduleChangeRequests.id, args.requestId), eq(managerScheduleChangeRequests.status, "Pending"))).for("update");
-    if (!request) throw new Error("Pending schedule change request not found.");
+    const [request] = await tx.select().from(managerScheduleChangeRequests).where(eq(managerScheduleChangeRequests.id, args.requestId)).for("update");
+    if (request?.payload.scheduleOperation && request.status === "Approved") return;
+    if (!request || request.status !== "Pending") throw new Error("Pending schedule change request not found.");
+    if (request.payload.scheduleOperation) {
+      const receipt = await applyScheduleOperationRequest(tx, { userId: actor.userId, role: "ADMIN" }, request, {
+        restWorkReviewed: args.restWorkReviewed, restWorkBasis: args.restWorkBasis, restWorkEvidence: args.restWorkEvidence,
+      });
+      await tx.update(managerScheduleChangeRequests).set({ status: "Approved", decisionNote: args.decisionNote?.trim() || null,
+        decidedByAccountId: actor.userId, decidedAt: new Date(), updatedAt: new Date() }).where(eq(managerScheduleChangeRequests.id, request.id));
+      await recordAdminAuditEvent({ actorUserId: actor.userId, entityType: "manager_schedule_change_request", entityId: request.id,
+        action: "manager_schedule_change_request.approved", details: { operation: request.payload.scheduleOperation.kind, receipt }, database: tx });
+      return;
+    }
     let appliedAssignmentId: number | null = null;
     const appliedAssignmentIds: number[] = [];
     let nextPayload = request.payload;
@@ -200,16 +225,16 @@ export async function denyManagerScheduleChangeRequest(args: {
 }) {
   const actor = await requireAdminActor();
   const note = args.decisionNote?.trim();
-  if (!note) {
-    throw new Error("A denial note is required.");
-  }
-
   await db.transaction(async (tx) => {
+    const [request] = await tx.select().from(managerScheduleChangeRequests).where(eq(managerScheduleChangeRequests.id, args.requestId)).for("update");
+    if (request?.payload.scheduleOperation && request.status === "Denied") return;
+    if (!request || request.status !== "Pending") throw new Error("Pending schedule change request not found.");
+    if (!note && !request.payload.scheduleOperation) throw new Error("A denial note is required.");
     const [updated] = await tx
       .update(managerScheduleChangeRequests)
       .set({
         status: "Denied",
-        decisionNote: note,
+        decisionNote: note || null,
         decidedByAccountId: actor.userId,
         decidedAt: new Date(),
         updatedAt: new Date(),
@@ -261,6 +286,7 @@ export async function voidApprovedManagerScheduleChangeRequest(args: {
   if (!request) {
     throw new Error("Approved schedule request not found.");
   }
+  if (request.payload.scheduleOperation) throw new Error("Captured day changes retain their history. Open Schedules and save a new correction instead of deleting this operation.");
 
   if (request.action !== "Create") {
     throw new Error("Only approved created schedule overrides can be voided.");

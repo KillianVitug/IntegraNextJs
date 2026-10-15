@@ -151,7 +151,9 @@ export async function readManagerAttendanceOverview(actor: { accountId: string; 
         const partial = leaveDays.some(detail => detail.dayPart !== "FullDay" || Number(detail.quantity) > 0 && Number(detail.quantity) < 1)
           || dayLeaves.some(leave => !leave.dayDetails.length && (leave.leaveStartDate ?? leave.dateFiled) === (leave.leaveEndDate ?? leave.leaveStartDate ?? leave.dateFiled) && Number(leave.noOfDays) > 0 && Number(leave.noOfDays) < 1);
         const leaveCoverage: ManagerLeaveCoverage = !dayLeaves.length ? "none" : partial ? "partial-day" : leaveDays.some(detail => detail.dayPart === "FullDay" && Number(detail.quantity) >= 1) ? "full-day" : "unverified";
-        return projectManagerAttendanceDay(canonical, { today, asOfDate, now }, schedule.shiftWindow, Boolean(metricOverride && [metricOverride.lateMinutes, metricOverride.undertimeMinutes, metricOverride.overtimeMinutes].some(value => value != null)), leaveCoverage);
+        const confirmedSchedule = schedule.overrideAssignment?.confirmedSchedule;
+        const scheduledRestWork = confirmedSchedule?.kind === "shift" && confirmedSchedule.designatedRestDay === true;
+        return projectManagerAttendanceDay(canonical, { today, asOfDate, now }, schedule.shiftWindow, Boolean(metricOverride && [metricOverride.lateMinutes, metricOverride.undertimeMinutes, metricOverride.overtimeMinutes].some(value => value != null)), leaveCoverage, scheduledRestWork);
       });
       return { employeeId: employee.id, employeeNo: employee.employeeNo, name: [employee.firstName, employee.middleName, employee.lastName].filter(Boolean).join(" "), actionDays: days.filter(day => day.needsAction).length, days };
     });

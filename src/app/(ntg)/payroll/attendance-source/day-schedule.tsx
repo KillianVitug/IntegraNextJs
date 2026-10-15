@@ -29,7 +29,7 @@ export function DaySchedule({employeeId,day,periodId,label,expanded,onSaved}:{em
    else if(employee.status==="rejected")setError("Schedule saved. The employee view could not refresh; retry this view without saving again.");
   }finally{if(!afterSave){pending.current=false;setBusy(false);}}
  }
- async function complete(receipt:ScheduleReceipt){command.current=null;setSaved(true);setUncertain(false);setMessage(`${receipt.message} DTR summaries updated: ${receipt.summariesRebuilt??0}. Payroll is unchanged. Other employee/day drafts are retained.`);await refresh(true);}
+ async function complete(receipt:ScheduleReceipt){command.current=null;setSaved(true);setUncertain(false);setMessage(`${receipt.message} DTR summaries updated: ${receipt.summariesRebuilt??0}. Attendance inputs were refreshed; affected payroll requires fresh review. No official payroll was posted. Other employee/day drafts are retained.`);await refresh(true);}
  async function save(){
   if(pending.current||contextStale||!context||!selected)return;pending.current=true;setBusy(true);setError("");
   const input=command.current??{requestId:generateUUID(),departmentId:context.departmentId,periodId:context.periodId,sourceDigest:context.sourceDigest,expectedDraftId:context.expectedDraftId,expectedDraftRevision:context.expectedDraftRevision,changes:[{employeeId,day,value:selected,...(custom?{customTimes:{start,end}}:{})}]};
@@ -39,6 +39,7 @@ export function DaySchedule({employeeId,day,periodId,label,expanded,onSaved}:{em
    const result=await confirmScheduleDays(input);
    if(result.ok){await complete(result.receipt);return;}
    const receipt=await getScheduleRequestReceipt(input.requestId);if(receipt){await complete(receipt);return;}
+   if(result.uncertain){setUncertain(true);setError("The saved outcome is not confirmed. Check status and retry this same request; your selection and request reference are retained.");return;}
    command.current=null;setUncertain(false);setMessage("");setError(result.error);
   }catch{
    setUncertain(true);

@@ -5,6 +5,10 @@ verification and deployment status. This checkout also follows its parent
 workspace's AGENTS.md and docs/MASTER_PLAN.md while used inside that workspace.
 Preserve unrelated changes and distinguish plans from implemented/verified work.
 
+For the local manager schedule-actions candidate, also read
+[docs/MANAGER_SCHEDULE_ACTIONS.md](docs/MANAGER_SCHEDULE_ACTIONS.md). Its local
+verification does not imply production deployment.
+
 For every app analysis or change, assess Philippine labor-rights/pay impact. For
 attendance, schedules, working time, overtime, undertime, lateness, breaks, leave,
 wages, deductions, benefits or approvals, read

@@ -23,24 +23,31 @@ const sources = ["Confirmed period schedule", "Weekly default", "Dated schedule"
 
 /** Explicit allowlist: canonical finding labels, warnings and punch reasons can
  * contain unbounded source/admin text. Only their codes and typed facts leave here. */
-export function projectManagerAttendanceDay(day: ProvisionalDay, scope: { today: string; asOfDate: string; now?: Date }, schedule?: ShiftWindow, hasTimeOverride = false, leaveCoverage: ManagerLeaveCoverage = day.review?.approvedLeave ? "unverified" : "none"): ManagerAttendanceDay {
+export function projectManagerAttendanceDay(day: ProvisionalDay, scope: { today: string; asOfDate: string; now?: Date }, schedule?: ShiftWindow, hasTimeOverride = false, leaveCoverage: ManagerLeaveCoverage = day.review?.approvedLeave ? "unverified" : "none", scheduledRestWork = false): ManagerAttendanceDay {
   // A workday crossing midnight remains underway until its resolved shift end.
   // This only changes review membership; payroll attendance arithmetic is untouched.
   const start = schedule?.checkInTime ? Date.parse(`${day.date}T${schedule.checkInTime}+08:00`) : NaN;
   let end = schedule?.checkOutTime ? Date.parse(`${day.date}T${schedule.checkOutTime}+08:00`) : NaN;
   if (end <= start) end += 86400000;
-  const shiftUnderway = !day.isRestDay && day.review?.scheduleConfigured && scope.now && start <= scope.now.getTime() && scope.now.getTime() < end;
+  const shiftUnderway = (!day.isRestDay || scheduledRestWork) && day.review?.scheduleConfigured && scope.now && start <= scope.now.getTime() && scope.now.getTime() < end;
   const phase: ManagerAttendanceDay["phase"] = day.review?.eligible === false ? "outside-employment"
     : day.date > scope.today ? "future" : day.date === scope.today || shiftUnderway ? "in-progress"
     : day.date > scope.asOfDate ? "after-cutoff" : "recorded";
-  const review = getProvisionalDayReview(phase === "in-progress" ? { ...day, status: "In progress" } : day, scope);
+  const reviewDay: ProvisionalDay = phase === "in-progress" ? { ...day, status: "In progress" } : day;
+  const review = getProvisionalDayReview(reviewDay, scope);
+  // Reuse only the missing-evidence rule for an explicit work arrangement. The
+  // returned rest designation and every attendance/payroll quantity stay intact.
+  if (scheduledRestWork && day.isRestDay && leaveCoverage === "none") {
+    const missing = getProvisionalDayReview({ ...reviewDay, isRestDay: false }, scope).findings.find(finding => finding.code === "scheduled-no-attendance");
+    if (missing) review.findings.push(missing);
+  }
   const findings: ManagerAttendanceDay["findings"] = review.findings.map(finding => ({ code: finding.code, label: labels[finding.code], needsAction: review.inScope && finding.blocking }));
   if (leaveCoverage === "partial-day") findings.push({ code: "partial-leave", label: labels["partial-leave"], needsAction: review.inScope });
   return {
     date: day.date, phase,
     scheduleIn: clock(day.scheduleIn), scheduleOut: clock(day.scheduleOut),
     scheduleSource: sources.includes(day.scheduleSource) ? day.scheduleSource : "Employee default",
-    scheduleConfigured: day.review?.scheduleConfigured === true, isRestDay: day.isRestDay === true,
+    scheduleConfigured: day.review?.scheduleConfigured === true, isRestDay: day.isRestDay === true, scheduledRestWork,
     breaks: (schedule?.regularBreakWindows ?? []).filter(window => clock(window.fromTime) && clock(window.toTime)).map(window => ({ fromTime: clock(window.fromTime)!, toTime: clock(window.toTime)!, requiresPunches: window.requiresPunches === true })),
     scheduledMinutes: minutes(day.scheduledMinutes), workedMinutes: minutes(day.workedMinutes), regularMinutes: minutes(day.regularMinutes),
     lateMinutes: minutes(day.review?.lateMinutes), undertimeMinutes: minutes(day.review?.undertimeMinutes), overtimeMinutes: minutes(day.review?.overtimeMinutes),

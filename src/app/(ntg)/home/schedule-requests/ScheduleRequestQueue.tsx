@@ -1,7 +1,9 @@
 "use client";
 import { shiftTableScheduleLabel } from "@/lib/scheduling/presentation";
+import { scheduleLabel } from "@/lib/scheduling/model";
+import type { ScheduleSnapshot } from "@/lib/scheduling/workspace-types";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -28,15 +30,25 @@ type RequestRow = Awaited<ReturnType<typeof listAdminScheduleChangeRequests>>[nu
 type ShiftTableOption = Awaited<ReturnType<typeof fetchShiftTables>>[number];
 
 function formatShiftTableLabel(
-  shiftTableId: number,
+  shiftTableId: number | null,
   shiftTableMap: Map<number, ShiftTableOption>,
 ) {
+  if (shiftTableId == null) return "Captured day schedule";
   const shiftTable = shiftTableMap.get(shiftTableId);
   if (!shiftTable) {
     return `Unknown shift table (#${shiftTableId})`;
   }
 
   return shiftTableScheduleLabel(shiftTable);
+}
+
+function operationLabel(request: RequestRow) {
+  const kind = request.payload.scheduleOperation?.kind;
+  return kind === "cover" ? "Arrange cover" : kind === "swap" ? "Swap schedules" : kind === "adjust" ? "Change this day" : request.action;
+}
+function ScheduleValue({ value }: { value: ScheduleSnapshot }) {
+  return <div><p>{scheduleLabel(value)}</p>{value.designatedRestDay && <p className="font-medium">Designated rest day retained</p>}
+    {value.breaks.map((item, index) => <p className="text-xs" key={index}>{item.label}: {item.fromTime}–{item.toTime} · {item.deduct ? `${item.deductHours * 60 + item.deductMinutes} min unpaid` : "Paid"}{item.requiresPunches ? " · OUT and IN required" : ""}</p>)}</div>;
 }
 
 function formatCoverage(request: RequestRow | null) {
@@ -95,41 +107,61 @@ export function ScheduleRequestQueue({
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
   const [decisionNote, setDecisionNote] = useState("");
   const [isPending, startTransition] = useTransition();
+  const [restWorkReviewed, setRestWorkReviewed] = useState(false);
+  const [restWorkBasis, setRestWorkBasis] = useState<"" | "voluntary-written" | "exception-reviewed">("");
+  const [restWorkEvidence, setRestWorkEvidence] = useState("");
+  const [error, setError] = useState("");
+  const errorRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => { if (error) errorRef.current?.focus(); }, [error]);
   const shiftTableMap = new Map(
     shiftTables.map((shiftTable) => [shiftTable.id, shiftTable]),
   );
   const selectedRequest =
     requests.find((request) => request.id === selectedRequestId) ?? null;
   const canDecide = selectedRequest?.status === "Pending";
-  const selectedShift = selectedRequest ? shiftTableMap.get(selectedRequest.payload.shiftTableId) : null;
-  const unavailableShift = Boolean(canDecide && selectedRequest?.action !== "Delete" && (!selectedShift || selectedShift.archivedAt));
+  const operation = selectedRequest?.payload.scheduleOperation;
+  const restReviewIncomplete = Boolean(operation?.requiresRestReview && (!restWorkReviewed || !restWorkBasis || !restWorkEvidence.trim()));
+  const selectedShift = selectedRequest?.payload.shiftTableId != null ? shiftTableMap.get(selectedRequest.payload.shiftTableId) : null;
+  const unavailableShift = Boolean(canDecide && !operation && selectedRequest?.action !== "Delete" && (!selectedShift || selectedShift.archivedAt));
   const canVoid =
-    selectedRequest?.status === "Approved" && selectedRequest.action === "Create";
+    selectedRequest?.status === "Approved" && selectedRequest.action === "Create" && !operation;
   const canEditDecisionNote = canDecide || canVoid;
 
   function selectRequest(request: RequestRow) {
+    if (isPending) return;
     setSelectedRequestId(request.id);
     setDecisionNote(request.decisionNote ?? "");
+    setRestWorkReviewed(false);
+    setRestWorkBasis(""); setRestWorkEvidence("");
+    setError("");
   }
 
   function cancelSelection() {
     setSelectedRequestId(null);
     setDecisionNote("");
+    setRestWorkReviewed(false);
+    setRestWorkBasis(""); setRestWorkEvidence("");
+    setError("");
   }
 
   function approve() {
-    if (!selectedRequest || !canDecide || unavailableShift) return;
+    if (!selectedRequest || !canDecide || unavailableShift || restReviewIncomplete) return;
+    setError("");
 
     startTransition(async () => {
       try {
         await approveManagerScheduleChangeRequest({
           requestId: selectedRequest.id,
           decisionNote,
+          restWorkReviewed,
+          restWorkBasis: restWorkBasis || undefined,
+          restWorkEvidence,
         });
         toast.success("Schedule request approved.");
         cancelSelection();
         router.refresh();
       } catch (error) {
+        setError(error instanceof Error ? error.message : "Unable to approve request. Your selection is retained.");
         toast.error(
           error instanceof Error ? error.message : "Unable to approve request.",
         );
@@ -140,12 +172,13 @@ export function ScheduleRequestQueue({
   function deny() {
     if (!selectedRequest || !canDecide) return;
     const note = decisionNote.trim();
-    if (!note) {
+    if (!note && !operation) {
       toast.error("A denial note is required.");
       return;
     }
 
     startTransition(async () => {
+      setError("");
       try {
         await denyManagerScheduleChangeRequest({
           requestId: selectedRequest.id,
@@ -155,6 +188,7 @@ export function ScheduleRequestQueue({
         cancelSelection();
         router.refresh();
       } catch (error) {
+        setError(error instanceof Error ? error.message : "Unable to deny request. Your selection is retained.");
         toast.error(
           error instanceof Error ? error.message : "Unable to deny request.",
         );
@@ -263,7 +297,7 @@ export function ScheduleRequestQueue({
           <div>
             <label className="mb-2 block text-sm font-medium">Action</label>
             <Input
-              value={selectedRequest?.action ?? ""}
+              value={selectedRequest ? operationLabel(selectedRequest) : ""}
               readOnly
               className="cursor-not-allowed bg-muted text-muted-foreground"
             />
@@ -277,12 +311,13 @@ export function ScheduleRequestQueue({
             />
           </div>
           <div>
-            <label className="mb-2 block text-sm font-medium">Decision Note</label>
+            <label htmlFor="schedule-decision-note" className="mb-2 block text-sm font-medium">Decision Note</label>
             <Textarea
+              id="schedule-decision-note"
               value={decisionNote}
               onChange={(event) => setDecisionNote(event.target.value)}
               placeholder={
-                canVoid ? "Required when voiding" : "Required when denying"
+                canVoid ? "Required when voiding" : operation ? "Optional review note" : "Required when denying"
               }
               readOnly={!canEditDecisionNote}
               className={
@@ -294,9 +329,25 @@ export function ScheduleRequestQueue({
           </div>
         </div>
 
+        {operation && selectedRequest && <section aria-label="Captured schedule changes" className="mt-4 space-y-3 rounded-lg border p-3">
+          <h2 className="font-semibold">{operationLabel(selectedRequest)} · {operation.day}</h2>
+          {operation.kind === "cover" && <p className="text-sm">Coverage retains the unavailable employee's original schedule and attendance/leave review.</p>}
+          {operation.requestReasons.map(reason => <p className="text-sm" key={reason}>{reason}</p>)}
+          {operation.cells.map(cell => <article key={`${cell.employeeId}-${cell.day}`} className="rounded border p-3 text-sm">
+            <h3 className="font-semibold">{selectedRequest.operationEmployees.find(person => person.id === cell.employeeId)?.name ?? "Employee record unavailable"} · {cell.day}</h3>
+            <div className="mt-2 grid gap-3 sm:grid-cols-2"><div><p className="font-medium">Before</p><ScheduleValue value={cell.before} /></div><div><p className="font-medium">Requested</p><ScheduleValue value={cell.after} /></div></div>
+          </article>)}
+          {canDecide && operation.requiresRestReview && <fieldset className="space-y-3 rounded border p-3 text-sm" disabled={isPending}><legend className="font-medium">Rest-day work review</legend>
+            <label className="block">Basis<select className="mt-1 min-h-11 w-full rounded border bg-background px-3" value={restWorkBasis} onChange={event => setRestWorkBasis(event.target.value as typeof restWorkBasis)}><option value="">Choose the reviewed basis</option><option value="voluntary-written">Employee's written willingness</option><option value="exception-reviewed">Applicable rest-day work exception reviewed</option></select></label>
+            <label className="block">Evidence or record reference<textarea className="mt-1 min-h-20 w-full rounded border bg-background p-3" maxLength={1000} value={restWorkEvidence} onChange={event => setRestWorkEvidence(event.target.value)} placeholder="Reference the written willingness or the facts supporting the applicable exception." /></label>
+            <label className="flex min-h-11 items-start gap-2"><input type="checkbox" className="mt-1" checked={restWorkReviewed} onChange={event => setRestWorkReviewed(event.target.checked)} /><span>I reviewed the rest-day arrangement and its evidence. The original rest-day designation stays on the schedule; this does not approve or determine pay.</span></label>
+          </fieldset>}
+          <p className="text-xs text-muted-foreground">Approval applies these captured values together only if current inputs still match. Derived attendance inputs are refreshed; official payroll requires recalculation and review. Later corrections retain this history.</p>
+        </section>}
+        {error && <p ref={errorRef} tabIndex={-1} role="alert" className="mt-3 rounded border border-red-400 p-3 text-sm">{error}</p>}
         {unavailableShift && <p role="status" className="mt-3 text-sm text-amber-700 dark:text-amber-300">This request uses an archived or unavailable schedule version. Its original details are retained. Deny it with an explanation, then prepare the replacement in <a className="underline" href="/schedules">Schedules</a>.</p>}
-        <div className="mt-4 flex gap-2">
-          <Button type="button" disabled={!canDecide || unavailableShift || isPending} onClick={approve}>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button type="button" disabled={!canDecide || unavailableShift || isPending || restReviewIncomplete} onClick={approve}>
             Approve
           </Button>
           <Button
@@ -349,9 +400,9 @@ export function ScheduleRequestQueue({
                 onClick={() => selectRequest(request)}
               >
                 <TableCell>
-                  <div className="font-medium">
+                  <button type="button" disabled={isPending} className="min-h-11 text-left font-medium underline-offset-4 hover:underline focus-visible:outline focus-visible:outline-2 disabled:opacity-50" onClick={event => { event.stopPropagation(); selectRequest(request); }}>
                     {request.lastName}, {request.firstName}
-                  </div>
+                  </button>
                   <div className="text-xs text-muted-foreground">
                     {formatEmployeeNoDisplay(request.employeeNo)}
                   </div>
@@ -361,7 +412,7 @@ export function ScheduleRequestQueue({
                 </TableCell>
                 <TableCell>{request.requesterEmail}</TableCell>
                 <TableCell>
-                  {formatShiftTableLabel(request.payload.shiftTableId, shiftTableMap)}
+                  {request.payload.scheduleOperation ? operationLabel(request) : formatShiftTableLabel(request.payload.shiftTableId, shiftTableMap)}
                 </TableCell>
                 <TableCell>{formatCoverage(request)}</TableCell>
                 <TableCell>

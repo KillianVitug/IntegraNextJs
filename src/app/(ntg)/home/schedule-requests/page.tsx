@@ -8,12 +8,14 @@ import {
 import { listAdminScheduleChangeRequests } from "@/app/actions/managerScheduleApprovalAction";
 import { fetchShiftTables } from "@/lib/queries/fetchLookupData";
 import { ScheduleRequestQueue } from "./ScheduleRequestQueue";
+import { requireAdmin } from "@/lib/auth/server";
 
 export const metadata = {
   title: "Schedule Request",
 };
 
 export default async function ScheduleRequestsPage() {
+  await requireAdmin({ redirectTo: "/" });
   const [requests, shiftTables] = await Promise.all([
     listAdminScheduleChangeRequests(),
     fetchShiftTables({ includeArchived: true }),
@@ -28,8 +30,8 @@ export default async function ScheduleRequestsPage() {
           Schedule Request
         </h1>
         <p className="text-sm text-muted-foreground">
-          Review manager-submitted sudden schedule requests, approve or deny
-          pending changes, and void approved created overrides when needed.
+          Review manager schedule changes, coverage and swaps before applying them.
+          Captured day changes retain their history; later corrections create new revisions.
         </p>
       </div>
 
@@ -73,9 +75,8 @@ export default async function ScheduleRequestsPage() {
         <CardHeader className="pb-3">
           <CardTitle>Schedule Request Queue</CardTitle>
           <CardDescription>
-            Approving a request updates the employee shift override using the
-            existing schedule approval flow. Approved created overrides can be
-            voided from this queue.
+            Review every affected employee and date. Approval rechecks current scope,
+            schedules and payroll protections. Changed inputs require a fresh request.
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
