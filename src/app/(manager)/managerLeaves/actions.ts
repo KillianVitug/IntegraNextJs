@@ -6,11 +6,33 @@ import {
 import { z } from "zod";
 import { leaveFormPayload, readLeaveFormValues, safeLeaveError, type LeaveFormState } from "./form-state";
 
-export async function submitManagerLeaveForm(previous: LeaveFormState, formData: FormData): Promise<LeaveFormState> {
+type LeaveIntent = "save" | "balance" | "cancel";
+
+async function runManagerLeaveForm(previous: LeaveFormState, formData: FormData, explicitIntent?: LeaveIntent): Promise<LeaveFormState> {
   const values = readLeaveFormValues(formData);
-  const state: LeaveFormState = { values, revision: previous.revision + 1 };
+  const previousRevision = Number.isSafeInteger(previous.revision) && previous.revision >= 0 && previous.revision < Number.MAX_SAFE_INTEGER ? previous.revision : 0;
+  let state: LeaveFormState = { values, revision: previousRevision + 1 };
   try {
-    const intent = String(formData.get("intent") ?? "save");
+    // All three action states post the latest displayed revision. It orders UI
+    // replies only; employee authority and request status remain server checks.
+    const revisions = formData.getAll("formRevision");
+    if (revisions.length > 1) return { ...state, error: "The form changed. Reload before trying again. No changes were saved." };
+    if (revisions.length && (typeof revisions[0] !== "string" || !/^(0|[1-9]\d*)$/.test(revisions[0]))) {
+      return { ...state, error: "The form changed. Reload before trying again. No changes were saved." };
+    }
+    const postedRevision = revisions.length ? Number(revisions[0]) : previousRevision;
+    if (!Number.isSafeInteger(postedRevision) || postedRevision < 0 || postedRevision >= Number.MAX_SAFE_INTEGER) {
+      return { ...state, error: "The form changed. Reload before trying again. No changes were saved." };
+    }
+    state = { ...state, revision: Math.max(previousRevision, postedRevision) + 1 };
+    const intents = formData.getAll("intent");
+    const suppliedIntent = intents.length === 1 && typeof intents[0] === "string" && ["save", "balance", "cancel"].includes(intents[0]) ? intents[0] as LeaveIntent : null;
+    // Explicit wrappers use their server action identity, including native POSTs.
+    // Legacy/ambiguous calls must never fall through to a business mutation.
+    if ((!explicitIntent && !suppliedIntent) || (intents.length > 0 && (!suppliedIntent || (explicitIntent && explicitIntent !== suppliedIntent)))) {
+      return { ...state, error: "Choose an action and try again. No changes were saved." };
+    }
+    const intent = explicitIntent ?? suppliedIntent;
     if (intent === "balance") {
       z.string().uuid("Select an employee.").parse(values.employeeId);
       z.string().min(1, "Select a leave type.").parse(values.leaveType);
@@ -42,4 +64,20 @@ export async function submitManagerLeaveForm(previous: LeaveFormState, formData:
   } catch (error) {
     return { ...state, error: safeLeaveError(error) };
   }
+}
+
+export async function submitManagerLeaveForm(previous: LeaveFormState, formData: FormData): Promise<LeaveFormState> {
+  return runManagerLeaveForm(previous, formData);
+}
+
+export async function saveManagerLeaveForm(previous: LeaveFormState, formData: FormData): Promise<LeaveFormState> {
+  return runManagerLeaveForm(previous, formData, "save");
+}
+
+export async function checkManagerLeaveBalanceForm(previous: LeaveFormState, formData: FormData): Promise<LeaveFormState> {
+  return runManagerLeaveForm(previous, formData, "balance");
+}
+
+export async function cancelManagerLeaveForm(previous: LeaveFormState, formData: FormData): Promise<LeaveFormState> {
+  return runManagerLeaveForm(previous, formData, "cancel");
 }

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { formatEmployeeNoDisplay } from "@/utils/employeeDisplay";
-import { submitManagerLeaveForm } from "./actions";
+import { cancelManagerLeaveForm, checkManagerLeaveBalanceForm, saveManagerLeaveForm } from "./actions";
 import type { LeaveFormState } from "./form-state";
 
 type Props = {
@@ -17,11 +17,15 @@ type Props = {
 
 export function ManagerLeaveForm({ employees, leaveTypes, initialState, permalink }: Props) {
   const actionPermalink = permalink ?? `/managerLeaves?year=${encodeURIComponent(initialState.values.year)}${initialState.values.id ? `&editLeaveId=${encodeURIComponent(initialState.values.id)}` : ""}`;
-  const [state, action, pending] = useActionState(submitManagerLeaveForm, initialState, actionPermalink);
+  const [saveState, saveAction, saving] = useActionState(saveManagerLeaveForm, initialState, actionPermalink);
+  const [balanceState, balanceAction, checkingBalance] = useActionState(checkManagerLeaveBalanceForm, initialState, actionPermalink);
+  const [cancelState, cancelAction, cancelling] = useActionState(cancelManagerLeaveForm, initialState, actionPermalink);
+  const state = [saveState, balanceState, cancelState].reduce((latest, next) => next.revision > latest.revision ? next : latest, initialState);
+  const pending = saving || checkingBalance || cancelling;
   const values = state.values;
   const selectClass = "flex min-h-11 w-full rounded-md border bg-background px-3 py-2 text-base md:text-sm";
   return (
-    <form action={action} className="space-y-3 rounded-md border p-3">
+    <form action={saveAction} aria-busy={pending} className="space-y-3 rounded-md border p-3">
       <h2 className="text-lg font-semibold">{values.id ? `Edit request #${values.id}` : "New leave request"}</h2>
       <p className="text-sm text-muted-foreground">Select the employee and leave type for this request. Filing keeps it pending for HR review. Only your pending requests can be changed.</p>
       {state.error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{state.error}</p> : null}
@@ -32,6 +36,7 @@ export function ManagerLeaveForm({ employees, leaveTypes, initialState, permalin
         <input type="hidden" name="id" value={values.id} />
         <input type="hidden" name="year" value={values.year} />
         <input type="hidden" name="dayPart" value={values.dayPart} />
+        <input type="hidden" name="formRevision" value={state.revision} />
         <div className="grid items-start gap-3 md:grid-cols-2 xl:grid-cols-3">
           <div>
             <label className="mb-1.5 block text-sm font-medium" htmlFor="leave-employee">Employee</label>
@@ -66,9 +71,9 @@ export function ManagerLeaveForm({ employees, leaveTypes, initialState, permalin
           </div>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-          <Button type="submit" name="intent" value="save" className="min-h-11">{pending ? "Please wait…" : values.id ? "Update request" : "Submit request"}</Button>
-          <Button type="submit" name="intent" value="balance" formNoValidate variant="outline" className="min-h-11">Check balance</Button>
-          {values.id ? <Button type="submit" name="intent" value="cancel" formNoValidate variant="destructive" className="min-h-11">Cancel request</Button> : null}
+          <Button type="submit" formAction={saveAction} className="min-h-11">{saving ? "Please wait…" : values.id ? "Update request" : "Submit request"}</Button>
+          <Button type="submit" formAction={balanceAction} formNoValidate variant="outline" className="min-h-11">{checkingBalance ? "Checking balance…" : "Check balance"}</Button>
+          {values.id ? <Button type="submit" formAction={cancelAction} formNoValidate variant="destructive" className="min-h-11">{cancelling ? "Cancelling…" : "Cancel request"}</Button> : null}
           <Button asChild variant="outline" className="min-h-11"><a href={`/managerLeaves?year=${values.year}`}>Start a new request</a></Button>
         </div>
       </fieldset>
